@@ -4,7 +4,7 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
 
-use std::io;
+use std::{io, net::IpAddr};
 
 pub use os::*;
 
@@ -119,6 +119,12 @@ impl Interface {
   /// interface.
   pub fn addresses(&self) -> io::Result<Vec<IpNet>> {
     interface_addr_table(self.index)
+  }
+
+  /// Returns a list of multicast, joined group addresses
+  /// for a specific interface.
+  pub fn multicast_addresses(&self) -> io::Result<Vec<IpAddr>> {
+    interface_multiaddr_table(self.index)
   }
 }
 
