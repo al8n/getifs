@@ -1,8 +1,8 @@
 use ipnet::ip_mask_to_prefix;
 use libc::{
-  c_void, if_msghdr, ifa_msghdr, ifma_msghdr2, size_t, sysctl, AF_INET, AF_INET6, AF_LINK,
+  c_void, if_msghdr, ifa_msghdr, size_t, sysctl, AF_INET, AF_INET6, AF_LINK,
   AF_ROUTE, AF_UNSPEC, CTL_NET, NET_RT_IFLIST, NET_RT_IFLIST2, RTAX_BRD, RTAX_IFA, RTAX_MAX,
-  RTAX_NETMASK, RTM_IFINFO, RTM_NEWADDR, RTM_NEWMADDR2, RTM_VERSION,
+  RTAX_NETMASK, RTM_IFINFO, RTM_NEWADDR, RTM_VERSION,
 };
 use smol_str::SmolStr;
 use std::{
@@ -366,7 +366,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<Vec<Interface>> {
           mtu: ifm.ifm_data.ifi_mtu,
           name,
           mac_addr: _mac,
-          flags: Flags::from_bits_retain(ifm.ifm_flags as u32),
+          flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
         };
         results.push(interface);
       }
@@ -501,7 +501,14 @@ pub(super) fn interface_multiaddr_table(idx: u32) -> io::Result<Vec<IpAddr>> {
   const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr>();
 
   unsafe {
-    let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, libc::NET_RT_IFMALIST, idx as i32];
+    let mut mib = [
+      CTL_NET,
+      AF_ROUTE,
+      0,
+      AF_UNSPEC,
+      libc::NET_RT_IFMALIST,
+      idx as i32,
+    ];
 
     // Get buffer size
     let mut len: size_t = 0;

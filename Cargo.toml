@@ -29,10 +29,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-netlink-sys = "0.8"
-netlink-packet-route = "0.21"
-netlink-packet-core = "0.7"
-netlink-packet-utils = "0.5"
+either = "1"
 
 
 [dev-dependencies]
@@ -47,6 +44,4 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints.rust]
 rust_2018_idioms = "warn"
 single_use_lifetimes = "warn"
-unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(all_tests)',
-] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(all_tests)'] }

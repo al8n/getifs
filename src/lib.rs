@@ -6,7 +6,7 @@
 
 use std::{io, net::IpAddr};
 
-pub use bsd_like::*;
+pub use os::*;
 
 pub use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 pub use smol_str::SmolStr;
@@ -27,10 +27,10 @@ mod os;
   target_os = "openbsd",
 ))]
 #[path = "bsd_like.rs"]
-mod bsd_like;
+mod os;
 
 /// Represents a physical hardware address (MAC address).
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct MacAddr([u8; 6]);
 
 impl MacAddr {
@@ -45,6 +45,12 @@ impl AsRef<[u8]> for MacAddr {
   #[inline]
   fn as_ref(&self) -> &[u8] {
     self.as_bytes()
+  }
+}
+
+impl core::fmt::Debug for MacAddr {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    core::fmt::Display::fmt(self, f)
   }
 }
 
@@ -66,6 +72,19 @@ pub struct Interface {
   name: SmolStr,
   mac_addr: Option<MacAddr>,
   flags: Flags,
+}
+
+impl Interface {
+  #[inline]
+  fn new(index: u32, flags: Flags) -> Self {
+    Self {
+      index,
+      mtu: 0,
+      name: SmolStr::default(),
+      mac_addr: None,
+      flags,
+    }
+  }
 }
 
 impl core::fmt::Debug for Interface {
@@ -115,11 +134,11 @@ impl Interface {
     self.flags
   }
 
-  // /// Returns a list of unicast interface addresses for a specific
-  // /// interface.
-  // pub fn addresses(&self) -> io::Result<Vec<IpNet>> {
-  //   interface_addr_table(self.index)
-  // }
+  /// Returns a list of unicast interface addresses for a specific
+  /// interface.
+  pub fn addresses(&self) -> io::Result<Vec<IpNet>> {
+    interface_addr_table(self.index)
+  }
 
   // /// Returns a list of multicast, joined group addresses
   // /// for a specific interface.
@@ -137,17 +156,17 @@ impl Interface {
   // }
 }
 
-// /// Returns a list of the system's network interfaces.
-// pub fn interfaces() -> io::Result<Vec<Interface>> {
-//   interface_table(0)
-// }
+/// Returns a list of the system's network interfaces.
+pub fn interfaces() -> io::Result<Vec<Interface>> {
+  interface_table(0)
+}
 
-// /// Returns the interface specified by index.
-// pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
-//   interface_table(index).map(|v| v.into_iter().find(|ifi| ifi.index == index))
-// }
+/// Returns the interface specified by index.
+pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
+  interface_table(index).map(|v| v.into_iter().find(|ifi| ifi.index == index))
+}
 
-// /// Returns the interface specified by name.
-// pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
-//   interface_table(0).map(|v| v.into_iter().find(|ifi| ifi.name == name))
-// }
+/// Returns the interface specified by name.
+pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
+  interface_table(0).map(|v| v.into_iter().find(|ifi| ifi.name == name))
+}

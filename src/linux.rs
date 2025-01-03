@@ -1,16 +1,18 @@
-use libc::{
-  ifconf, ifreq, ioctl, sockaddr, socket, AF_INET, RTM_GETLINK, SIOCGIFCONF, SIOCGIFFLAGS,
-  SIOCGIFHWADDR, SIOCGIFMTU, SOCK_DGRAM,
-};
+use std::io;
 
-use std::{ffi::CStr, io, mem, net::SocketAddr, slice::from_raw_parts};
+use ipnet::IpNet;
+use libc::{
+  AF_UNSPEC, RTM_GETADDR, RTM_GETLINK
+};
 
 use crate::MacAddr;
 
 use super::Interface;
 
-#[path = "linux/nl.rs"]
-mod nl;
+#[path = "linux/netlink.rs"]
+mod netlink;
+
+use netlink::netlink_rib;
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.
@@ -51,93 +53,18 @@ bitflags::bitflags! {
   }
 }
 
-/// Returns a list of the system's network interfaces.
-pub fn interfaces() -> io::Result<Vec<Interface>> {
-  unsafe {
-    let sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if sock < 0 {
-      return Err(io::Error::last_os_error());
-    }
 
-    // First call with null buffer to get required size
-    let mut ifc: ifconf = mem::zeroed();
-    if ioctl(sock, SIOCGIFCONF, &mut ifc) < 0 {
-      let _ = libc::close(sock);
-      return Err(io::Error::last_os_error());
-    }
+pub(super) fn interface_table(ifi: u32) -> io::Result<Vec<Interface>> {
+  netlink_rib(RTM_GETLINK as i32, AF_UNSPEC).map(|res| res.expect_left("must be interfaces when query type is GETLINK"))
+}
 
-    // Allocate exact buffer size needed
-    let mut buffer = vec![0u8; ifc.ifc_len as usize];
-    ifc.ifc_ifcu.ifcu_buf = buffer.as_mut_ptr() as *mut _;
-
-    // Second call to get actual interface data
-    if ioctl(sock, SIOCGIFCONF, &mut ifc) < 0 {
-      let _ = libc::close(sock);
-      return Err(io::Error::last_os_error());
-    }
-
-    let ifreqs = from_raw_parts(
-      ifc.ifc_ifcu.ifcu_req as *const ifreq,
-      ifc.ifc_len as usize / mem::size_of::<ifreq>(),
-    );
-
-    let mut results = Vec::with_capacity(ifreqs.len());
-
-    for ifreq in ifreqs {
-      let name = CStr::from_ptr(ifreq.ifr_name.as_ptr()).to_string_lossy();
-
-      let mut ifr = *ifreq;
-
-      // Get interface index
-      let index = libc::if_nametoindex(ifreq.ifr_name.as_ptr());
-
-      // Get flags
-      let flags = if ioctl(sock, SIOCGIFFLAGS, &mut ifr) < 0 {
-        let _ = libc::close(sock);
-        return Err(io::Error::last_os_error());
-      } else {
-        ifr.ifr_ifru.ifru_flags as u32
-      };
-
-      // Get MTU
-      let mtu = if ioctl(sock, SIOCGIFMTU, &mut ifr) < 0 {
-        let _ = libc::close(sock);
-        return Err(io::Error::last_os_error());
-      } else {
-        ifr.ifr_ifru.ifru_mtu as u32
-      };
-
-      // Get hardware address (this one can fail as not all interfaces have MAC)
-      let mac_addr = if ioctl(sock, SIOCGIFHWADDR, &mut ifr) >= 0 {
-        let sa = &ifr.ifr_ifru.ifru_hwaddr as *const sockaddr;
-        let data = (*sa).sa_data;
-        let addr: [u8; 6] = data[..6].try_into().unwrap();
-        if addr == [0; 6] {
-          None
-        } else {
-          Some(MacAddr(addr))
-        }
-      } else {
-        return Err(io::Error::last_os_error());
-      };
-
-      results.push(Interface {
-        index: index as u32,
-        name: name.into(),
-        mtu,
-        mac_addr,
-        flags: Flags::from_bits_retain(flags),
-      });
-    }
-
-    let _ = libc::close(sock);
-    Ok(results)
-  }
+pub(super) fn interface_addr_table(idx: u32) -> io::Result<Vec<IpNet>> {
+  netlink_rib(RTM_GETADDR as i32, AF_UNSPEC).map(|res| res.expect_right("must be ipnets when query type is GETADDR"))
 }
 
 #[test]
 fn test_interfaces() {
-  let interfaces = interfaces().unwrap();
+  let interfaces = interface_table(0).unwrap();
   for interface in interfaces {
     println!("{:?}", interface);
   }
