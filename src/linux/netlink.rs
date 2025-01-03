@@ -1,5 +1,4 @@
 use core::slice;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use either::Either;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use libc::{
@@ -9,7 +8,6 @@ use libc::{
   SOCK_CLOEXEC, SOCK_RAW,
 };
 use libc::{AF_UNSPEC, RTM_GETADDR, RTM_GETLINK, RTM_NEWADDR};
-use smallvec_wrapper::SmallVec;
 use std::ffi::CStr;
 use std::io;
 use std::mem;
@@ -138,7 +136,10 @@ pub(super) fn netlink_rib(
               continue;
             }
 
-            let mut interface = Interface::new(info_hdr.index as u32, Flags::from_bits_truncate(info_hdr.flags));
+            let mut interface = Interface::new(
+              info_hdr.index as u32,
+              Flags::from_bits_truncate(info_hdr.flags),
+            );
             while info_data.len() >= RtAttr::SIZE {
               let attr = RtAttr {
                 len: u16::from_ne_bytes(info_data[..2].try_into().unwrap()),
@@ -199,10 +200,9 @@ pub(super) fn netlink_rib(
               index: u32::from_ne_bytes(msg_buf[4..8].try_into().unwrap()),
             };
 
-            println!("{ifam:?}");
             let mut ifa_msg_data = &msg_buf[IfAddrMessageHeader::SIZE..];
             let mut point_to_point = false;
-            let mut attrs = SmallVec::new();
+            // let mut attrs = SmallVec::new();
             while ifa_msg_data.len() >= RtAttr::SIZE {
               let attr = RtAttr {
                 len: u16::from_ne_bytes(ifa_msg_data[..2].try_into().unwrap()),
@@ -213,7 +213,7 @@ pub(super) fn netlink_rib(
                 return Err(io::Error::from_raw_os_error(EINVAL));
               }
               let alen = rta_align_of(attrlen);
-              let vbuf = &ifa_msg_data[RtAttr::SIZE..];
+              let vbuf = &ifa_msg_data[RtAttr::SIZE..alen];
 
               if !ift.is_empty() || ifi == ifam.index {
                 if !ift.is_empty() {
@@ -244,34 +244,32 @@ pub(super) fn netlink_rib(
 
                 match ifam.family as i32 {
                   AF_INET => {
-                    println!("idx {} family {} v4 vbuf: {:?}", ifam.index, ifam.family, &ifa_msg_data[..alen]);
                     if vbuf.len() < 4 {
-                      println!("af inet4");
                       return Err(io::Error::from_raw_os_error(EINVAL));
                     }
 
                     let ip: [u8; 4] = vbuf[..4].try_into().unwrap();
                     addrs.push(Ipv4Net::new_assert(ip.into(), ifam.prefix_len).into());
+                    continue 'outer;
                   }
                   AF_INET6 => {
-                    println!("idx {} family {} v6 vbuf: {:?}", ifam.index, ifam.family, &ifa_msg_data[..alen]);
                     if vbuf.len() < 16 {
-                      println!("af inet6");
                       return Err(io::Error::from_raw_os_error(EINVAL));
                     }
                     let ip: [u8; 16] = vbuf[..16].try_into().unwrap();
                     addrs.push(Ipv6Net::new_assert(ip.into(), ifam.prefix_len).into());
+                    continue 'outer;
                   }
                   _ => {}
                 }
-                // println!("addrs:{addrs:?}");
+                
               }
               ifa_msg_data = &ifa_msg_data[alen..];
             }
           }
           _ => {}
         }
-        
+
         received = &received[l..];
       }
     }
@@ -388,17 +386,3 @@ impl IfAddrMessageHeader {
   const SIZE: usize = mem::size_of::<Self>();
 }
 
-struct NetlinkRouteAddr<'a> {
-  attr: RtAttr,
-  data: &'a [u8],
-}
-
-impl<'a> NetlinkRouteAddr<'a> {
-  #[inline]
-  const fn new(attr: RtAttr, data: &'a [u8]) -> Self {
-    Self {
-      attr,
-      data,
-    }
-  }
-}
