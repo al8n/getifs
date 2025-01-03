@@ -74,19 +74,6 @@ pub struct Interface {
   flags: Flags,
 }
 
-impl Interface {
-  #[inline]
-  fn new(index: u32, flags: Flags) -> Self {
-    Self {
-      index,
-      mtu: 0,
-      name: SmolStr::default(),
-      mac_addr: None,
-      flags,
-    }
-  }
-}
-
 impl core::fmt::Debug for Interface {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut f = f.debug_struct("Interface");
@@ -140,20 +127,20 @@ impl Interface {
     interface_addr_table(self.index)
   }
 
-  // /// Returns a list of multicast, joined group addresses
-  // /// for a specific interface.
-  // #[cfg(any(
-  //   target_os = "macos",
-  //   target_os = "tvos",
-  //   target_os = "ios",
-  //   target_os = "watchos",
-  //   target_os = "visionos",
-  //   target_os = "freebsd",
-  //   target_os = "linux",
-  // ))]
-  // pub fn multicast_addresses(&self) -> io::Result<Vec<IpAddr>> {
-  //   interface_multiaddr_table(self.index)
-  // }
+  /// Returns a list of multicast, joined group addresses
+  /// for a specific interface.
+  #[cfg(any(
+    target_os = "macos",
+    target_os = "tvos",
+    target_os = "ios",
+    target_os = "watchos",
+    target_os = "visionos",
+    target_os = "freebsd",
+    target_os = "linux",
+  ))]
+  pub fn multicast_addresses(&self) -> io::Result<Vec<IpAddr>> {
+    interface_multiaddr_table(Some(self))
+  }
 }
 
 /// Returns a list of the system's network interfaces.

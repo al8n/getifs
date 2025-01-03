@@ -202,7 +202,6 @@ pub(super) fn netlink_rib(
 
             let mut ifa_msg_data = &msg_buf[IfAddrMessageHeader::SIZE..];
             let mut point_to_point = false;
-            // let mut attrs = SmallVec::new();
             while ifa_msg_data.len() >= RtAttr::SIZE {
               let attr = RtAttr {
                 len: u16::from_ne_bytes(ifa_msg_data[..2].try_into().unwrap()),
@@ -262,7 +261,6 @@ pub(super) fn netlink_rib(
                   }
                   _ => {}
                 }
-                
               }
               ifa_msg_data = &ifa_msg_data[alen..];
             }
@@ -385,4 +383,3 @@ struct IfAddrMessageHeader {
 impl IfAddrMessageHeader {
   const SIZE: usize = mem::size_of::<Self>();
 }
-

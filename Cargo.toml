@@ -21,7 +21,6 @@ serde = ["dep:serde"]
 [dependencies]
 bitflags = "2"
 smol_str = "0.3"
-smallvec-wrapper = "0.2"
 ipnet = "2"
 
 serde = { version = "1", features = ["derive"], optional = true }
@@ -31,11 +30,7 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 either = "1"
-netlink-sys = "0.8"
-netlink-packet-route = "0.21"
-netlink-packet-core = "0.7"
-netlink-packet-utils = "0.5"
-
+smallvec-wrapper = "0.2"
 
 [dev-dependencies]
 criterion = "0.5"

@@ -1,8 +1,8 @@
 use ipnet::ip_mask_to_prefix;
 use libc::{
-  c_void, if_msghdr, ifa_msghdr, size_t, sysctl, AF_INET, AF_INET6, AF_LINK,
-  AF_ROUTE, AF_UNSPEC, CTL_NET, NET_RT_IFLIST, NET_RT_IFLIST2, RTAX_BRD, RTAX_IFA, RTAX_MAX,
-  RTAX_NETMASK, RTM_IFINFO, RTM_NEWADDR, RTM_VERSION,
+  c_void, if_msghdr, ifa_msghdr, size_t, sysctl, AF_INET, AF_INET6, AF_LINK, AF_ROUTE, AF_UNSPEC,
+  CTL_NET, NET_RT_IFLIST, NET_RT_IFLIST2, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO,
+  RTM_NEWADDR, RTM_VERSION,
 };
 use smol_str::SmolStr;
 use std::{
@@ -443,9 +443,10 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<Vec<IpNet>> {
   target_os = "watchos",
   target_os = "visionos",
 ))]
-pub(super) fn interface_multiaddr_table(idx: u32) -> io::Result<Vec<IpAddr>> {
+pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<Vec<IpAddr>> {
   const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr2>();
 
+  let idx = ifi.map_or(0, |ifi| ifi.index);
   unsafe {
     let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, NET_RT_IFLIST2, idx as i32];
 
@@ -497,8 +498,10 @@ pub(super) fn interface_multiaddr_table(idx: u32) -> io::Result<Vec<IpAddr>> {
 }
 
 #[cfg(target_os = "freebsd")]
-pub(super) fn interface_multiaddr_table(idx: u32) -> io::Result<Vec<IpAddr>> {
+pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<Vec<IpAddr>> {
   const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr>();
+
+  let idx = ifi.map_or(0, |ifi| ifi.index);
 
   unsafe {
     let mut mib = [
@@ -555,12 +558,4 @@ pub(super) fn interface_multiaddr_table(idx: u32) -> io::Result<Vec<IpAddr>> {
 
     Ok(results)
   }
-}
-
-#[test]
-fn test_interfaces() {
-  let interfaces = interface_addr_table(1).unwrap();
-  println!("{:?}", interfaces);
-  let interfaces = interface_multiaddr_table(1).unwrap();
-  println!("{:?}", interfaces);
 }
