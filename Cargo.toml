@@ -21,6 +21,7 @@ serde = ["dep:serde"]
 [dependencies]
 bitflags = "2"
 smol_str = "0.3"
+smallvec-wrapper = "0.2"
 ipnet = "2"
 
 serde = { version = "1", features = ["derive"], optional = true }

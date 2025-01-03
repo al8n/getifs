@@ -9,6 +9,7 @@ use libc::{
   SOCK_CLOEXEC, SOCK_RAW,
 };
 use libc::{AF_UNSPEC, RTM_GETADDR, RTM_GETLINK, RTM_NEWADDR};
+use smallvec_wrapper::SmallVec;
 use std::ffi::CStr;
 use std::io;
 use std::mem;
@@ -190,8 +191,6 @@ pub(super) fn netlink_rib(
             interfaces.push(interface);
           }
           val if val == RTM_NEWADDR as i32 && proto == RTM_GETADDR => {
-            
-
             let ifam = IfAddrMessageHeader {
               family: msg_buf[0],
               prefix_len: msg_buf[1],
@@ -199,9 +198,11 @@ pub(super) fn netlink_rib(
               scope: msg_buf[3],
               index: u32::from_ne_bytes(msg_buf[4..8].try_into().unwrap()),
             };
+
             println!("{ifam:?}");
             let mut ifa_msg_data = &msg_buf[IfAddrMessageHeader::SIZE..];
             let mut point_to_point = false;
+            let mut attrs = SmallVec::new();
             while ifa_msg_data.len() >= RtAttr::SIZE {
               let attr = RtAttr {
                 len: u16::from_ne_bytes(ifa_msg_data[..2].try_into().unwrap()),
@@ -237,7 +238,6 @@ pub(super) fn netlink_rib(
                 }
 
                 if point_to_point && attr.ty == IFLA_ADDRESS {
-                  println!("pointtopoint");
                   ifa_msg_data = &ifa_msg_data[alen..];
                   continue;
                 }
@@ -386,4 +386,19 @@ struct IfAddrMessageHeader {
 
 impl IfAddrMessageHeader {
   const SIZE: usize = mem::size_of::<Self>();
+}
+
+struct NetlinkRouteAddr<'a> {
+  attr: RtAttr,
+  data: &'a [u8],
+}
+
+impl<'a> NetlinkRouteAddr<'a> {
+  #[inline]
+  const fn new(attr: RtAttr, data: &'a [u8]) -> Self {
+    Self {
+      attr,
+      data,
+    }
+  }
 }
