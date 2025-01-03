@@ -78,7 +78,7 @@ pub(super) fn netlink_rib(
     let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
     let mut rb = vec![0u8; page_size];
 
-    let mut ifis = Vec::new();
+    let mut interfaces = Vec::new();
     let mut addrs = Vec::new();
 
     'outer: loop {
@@ -123,47 +123,49 @@ pub(super) fn netlink_rib(
           return Err(io::Error::from_raw_os_error(EINVAL));
         }
 
+        let msg_buf = &received[NLMSG_HDRLEN..];
+
         match h.nlmsg_type as i32 {
           NLMSG_DONE => break 'outer,
           NLMSG_ERROR => return Err(io::Error::from_raw_os_error(EINVAL)),
           val if val == RTM_NEWLINK as i32 && proto == RTM_GETLINK => {
-            let msg_buf = &received[NLMSG_HDRLEN..];
-            let ihdr = IfInfoMessageHeader::parse(msg_buf)?;
-            let mut idata = &msg_buf[IfInfoMessageHeader::SIZE..];
-            if ifi != 0 && ifi != ihdr.index as u32 {
+            let info_hdr = IfInfoMessageHeader::parse(msg_buf)?;
+            let mut info_data = &msg_buf[IfInfoMessageHeader::SIZE..];
+            if ifi != 0 && ifi != info_hdr.index as u32 {
+              // move forward
               received = &received[l..];
               continue;
             }
 
-            let mut ifi = Interface::new(ihdr.index as u32, Flags::from_bits_truncate(ihdr.flags));
-            while idata.len() >= RtAttr::SIZE {
+            let mut interface = Interface::new(info_hdr.index as u32, Flags::from_bits_truncate(info_hdr.flags));
+            while info_data.len() >= RtAttr::SIZE {
               let attr = RtAttr {
-                len: u16::from_ne_bytes(idata[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(idata[2..4].try_into().unwrap()),
+                len: u16::from_ne_bytes(info_data[..2].try_into().unwrap()),
+                ty: u16::from_ne_bytes(info_data[2..4].try_into().unwrap()),
               };
               let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > idata.len() {
+              if attrlen < RtAttr::SIZE || attrlen > info_data.len() {
                 return Err(io::Error::from_raw_os_error(EINVAL));
               }
 
               let alen = rta_align_of(attrlen);
-              let vbuf = &idata[RtAttr::SIZE..alen];
+              let vbuf = &info_data[RtAttr::SIZE..alen];
 
               match attr.ty {
                 IFLA_MTU => {
-                  ifi.mtu = u32::from_ne_bytes(vbuf[..4].try_into().unwrap());
+                  interface.mtu = u32::from_ne_bytes(vbuf[..4].try_into().unwrap());
                 }
                 IFLA_IFNAME => {
-                  ifi.name = CStr::from_ptr(vbuf.as_ptr()).to_string_lossy().into();
+                  interface.name = CStr::from_ptr(vbuf.as_ptr()).to_string_lossy().into();
                 }
                 IFLA_ADDRESS => match vbuf.len() {
                   // We never return any /32 or /128 IP address
                   // prefix on any IP tunnel interface as the
                   // hardware address.
                   // ipv4
-                  4 if ihdr.ty == ARPHRD_IPGRE || ihdr.ty == ARPHRD_TUNNEL => continue,
+                  4 if info_hdr.ty == ARPHRD_IPGRE || info_hdr.ty == ARPHRD_TUNNEL => continue,
                   // ipv6
-                  16 if ihdr.ty == ARPHRD_TUNNEL6 || ihdr.ty == 823 => continue, // 823 is any over GRE over IPv6 tunneling
+                  16 if info_hdr.ty == ARPHRD_TUNNEL6 || info_hdr.ty == 823 => continue, // 823 is any over GRE over IPv6 tunneling
                   _ => {
                     let mut nonzero = false;
                     for b in vbuf {
@@ -176,19 +178,20 @@ pub(super) fn netlink_rib(
                       let mut data = [0; 6];
                       let len = vbuf.len().min(6);
                       data[..len].copy_from_slice(&vbuf[..len]);
-                      ifi.mac_addr = Some(MacAddr(data));
+                      interface.mac_addr = Some(MacAddr(data));
                     }
                   }
                 },
                 _ => {}
               }
 
-              idata = &idata[alen..];
+              info_data = &info_data[alen..];
             }
-            ifis.push(ifi);
+            interfaces.push(interface);
           }
           val if val == RTM_NEWADDR as i32 && proto == RTM_GETADDR => {
-            let msg_buf = &received[NLMSG_HDRLEN..];
+            
+
             let ifam = IfAddrMessageHeader {
               family: msg_buf[0],
               prefix_len: msg_buf[1],
@@ -196,19 +199,20 @@ pub(super) fn netlink_rib(
               scope: msg_buf[3],
               index: u32::from_ne_bytes(msg_buf[4..8].try_into().unwrap()),
             };
-            let mut idata = &msg_buf[IfAddrMessageHeader::SIZE..];
+            println!("{ifam:?}");
+            let mut ifa_msg_data = &msg_buf[IfAddrMessageHeader::SIZE..];
             let mut point_to_point = false;
-            while idata.len() >= RtAttr::SIZE {
+            while ifa_msg_data.len() >= RtAttr::SIZE {
               let attr = RtAttr {
-                len: u16::from_ne_bytes(idata[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(idata[2..4].try_into().unwrap()),
+                len: u16::from_ne_bytes(ifa_msg_data[..2].try_into().unwrap()),
+                ty: u16::from_ne_bytes(ifa_msg_data[2..4].try_into().unwrap()),
               };
               let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > idata.len() {
+              if attrlen < RtAttr::SIZE || attrlen > ifa_msg_data.len() {
                 return Err(io::Error::from_raw_os_error(EINVAL));
               }
               let alen = rta_align_of(attrlen);
-              let vbuf = &idata[RtAttr::SIZE..];
+              let vbuf = &ifa_msg_data[RtAttr::SIZE..];
 
               if !ift.is_empty() || ifi == ifam.index {
                 if !ift.is_empty() {
@@ -234,13 +238,13 @@ pub(super) fn netlink_rib(
 
                 if point_to_point && attr.ty == IFLA_ADDRESS {
                   println!("pointtopoint");
-                  idata = &idata[alen..];
+                  ifa_msg_data = &ifa_msg_data[alen..];
                   continue;
                 }
 
                 match ifam.family as i32 {
                   AF_INET => {
-                    println!("idx {} v4 {vbuf:?}", ifam.index);
+                    println!("idx {} family {} v4 vbuf: {:?}", ifam.index, ifam.family, &ifa_msg_data[..alen]);
                     if vbuf.len() < 4 {
                       println!("af inet4");
                       return Err(io::Error::from_raw_os_error(EINVAL));
@@ -250,7 +254,7 @@ pub(super) fn netlink_rib(
                     addrs.push(Ipv4Net::new_assert(ip.into(), ifam.prefix_len).into());
                   }
                   AF_INET6 => {
-                    println!("idx {} v6 {vbuf:?}", ifam.index);
+                    println!("idx {} family {} v6 vbuf: {:?}", ifam.index, ifam.family, &ifa_msg_data[..alen]);
                     if vbuf.len() < 16 {
                       println!("af inet6");
                       return Err(io::Error::from_raw_os_error(EINVAL));
@@ -262,18 +266,19 @@ pub(super) fn netlink_rib(
                 }
                 // println!("addrs:{addrs:?}");
               }
-              idata = &idata[alen..];
+              ifa_msg_data = &ifa_msg_data[alen..];
             }
           }
           _ => {}
         }
+        
         received = &received[l..];
       }
     }
 
     let res = match proto {
       RTM_GETADDR => Either::Right(addrs),
-      RTM_GETLINK => Either::Left(ifis),
+      RTM_GETLINK => Either::Left(interfaces),
       _ => unreachable!(),
     };
     Ok(res)
@@ -370,6 +375,7 @@ impl RtAttr {
 }
 
 #[repr(C)]
+#[derive(Debug)]
 struct IfAddrMessageHeader {
   family: u8,
   prefix_len: u8,

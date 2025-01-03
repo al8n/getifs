@@ -11,6 +11,8 @@ use super::Interface;
 
 #[path = "linux/netlink.rs"]
 mod netlink;
+#[path = "linux/nl.rs"]
+mod nl;
 
 use netlink::netlink_rib;
 
@@ -64,7 +66,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<Vec<IpNet>> {
 
 #[test]
 fn test_interfaces() {
-  let interfaces = interface_addr_table(2).unwrap();
+  let interfaces = interface_addr_table(1).unwrap();
   for interface in interfaces {
     println!("{:?}", interface);
   }
