@@ -1,12 +1,7 @@
-#[cfg(feature = "mtu")]
-use libc::SIOCGIFMTU;
-use libc::{ifconf, ifreq, ioctl, sockaddr, socket, AF_INET, RTM_GETLINK, SIOCGIFCONF, SOCK_DGRAM};
-
-#[cfg(feature = "mac_addr")]
-use libc::SIOCGIFHWADDR;
-
-#[cfg(feature = "flags")]
-use libc::SIOCGIFFLAGS;
+use libc::{
+  ifconf, ifreq, ioctl, sockaddr, socket, AF_INET, RTM_GETLINK, SIOCGIFCONF, SIOCGIFFLAGS,
+  SIOCGIFHWADDR, SIOCGIFMTU, SOCK_DGRAM,
+};
 
 use std::{ffi::CStr, io, mem, net::SocketAddr, slice::from_raw_parts};
 
@@ -14,12 +9,12 @@ use crate::MacAddr;
 
 use super::Interface;
 
-#[cfg(feature = "flags")]
+#[path = "linux/nl.rs"]
+mod nl;
+
 bitflags::bitflags! {
   /// Flags represents the interface flags.
   #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-  #[cfg(feature = "flags")]
-  #[cfg_attr(docsrs, doc(cfg(feature = "flags")))]
   pub struct Flags: u32 {
     /// Interface is administratively up
     const UP = 0x1;
@@ -97,7 +92,6 @@ pub fn interfaces() -> io::Result<Vec<Interface>> {
       let index = libc::if_nametoindex(ifreq.ifr_name.as_ptr());
 
       // Get flags
-      #[cfg(feature = "flags")]
       let flags = if ioctl(sock, SIOCGIFFLAGS, &mut ifr) < 0 {
         let _ = libc::close(sock);
         return Err(io::Error::last_os_error());
@@ -106,7 +100,6 @@ pub fn interfaces() -> io::Result<Vec<Interface>> {
       };
 
       // Get MTU
-      #[cfg(feature = "mtu")]
       let mtu = if ioctl(sock, SIOCGIFMTU, &mut ifr) < 0 {
         let _ = libc::close(sock);
         return Err(io::Error::last_os_error());
@@ -115,7 +108,6 @@ pub fn interfaces() -> io::Result<Vec<Interface>> {
       };
 
       // Get hardware address (this one can fail as not all interfaces have MAC)
-      #[cfg(feature = "mac_addr")]
       let mac_addr = if ioctl(sock, SIOCGIFHWADDR, &mut ifr) >= 0 {
         let sa = &ifr.ifr_ifru.ifru_hwaddr as *const sockaddr;
         let data = (*sa).sa_data;
@@ -132,11 +124,8 @@ pub fn interfaces() -> io::Result<Vec<Interface>> {
       results.push(Interface {
         index: index as u32,
         name: name.into(),
-        #[cfg(feature = "mtu")]
         mtu,
-        #[cfg(feature = "mac_addr")]
         mac_addr,
-        #[cfg(feature = "flags")]
         flags: Flags::from_bits_retain(flags),
       });
     }

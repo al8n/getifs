@@ -1,6 +1,8 @@
 use ipnet::ip_mask_to_prefix;
 use libc::{
-  c_void, if_msghdr, ifa_msghdr, ifma_msghdr2, size_t, sysctl, AF_INET, AF_INET6, AF_LINK, AF_ROUTE, AF_UNSPEC, CTL_NET, NET_RT_IFLIST, NET_RT_IFLIST2, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO, RTM_NEWADDR, RTM_NEWMADDR2, RTM_VERSION
+  c_void, if_msghdr, ifa_msghdr, ifma_msghdr2, size_t, sysctl, AF_INET, AF_INET6, AF_LINK,
+  AF_ROUTE, AF_UNSPEC, CTL_NET, NET_RT_IFLIST, NET_RT_IFLIST2, RTAX_BRD, RTAX_IFA, RTAX_MAX,
+  RTAX_NETMASK, RTM_IFINFO, RTM_NEWADDR, RTM_NEWMADDR2, RTM_VERSION,
 };
 use smol_str::SmolStr;
 use std::{
@@ -434,8 +436,15 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<Vec<IpNet>> {
   }
 }
 
+#[cfg(any(
+  target_os = "macos",
+  target_os = "tvos",
+  target_os = "ios",
+  target_os = "watchos",
+  target_os = "visionos",
+))]
 pub(super) fn interface_multiaddr_table(idx: u32) -> io::Result<Vec<IpAddr>> {
-  const HEADER_SIZE: usize = mem::size_of::<ifma_msghdr2>();
+  const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr2>();
 
   unsafe {
     let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, NET_RT_IFLIST2, idx as i32];
@@ -464,7 +473,7 @@ pub(super) fn interface_multiaddr_table(idx: u32) -> io::Result<Vec<IpAddr>> {
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {
-      let ifam = &*(b.as_ptr() as *const ifma_msghdr2);
+      let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr2);
       let len = ifam.ifmam_msglen as usize;
 
       if ifam.ifmam_version as i32 != RTM_VERSION {
@@ -472,7 +481,61 @@ pub(super) fn interface_multiaddr_table(idx: u32) -> io::Result<Vec<IpAddr>> {
         continue;
       }
 
-      if ifam.ifmam_type as i32 == RTM_NEWMADDR2 {
+      if ifam.ifmam_type as i32 == libc::RTM_NEWMADDR2 {
+        let addrs = parse_addrs(ifam.ifmam_addrs as u32, &b[HEADER_SIZE..len])?;
+
+        if let Some(ip) = addrs[RTAX_IFA as usize].as_ref() {
+          results.push(*ip);
+        }
+      }
+
+      b = &b[len..];
+    }
+
+    Ok(results)
+  }
+}
+
+#[cfg(target_os = "freebsd")]
+pub(super) fn interface_multiaddr_table(idx: u32) -> io::Result<Vec<IpAddr>> {
+  const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr>();
+
+  unsafe {
+    let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, libc::NET_RT_IFMALIST, idx as i32];
+
+    // Get buffer size
+    let mut len: size_t = 0;
+    if sysctl(mib.as_mut_ptr(), 6, null_mut(), &mut len, null_mut(), 0) < 0 {
+      return Err(io::Error::last_os_error());
+    }
+
+    // Allocate buffer
+    let mut buf = vec![0u8; len];
+    if sysctl(
+      mib.as_mut_ptr(),
+      6,
+      buf.as_mut_ptr() as *mut c_void,
+      &mut len,
+      null_mut(),
+      0,
+    ) < 0
+    {
+      return Err(io::Error::last_os_error());
+    }
+
+    let mut results = Vec::new();
+    let mut b = buf.as_slice();
+
+    while b.len() > HEADER_SIZE {
+      let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr);
+      let len = ifam.ifmam_msglen as usize;
+
+      if ifam.ifmam_version as i32 != RTM_VERSION {
+        b = &b[len..];
+        continue;
+      }
+
+      if ifam.ifmam_type as i32 == libc::RTM_NEWMADDR {
         let addrs = parse_addrs(ifam.ifmam_addrs as u32, &b[HEADER_SIZE..len])?;
 
         if let Some(ip) = addrs[RTAX_IFA as usize].as_ref() {
