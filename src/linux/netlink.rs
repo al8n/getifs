@@ -1,25 +1,29 @@
 use core::slice;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use either::Either;
-use ipnet::IpNet;
-use libc::{RTM_GETADDR, RTM_GETLINK};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use libc::{
-  bind, close, getsockname, nlmsghdr, recvfrom, sendto, sockaddr_nl, socket, socklen_t, AF_NETLINK,
-  ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6, EINVAL, IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU,
-  NETLINK_ROUTE, NLMSG_DONE, NLMSG_ERROR, SOCK_CLOEXEC, SOCK_RAW, RTM_NEWLINK, 
+  bind, close, getsockname, nlmsghdr, recvfrom, sendto, sockaddr_nl, socket, socklen_t, AF_INET,
+  AF_INET6, AF_NETLINK, ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6, EINVAL, IFA_LOCAL,
+  IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU, NETLINK_ROUTE, NLMSG_DONE, NLMSG_ERROR, RTM_NEWLINK,
+  SOCK_CLOEXEC, SOCK_RAW,
 };
+use libc::{AF_UNSPEC, RTM_GETADDR, RTM_GETLINK, RTM_NEWADDR};
 use std::ffi::CStr;
 use std::io;
 use std::mem;
 use std::ptr::read_unaligned;
 
-use super::{Interface, Flags, MacAddr};
+use super::{Flags, Interface, MacAddr};
 
 const NLMSG_HDRLEN: usize = mem::size_of::<nlmsghdr>();
 const NLMSG_ALIGNTO: usize = 4;
 
-
-
-pub(super) fn netlink_rib(proto: i32, family: i32) -> io::Result<Either<Vec<Interface>, Vec<IpNet>>> {
+pub(super) fn netlink_rib(
+  proto: u16,
+  family: i32,
+  mut ifi: u32,
+) -> io::Result<Either<Vec<Interface>, Vec<IpNet>>> {
   unsafe {
     // Create socket
     let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
@@ -76,7 +80,7 @@ pub(super) fn netlink_rib(proto: i32, family: i32) -> io::Result<Either<Vec<Inte
 
     let mut ifis = Vec::new();
     let mut addrs = Vec::new();
-  
+
     'outer: loop {
       let mut addr: sockaddr_nl = mem::zeroed();
       let mut addr_len = mem::size_of::<sockaddr_nl>() as socklen_t;
@@ -100,6 +104,13 @@ pub(super) fn netlink_rib(proto: i32, family: i32) -> io::Result<Either<Vec<Inte
 
       let mut received = &rb[..nr as usize];
 
+      // means auto choose interface for addr fetching
+      let ift = if ifi == 0 && proto == RTM_GETADDR {
+        netlink_rib(RTM_GETLINK, AF_UNSPEC, 0)?.unwrap_left()
+      } else {
+        Vec::new()
+      };
+
       while received.len() >= NLMSG_HDRLEN {
         let h = read_unaligned::<nlmsghdr>(received.as_ptr() as _);
         let hlen = h.nlmsg_len as usize;
@@ -115,15 +126,16 @@ pub(super) fn netlink_rib(proto: i32, family: i32) -> io::Result<Either<Vec<Inte
         match h.nlmsg_type as i32 {
           NLMSG_DONE => break 'outer,
           NLMSG_ERROR => return Err(io::Error::from_raw_os_error(EINVAL)),
-          val if val == RTM_NEWLINK as i32 && proto == RTM_GETLINK as i32 => {
+          val if val == RTM_NEWLINK as i32 && proto == RTM_GETLINK => {
             let msg_buf = &received[NLMSG_HDRLEN..];
             let ihdr = IfInfoMessageHeader::parse(msg_buf)?;
             let mut idata = &msg_buf[IfInfoMessageHeader::SIZE..];
+            if ifi != 0 && ifi != ihdr.index as u32 {
+              received = &received[l..];
+              continue;
+            }
 
-            let mut ifi = Interface::new(
-              ihdr.index as u32,
-              Flags::from_bits_truncate(ihdr.flags),
-            );
+            let mut ifi = Interface::new(ihdr.index as u32, Flags::from_bits_truncate(ihdr.flags));
             while idata.len() >= RtAttr::SIZE {
               let attr = RtAttr {
                 len: u16::from_ne_bytes(idata[..2].try_into().unwrap()),
@@ -146,8 +158,8 @@ pub(super) fn netlink_rib(proto: i32, family: i32) -> io::Result<Either<Vec<Inte
                 }
                 IFLA_ADDRESS => match vbuf.len() {
                   // We never return any /32 or /128 IP address
-			            // prefix on any IP tunnel interface as the
-			            // hardware address.
+                  // prefix on any IP tunnel interface as the
+                  // hardware address.
                   // ipv4
                   4 if ihdr.ty == ARPHRD_IPGRE || ihdr.ty == ARPHRD_TUNNEL => continue,
                   // ipv6
@@ -175,14 +187,91 @@ pub(super) fn netlink_rib(proto: i32, family: i32) -> io::Result<Either<Vec<Inte
             }
             ifis.push(ifi);
           }
+          val if val == RTM_NEWADDR as i32 && proto == RTM_GETADDR => {
+            let msg_buf = &received[NLMSG_HDRLEN..];
+            let ifam = IfAddrMessageHeader {
+              family: msg_buf[0],
+              prefix_len: msg_buf[1],
+              flags: msg_buf[2],
+              scope: msg_buf[3],
+              index: u32::from_ne_bytes(msg_buf[4..8].try_into().unwrap()),
+            };
+            let mut idata = &msg_buf[IfAddrMessageHeader::SIZE..];
+            let mut point_to_point = false;
+            while idata.len() >= RtAttr::SIZE {
+              let attr = RtAttr {
+                len: u16::from_ne_bytes(idata[..2].try_into().unwrap()),
+                ty: u16::from_ne_bytes(idata[2..4].try_into().unwrap()),
+              };
+              let attrlen = attr.len as usize;
+              if attrlen < RtAttr::SIZE || attrlen > idata.len() {
+                return Err(io::Error::from_raw_os_error(EINVAL));
+              }
+              let alen = rta_align_of(attrlen);
+              let vbuf = &idata[RtAttr::SIZE..];
+
+              if !ift.is_empty() || ifi == ifam.index {
+                if !ift.is_empty() {
+                  if let Some(nifi) = ift.iter().find_map(|i| {
+                    if i.index == ifam.index {
+                      Some(i.index)
+                    } else {
+                      None
+                    }
+                  }) {
+                    ifi = nifi;
+                  } else {
+                    return Err(io::Error::new(
+                      io::ErrorKind::NotFound,
+                      "no such network interface",
+                    ));
+                  }
+                }
+
+                if attr.ty == IFA_LOCAL {
+                  point_to_point = true;
+                }
+
+                if point_to_point && attr.ty == IFLA_ADDRESS {
+                  println!("pointtopoint");
+                  idata = &idata[alen..];
+                  continue;
+                }
+
+                match ifam.family as i32 {
+                  AF_INET => {
+                    println!("idx {} v4 {vbuf:?}", ifam.index);
+                    if vbuf.len() < 4 {
+                      println!("af inet4");
+                      return Err(io::Error::from_raw_os_error(EINVAL));
+                    }
+
+                    let ip: [u8; 4] = vbuf[..4].try_into().unwrap();
+                    addrs.push(Ipv4Net::new_assert(ip.into(), ifam.prefix_len).into());
+                  }
+                  AF_INET6 => {
+                    println!("idx {} v6 {vbuf:?}", ifam.index);
+                    if vbuf.len() < 16 {
+                      println!("af inet6");
+                      return Err(io::Error::from_raw_os_error(EINVAL));
+                    }
+                    let ip: [u8; 16] = vbuf[..16].try_into().unwrap();
+                    addrs.push(Ipv6Net::new_assert(ip.into(), ifam.prefix_len).into());
+                  }
+                  _ => {}
+                }
+                // println!("addrs:{addrs:?}");
+              }
+              idata = &idata[alen..];
+            }
+          }
           _ => {}
         }
         received = &received[l..];
       }
     }
 
-
-    let res = match proto as u16 {
+    let res = match proto {
       RTM_GETADDR => Either::Right(addrs),
       RTM_GETLINK => Either::Left(ifis),
       _ => unreachable!(),
@@ -220,18 +309,16 @@ impl NetlinkRouteRequest {
   const SIZE: usize = mem::size_of::<Self>();
 
   #[inline]
-  fn new(proto: i32, seq: u32, family: u8) -> Self {
+  fn new(proto: u16, seq: u32, family: u8) -> Self {
     Self {
       header: nlmsghdr {
         nlmsg_len: Self::SIZE as u32,
-        nlmsg_type: proto as u16,
+        nlmsg_type: proto,
         nlmsg_flags: (libc::NLM_F_DUMP | libc::NLM_F_REQUEST) as u16,
         nlmsg_seq: seq,
         nlmsg_pid: 0,
       },
-      data: RtGenMessage {
-        family,
-      },
+      data: RtGenMessage { family },
     }
   }
 
@@ -282,4 +369,15 @@ impl RtAttr {
   const SIZE: usize = mem::size_of::<Self>();
 }
 
+#[repr(C)]
+struct IfAddrMessageHeader {
+  family: u8,
+  prefix_len: u8,
+  flags: u8,
+  scope: u8,
+  index: u32,
+}
 
+impl IfAddrMessageHeader {
+  const SIZE: usize = mem::size_of::<Self>();
+}

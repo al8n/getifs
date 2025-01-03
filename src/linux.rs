@@ -55,17 +55,22 @@ bitflags::bitflags! {
 
 
 pub(super) fn interface_table(ifi: u32) -> io::Result<Vec<Interface>> {
-  netlink_rib(RTM_GETLINK as i32, AF_UNSPEC).map(|res| res.expect_left("must be interfaces when query type is GETLINK"))
+  netlink_rib(RTM_GETLINK, AF_UNSPEC, ifi).map(|res| res.expect_left("must be interfaces when query type is GETLINK"))
 }
 
-pub(super) fn interface_addr_table(idx: u32) -> io::Result<Vec<IpNet>> {
-  netlink_rib(RTM_GETADDR as i32, AF_UNSPEC).map(|res| res.expect_right("must be ipnets when query type is GETADDR"))
+pub(super) fn interface_addr_table(ifi: u32) -> io::Result<Vec<IpNet>> {
+  netlink_rib(RTM_GETADDR, AF_UNSPEC, ifi).map(|res| res.expect_right("must be ipnets when query type is GETADDR"))
 }
 
 #[test]
 fn test_interfaces() {
-  let interfaces = interface_table(0).unwrap();
+  let interfaces = interface_addr_table(2).unwrap();
   for interface in interfaces {
     println!("{:?}", interface);
   }
+
+  // let interfaces = interface_table(2).unwrap();
+  // for interface in interfaces {
+  //   println!("{:?}", interface);
+  // }
 }
