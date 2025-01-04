@@ -369,6 +369,8 @@ pub(super) fn interface_table(idx: u32) -> io::Result<Vec<Interface>> {
           flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
         };
         results.push(interface);
+      } else if ifm.ifm_type as i32 == libc::RTM_NEWADDR {
+        println!("RTM_NEWADDR");
       }
       offset += ifm.ifm_msglen as usize;
     }

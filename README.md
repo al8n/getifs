@@ -3,7 +3,7 @@
 </div>
 <div align="center">
 
-Yet another crate to get network interfaces information (including MTU).
+Get network interfaces information (including MTU) in a fast way (say bye to `getifaddrs`).
 
 [<img alt="github" src="https://img.shields.io/badge/github-al8n/getifs-8da0cb?style=for-the-badge&logo=Github" height="22">][Github-url]
 <img alt="LoC" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fal8n%2F327b2a8aef9003246e45c6e47fe63937%2Fraw%2Fgetifs" height="22">
@@ -21,37 +21,23 @@ English | [简体中文][zh-cn-url]
 
 ## Installation
 
-By default feature, the `Interface` will only contains the `index` and `name`.
-
 ```toml
 [dependencies]
 getifs = "0.1"
 ```
 
-- enable `mtu`
-  
-  ```toml
-  [dependencies]
-  getifs = { version = "0.1", features = ["mtu"] }
-  ```
+## Details
 
-- enable `flags`
-
-  ```toml
-  [dependencies]
-  getifs = { version = "0.1", features = ["flags"] }
-  ```
-
-- enable MAC address
-
-  ```toml
-  [dependencies]
-  getifs = { version = "0.1", features = ["mac_addr"] }
-  ```
+OS | Approach
+--- | ---
+Linux | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
+BSD-based | Uses of `sysctl` to retrieve network interfaces
+Windows | TODO
 
 ## Why a new network interfaces crate?
 
-Because all of current network interfaces crates do not support fetching `MTU`.
+Because all of current network interfaces crates do not support fetching `MTU`, and almost all of them are using `getifaddrs`. This crate
+use more underlying method to achieve the same functionalities.
 
 #### License
 
@@ -60,7 +46,7 @@ Apache License (Version 2.0).
 
 See [LICENSE-APACHE](LICENSE-APACHE), [LICENSE-MIT](LICENSE-MIT) for details.
 
-Copyright (c) 2021 Al Liu.
+Copyright (c) 2025 Al Liu.
 
 [Github-url]: https://github.com/al8n/getifs/
 [CI-url]: https://github.com/al8n/getifs/actions/workflows/ci.yml

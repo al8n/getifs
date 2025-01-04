@@ -29,6 +29,9 @@ mod os;
 #[path = "bsd_like.rs"]
 mod os;
 
+mod probe;
+pub use probe::*;
+
 /// Represents a physical hardware address (MAC address).
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct MacAddr([u8; 6]);
@@ -99,8 +102,8 @@ impl Interface {
 
   /// Returns the interface name.
   #[inline]
-  pub fn name(&self) -> &str {
-    self.name.as_str()
+  pub const fn name(&self) -> &SmolStr {
+    &self.name
   }
 
   /// Returns the interface MTU.
@@ -156,4 +159,18 @@ pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
 /// Returns the interface specified by name.
 pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
   interface_table(0).map(|v| v.into_iter().find(|ifi| ifi.name == name))
+}
+
+/// Returns a list of the system's unicast interface
+/// addresses.
+///
+/// The returned list does not identify the associated interface; use
+/// Interfaces and Interface.Addrs for more detail.
+pub fn interface_addrs() -> io::Result<Vec<IpNet>> {
+  interface_addr_table(0)
+}
+
+#[test]
+fn t() {
+  interfaces().unwrap();
 }

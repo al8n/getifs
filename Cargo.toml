@@ -5,13 +5,13 @@ edition = "2021"
 repository = "https://github.com/al8n/getifs"
 homepage = "https://github.com/al8n/getifs"
 documentation = "https://docs.rs/getifs"
-description = "Yet another crate to get network interfaces information (including MTU)"
+description = "Get network interfaces information (including MTU) in a fast way (say bye to `getifaddrs`)."
 license = "MIT OR Apache-2.0"
 rust-version = "1.73"
 
 [[bench]]
-path = "benches/foo.rs"
-name = "foo"
+path = "benches/bench.rs"
+name = "bench"
 harness = false
 
 [features]
@@ -32,9 +32,12 @@ libc = "0.2"
 either = "1"
 smallvec-wrapper = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }
+
 [dev-dependencies]
 criterion = "0.5"
-tempfile = "3"
+network-interface = "0.1"
 
 
 [package.metadata.docs.rs]
