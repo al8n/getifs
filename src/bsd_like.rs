@@ -4,6 +4,7 @@ use libc::{
   CTL_NET, NET_RT_IFLIST, NET_RT_IFLIST2, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO,
   RTM_NEWADDR, RTM_VERSION,
 };
+use smallvec_wrapper::SmallVec;
 use smol_str::SmolStr;
 use std::{
   io, mem,
@@ -36,6 +37,14 @@ const KERNAL_ALIGN: usize = core::mem::size_of::<usize>();
 
 fn invalid_address() -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, "invalid address")
+}
+
+fn invalid_message() -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidData, "invalid message")
+}
+
+fn message_too_short() -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidData, "message too short")
 }
 
 #[inline]
@@ -355,24 +364,65 @@ pub(super) fn interface_table(idx: u32) -> io::Result<Vec<Interface>> {
     }
 
     let mut results = Vec::new();
-    let mut offset = 0;
 
-    while offset < len {
-      let ifm = &*(buf.as_ptr().add(offset) as *const if_msghdr);
-      if ifm.ifm_type as i32 == RTM_IFINFO {
-        let (name, _mac) = parse(&buf[offset + size_of::<if_msghdr>()..])?;
-        let interface = Interface {
-          index: ifm.ifm_index as u32,
-          mtu: ifm.ifm_data.ifi_mtu,
-          name,
-          mac_addr: _mac,
-          flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
-        };
-        results.push(interface);
-      } else if ifm.ifm_type as i32 == libc::RTM_NEWADDR {
-        println!("RTM_NEWADDR");
+    let mut src = buf.as_slice();
+    while src.len() > 4 {
+      let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
+      if l == 0 {
+        return Err(invalid_message());
       }
-      offset += ifm.ifm_msglen as usize;
+      if src.len() < l {
+        return Err(message_too_short());
+      }
+
+      if src[2] as i32 != libc::RTM_VERSION {
+        src = &src[l..];
+        continue;
+      }
+
+      match src[3] as i32 {
+        libc::RTM_IFINFO => {
+          let ifm = &*(src.as_ptr() as *const if_msghdr);
+          if ifm.ifm_type as i32 == RTM_IFINFO {
+            let (name, _mac) = parse(&src[size_of::<if_msghdr>()..l])?;
+            let interface = Interface {
+              index: ifm.ifm_index as u32,
+              mtu: ifm.ifm_data.ifi_mtu,
+              name,
+              addrs: SmallVec::new(),
+              mac_addr: _mac,
+              flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
+            };
+            results.push(interface);
+          }
+        }
+        libc::RTM_NEWADDR => {
+          let ifam = &*(src.as_ptr() as *const ifa_msghdr);
+
+          if ifam.ifam_type as i32 == RTM_NEWADDR {
+            let addrs = parse_addrs(ifam.ifam_addrs as u32, &src[size_of::<ifa_msghdr>()..l])?;
+
+            let mask = addrs[RTAX_NETMASK as usize]
+              .as_ref()
+              .map(|ip| ip_mask_to_prefix(*ip));
+
+            let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
+
+            if let (Some(ip), Some(mask)) = (ip, mask) {
+              let ipnet = IpNet::new_assert(ip, mask.map_err(invalid_mask)?);
+              if let Some(ifi) = results
+                .iter_mut()
+                .find(|ifi| ifi.index == ifam.ifam_index as u32)
+              {
+                ifi.addrs.push(ipnet);
+              }
+            }
+          }
+        }
+        _ => {}
+      }
+
+      src = &src[l..];
     }
 
     Ok(results)

@@ -1,7 +1,8 @@
 use std::net::IpAddr;
 
 use getifs::{
-  interface_addrs, interface_by_index, interface_by_name, interfaces, ipv4_enabled, ipv6_enabled, Flags, Interface
+  interface_addrs, interface_by_index, interface_by_name, interfaces, ipv4_enabled, ipv6_enabled,
+  Flags, Interface,
 };
 use ipnet::IpNet;
 
@@ -210,9 +211,9 @@ fn if_unicast_addrs() {
 
   let mut uni_stats = RouteStats::default();
   for ifi in ift {
-    let ifat = ifi.addresses().unwrap();
+    let ifat = ifi.addresses();
 
-    let stats = validate_interface_unicast_addrs(&ifat).unwrap();
+    let stats = validate_interface_unicast_addrs(ifat).unwrap();
 
     uni_stats.ipv4 += stats.ipv4;
     uni_stats.ipv6 += stats.ipv6;

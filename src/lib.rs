@@ -9,6 +9,7 @@ use std::{io, net::IpAddr};
 pub use os::*;
 
 pub use ipnet::{IpNet, Ipv4Net, Ipv6Net};
+use smallvec_wrapper::SmallVec;
 pub use smol_str::SmolStr;
 
 #[cfg(target_os = "linux")]
@@ -68,29 +69,14 @@ impl core::fmt::Display for MacAddr {
 }
 
 /// The inferface struct
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Interface {
   index: u32,
   mtu: u32,
   name: SmolStr,
   mac_addr: Option<MacAddr>,
+  addrs: SmallVec<IpNet>,
   flags: Flags,
-}
-
-impl core::fmt::Debug for Interface {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    let mut f = f.debug_struct("Interface");
-
-    f.field("index", &self.index).field("name", &self.name);
-
-    f.field("mtu", &self.mtu);
-
-    f.field("mac_addr", &self.mac_addr);
-
-    f.field("flags", &self.flags);
-
-    f.finish()
-  }
 }
 
 impl Interface {
@@ -126,8 +112,9 @@ impl Interface {
 
   /// Returns a list of unicast interface addresses for a specific
   /// interface.
-  pub fn addresses(&self) -> io::Result<Vec<IpNet>> {
-    interface_addr_table(self.index)
+  #[inline]
+  pub fn addresses(&self) -> &[IpNet] {
+    &self.addrs
   }
 
   /// Returns a list of multicast, joined group addresses
@@ -172,5 +159,8 @@ pub fn interface_addrs() -> io::Result<Vec<IpNet>> {
 
 #[test]
 fn t() {
-  interfaces().unwrap();
+  let ift = interfaces().unwrap();
+  for ifi in ift {
+    println!("{:?}", ifi);
+  }
 }

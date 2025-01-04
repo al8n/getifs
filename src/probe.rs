@@ -60,9 +60,7 @@ impl Capabilities {
 /// general. Unfortunately, we need to run on kernels built without
 /// IPv6 support too. So probe the kernel to figure it out.
 pub fn probe() -> Capabilities {
-  *INIT.get_or_init(|| {
-    probe_in()
-  })
+  *INIT.get_or_init(probe_in)
 }
 
 #[cfg(unix)]
@@ -82,7 +80,6 @@ fn probe_in() -> Capabilities {
     }
   }
 
-
   // Probe IPv6 and IPv4-mapped IPv6
   let probes = [
     (true, 1),  // IPv6
@@ -91,7 +88,7 @@ fn probe_in() -> Capabilities {
 
   for (is_ipv6, v6_only) in probes {
     let sock = unsafe { libc::socket(libc::AF_INET6, libc::SOCK_STREAM, libc::IPPROTO_TCP) };
-    if sock != -1  {
+    if sock != -1 {
       // Set IPV6_V6ONLY option
       unsafe {
         libc::setsockopt(
@@ -127,7 +124,7 @@ fn probe_in() -> Capabilities {
         {
           addr.sin6_family = libc::AF_INET6 as u8;
         }
-        
+
         #[cfg(target_os = "linux")]
         {
           addr.sin6_family = libc::AF_INET6 as u16;
@@ -156,9 +153,7 @@ fn probe_in() -> Capabilities {
         }
       }
 
-      unsafe {
-        libc::close(sock)
-      };
+      unsafe { libc::close(sock) };
     }
   }
 
@@ -167,7 +162,6 @@ fn probe_in() -> Capabilities {
 
 #[cfg(windows)]
 fn probe_in() -> Capabilities {
-
   fn init_windows_sockets() -> io::Result<()> {
     unsafe {
       let mut wsa_data = std::mem::zeroed();
@@ -205,9 +199,7 @@ fn probe_in() -> Capabilities {
 
   if ipv4_sock != ws::INVALID_SOCKET {
     caps.ipv4 = true;
-    unsafe {
-      ws::closesocket(ipv4_sock)
-    };
+    unsafe { ws::closesocket(ipv4_sock) };
   }
 
   // Probe IPv6 and IPv4-mapped IPv6
@@ -267,9 +259,7 @@ fn probe_in() -> Capabilities {
         }
       }
 
-      unsafe {
-        ws::closesocket(sock)
-      };
+      unsafe { ws::closesocket(sock) };
     }
   }
 
@@ -278,15 +268,10 @@ fn probe_in() -> Capabilities {
   caps
 }
 
-
-
 #[test]
 fn t() {
   let caps = probe();
   println!("IPv4 enabled: {}", caps.ipv4);
   println!("IPv6 enabled: {}", caps.ipv6);
-  println!(
-    "IPv4-mapped IPv6 enabled: {}",
-    caps.ipv4_mapped_ipv6
-  );
+  println!("IPv4-mapped IPv6 enabled: {}", caps.ipv4_mapped_ipv6);
 }
