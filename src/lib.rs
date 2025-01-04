@@ -1,5 +1,4 @@
-// #![doc = include_str!("../README.md")]
-//! a
+#![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
@@ -8,8 +7,8 @@ use std::{io, net::IpAddr};
 
 pub use os::*;
 
-pub use ipnet::{IpNet, Ipv4Net, Ipv6Net};
-use smallvec_wrapper::SmallVec;
+pub use ipnet;
+use smallvec_wrapper::{OneOrMore, SmallVec};
 pub use smol_str::SmolStr;
 
 #[cfg(target_os = "linux")]
@@ -110,14 +109,14 @@ impl Interface {
     self.flags
   }
 
-  /// Returns a list of unicast interface addresses for a specific
+  /// Returns a list of unicast interface addrs for a specific
   /// interface.
   #[inline]
-  pub fn addresses(&self) -> &[IpNet] {
+  pub fn addrs(&self) -> &[IpNet] {
     &self.addrs
   }
 
-  /// Returns a list of multicast, joined group addresses
+  /// Returns a list of multicast, joined group addrs
   /// for a specific interface.
   #[cfg(any(
     target_os = "macos",
@@ -128,13 +127,13 @@ impl Interface {
     target_os = "freebsd",
     target_os = "linux",
   ))]
-  pub fn multicast_addresses(&self) -> io::Result<Vec<IpAddr>> {
+  pub fn multicast_addrs(&self) -> io::Result<SmallVec<IpAddr>> {
     interface_multiaddr_table(Some(self))
   }
 }
 
 /// Returns a list of the system's network interfaces.
-pub fn interfaces() -> io::Result<Vec<Interface>> {
+pub fn interfaces() -> io::Result<OneOrMore<Interface>> {
   interface_table(0)
 }
 
@@ -149,18 +148,80 @@ pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
 }
 
 /// Returns a list of the system's unicast interface
-/// addresses.
+/// addrs.
 ///
 /// The returned list does not identify the associated interface; use
-/// Interfaces and Interface.Addrs for more detail.
-pub fn interface_addrs() -> io::Result<Vec<IpNet>> {
+/// [`interfaces`] and [`Interface::addrs`] for more detail.
+pub fn interface_addrs() -> io::Result<SmallVec<IpNet>> {
   interface_addr_table(0)
 }
 
-#[test]
-fn t() {
-  let ift = interfaces().unwrap();
-  for ifi in ift {
-    println!("{:?}", ifi);
+/// An IP network address, either IPv4 or IPv6.
+///
+/// A wrapper over [`ipnet::IpNet`], with an additional field `index`.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct IpNet {
+  net: ipnet::IpNet,
+  index: u32,
+}
+
+impl From<IpNet> for ipnet::IpNet {
+  fn from(ipnet: IpNet) -> Self {
+    ipnet.net
+  }
+}
+
+impl core::ops::Deref for IpNet {
+  type Target = ipnet::IpNet;
+
+  fn deref(&self) -> &Self::Target {
+    &self.net
+  }
+}
+
+impl core::convert::AsRef<ipnet::IpNet> for IpNet {
+  fn as_ref(&self) -> &ipnet::IpNet {
+    &self.net
+  }
+}
+
+impl core::ops::DerefMut for IpNet {
+  fn deref_mut(&mut self) -> &mut Self::Target {
+    &mut self.net
+  }
+}
+
+impl core::convert::AsMut<ipnet::IpNet> for IpNet {
+  fn as_mut(&mut self) -> &mut ipnet::IpNet {
+    &mut self.net
+  }
+}
+
+impl core::borrow::Borrow<ipnet::IpNet> for IpNet {
+  fn borrow(&self) -> &ipnet::IpNet {
+    &self.net
+  }
+}
+
+impl IpNet {
+  /// See [`ipnet::IpNet::new`](ipnet::IpNet::new).
+  #[inline]
+  pub fn new(index: u32, addr: IpAddr, prefix_len: u8) -> Result<Self, ipnet::PrefixLenError> {
+    ipnet::IpNet::new(addr, prefix_len).map(|net| Self { net, index })
+  }
+
+  /// See [`ipnet::IpNet::new_assert`](ipnet::IpNet::new_assert).
+  #[inline]
+  pub fn new_assert(index: u32, addr: IpAddr, prefix_len: u8) -> Self {
+    Self {
+      net: ipnet::IpNet::new_assert(addr, prefix_len),
+      index,
+    }
+  }
+
+  /// Returns the interface index.
+  #[inline]
+  pub const fn index(&self) -> u32 {
+    self.index
   }
 }

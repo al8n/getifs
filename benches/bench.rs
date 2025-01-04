@@ -63,7 +63,7 @@ fn bench_getifs_interfaces_and_multicast_addrs(c: &mut Criterion) {
     &ifi,
     |b, ifi| {
       b.iter(|| {
-        ifi.multicast_addresses().unwrap();
+        ifi.multicast_addrs().unwrap();
       })
     },
   );

@@ -4,7 +4,7 @@ use libc::{
   CTL_NET, NET_RT_IFLIST, NET_RT_IFLIST2, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO,
   RTM_NEWADDR, RTM_VERSION,
 };
-use smallvec_wrapper::SmallVec;
+use smallvec_wrapper::{OneOrMore, SmallVec};
 use smol_str::SmolStr;
 use std::{
   io, mem,
@@ -339,7 +339,7 @@ fn parse_addrs(addrs: u32, mut b: &[u8]) -> io::Result<[Option<IpAddr>; RTAX_MAX
   Ok(as_)
 }
 
-pub(super) fn interface_table(idx: u32) -> io::Result<Vec<Interface>> {
+pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   unsafe {
     let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, NET_RT_IFLIST, idx as i32];
 
@@ -363,7 +363,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<Vec<Interface>> {
       return Err(io::Error::last_os_error());
     }
 
-    let mut results = Vec::new();
+    let mut results = OneOrMore::new();
 
     let mut src = buf.as_slice();
     while src.len() > 4 {
@@ -409,7 +409,8 @@ pub(super) fn interface_table(idx: u32) -> io::Result<Vec<Interface>> {
             let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
             if let (Some(ip), Some(mask)) = (ip, mask) {
-              let ipnet = IpNet::new_assert(ip, mask.map_err(invalid_mask)?);
+              let ipnet =
+                IpNet::new_assert(ifam.ifam_index as u32, ip, mask.map_err(invalid_mask)?);
               if let Some(ifi) = results
                 .iter_mut()
                 .find(|ifi| ifi.index == ifam.ifam_index as u32)
@@ -429,7 +430,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<Vec<Interface>> {
   }
 }
 
-pub(super) fn interface_addr_table(idx: u32) -> io::Result<Vec<IpNet>> {
+pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpNet>> {
   const HEADER_SIZE: usize = mem::size_of::<ifa_msghdr>();
 
   unsafe {
@@ -455,7 +456,7 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<Vec<IpNet>> {
       return Err(io::Error::last_os_error());
     }
 
-    let mut results = Vec::new();
+    let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {
@@ -477,7 +478,11 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<Vec<IpNet>> {
         let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
         if let (Some(ip), Some(mask)) = (ip, mask) {
-          results.push(IpNet::new_assert(ip, mask.map_err(invalid_mask)?));
+          results.push(IpNet::new_assert(
+            ifam.ifam_index as u32,
+            ip,
+            mask.map_err(invalid_mask)?,
+          ));
         }
       }
 
@@ -495,7 +500,7 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<Vec<IpNet>> {
   target_os = "watchos",
   target_os = "visionos",
 ))]
-pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<Vec<IpAddr>> {
+pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {
   const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr2>();
 
   let idx = ifi.map_or(0, |ifi| ifi.index);
@@ -522,7 +527,7 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<V
       return Err(io::Error::last_os_error());
     }
 
-    let mut results = Vec::new();
+    let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {

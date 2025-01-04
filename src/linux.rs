@@ -1,17 +1,15 @@
 use std::{io, net::IpAddr};
 
-use ipnet::IpNet;
-use libc::{AF_UNSPEC, RTM_GETADDR, RTM_GETLINK};
+use libc::AF_UNSPEC;
+use smallvec_wrapper::{OneOrMore, SmallVec};
 use smol_str::SmolStr;
 
-use crate::MacAddr;
-
-use super::Interface;
+use super::{Interface, IpNet, MacAddr};
 
 #[path = "linux/netlink.rs"]
 mod netlink;
 
-use netlink::netlink_rib;
+use netlink::{netlink_addr, netlink_interface};
 
 impl Interface {
   #[inline]
@@ -19,6 +17,7 @@ impl Interface {
     Self {
       index,
       mtu: 0,
+      addrs: SmallVec::new(),
       name: SmolStr::default(),
       mac_addr: None,
       flags,
@@ -65,24 +64,38 @@ bitflags::bitflags! {
   }
 }
 
-pub(super) fn interface_table(ifi: u32) -> io::Result<Vec<Interface>> {
-  netlink_rib(RTM_GETLINK, AF_UNSPEC, ifi)
-    .map(|res| res.expect_left("must be interfaces when query type is GETLINK"))
+pub(super) fn interface_table(index: u32) -> io::Result<OneOrMore<Interface>> {
+  let mut ift = netlink_interface(AF_UNSPEC, index)?;
+  if index == 0 {
+    for i in ift.iter_mut() {
+      let addrs = netlink_addr(AF_UNSPEC, i.index)?;
+      i.addrs = addrs;
+    }
+
+    Ok(ift)
+  } else {
+    if let Some(ifi) = ift.iter_mut().find(|i| i.index == index) {
+      ifi.addrs = netlink_addr(AF_UNSPEC, ifi.index)?;
+    }
+
+    Ok(ift)
+  }
 }
 
-pub(super) fn interface_addr_table(ifi: u32) -> io::Result<Vec<IpNet>> {
-  netlink_rib(RTM_GETADDR, AF_UNSPEC, ifi)
-    .map(|res| res.expect_right("must be ipnets when query type is GETADDR"))
+pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpNet>> {
+  netlink_addr(AF_UNSPEC, ifi)
 }
 
-pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> std::io::Result<Vec<IpAddr>> {
-  let mut addrs = Vec::new();
+pub(super) fn interface_multiaddr_table(
+  ifi: Option<&Interface>,
+) -> std::io::Result<SmallVec<IpAddr>> {
+  let mut addrs = SmallVec::new();
 
-  // Parse IPv4 multicast addresses
+  // Parse IPv4 multicast addrs
   let ifmat4 = parse_proc_net_igmp("/proc/net/igmp", ifi)?;
   addrs.extend(ifmat4);
 
-  // Parse IPv6 multicast addresses
+  // Parse IPv6 multicast addrs
   let ifmat6 = parse_proc_net_igmp6("/proc/net/igmp6", ifi)?;
   addrs.extend(ifmat6);
 

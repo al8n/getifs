@@ -2,9 +2,8 @@ use std::net::IpAddr;
 
 use getifs::{
   interface_addrs, interface_by_index, interface_by_name, interfaces, ipv4_enabled, ipv6_enabled,
-  Flags, Interface,
+  Flags, Interface, IpNet,
 };
-use ipnet::IpNet;
 
 #[derive(Debug)]
 struct IfStats {
@@ -32,8 +31,8 @@ impl IfStats {
 
 #[derive(Default, Debug)]
 struct RouteStats {
-  ipv4: u32, // # of active connected unicast or multicast addresses
-  ipv6: u32, // # of active connected unicast or multicast addresses
+  ipv4: u32, // # of active connected unicast or multicast addrs
+  ipv6: u32, // # of active connected unicast or multicast addrs
 }
 
 fn validate_interface_unicast_addrs(ifat: &[IpNet]) -> std::io::Result<RouteStats> {
@@ -48,7 +47,7 @@ fn validate_interface_unicast_addrs(ifat: &[IpNet]) -> std::io::Result<RouteStat
     if ifa.addr().is_multicast() {
       return Err(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
-        format!("unexpected multicast address: {ifa}"),
+        format!("unexpected multicast address: {ifa:?}"),
       ));
     }
 
@@ -59,7 +58,7 @@ fn validate_interface_unicast_addrs(ifat: &[IpNet]) -> std::io::Result<RouteStat
         if prefix_len == 0 || prefix_len > 8 * 4 || max_prefix_len != 8 * 4 {
           return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("unexpected prefix length {ifa}"),
+            format!("unexpected prefix length {ifa:?}"),
           ));
         }
 
@@ -77,7 +76,7 @@ fn validate_interface_unicast_addrs(ifat: &[IpNet]) -> std::io::Result<RouteStat
         if prefix_len == 0 || prefix_len > 8 * 16 || max_prefix_len != 8 * 16 {
           return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("unexpected prefix length {ifa}"),
+            format!("unexpected prefix length {ifa:?}"),
           ));
         }
 
@@ -211,7 +210,7 @@ fn if_unicast_addrs() {
 
   let mut uni_stats = RouteStats::default();
   for ifi in ift {
-    let ifat = ifi.addresses();
+    let ifat = ifi.addrs();
 
     let stats = validate_interface_unicast_addrs(ifat).unwrap();
 
@@ -233,7 +232,7 @@ fn if_multicast_addrs() {
   let mut multi_stats = RouteStats::default();
 
   for ifi in ift {
-    let ifmat = ifi.multicast_addresses().unwrap();
+    let ifmat = ifi.multicast_addrs().unwrap();
 
     let stats = validate_interface_multicast_addrs(&ifmat).unwrap();
 
