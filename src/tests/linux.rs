@@ -1,5 +1,4 @@
 use super::TestInterface;
-use hardware_address::xtoi2;
 
 use std::{io, process::Command};
 
