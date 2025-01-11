@@ -137,9 +137,10 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         addrs: Default::default(),
       };
 
+      let ifindex = interface.index;
       interfaces.push(interface);
 
-      if idx == interface.index {
+      if idx == ifindex {
         break;
       }
     }
