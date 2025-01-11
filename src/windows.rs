@@ -66,7 +66,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   let mut interfaces = OneOrMore::new();
 
   for adapter in adapters {
-    let mut index = adapter.IfIndex;
+    let mut index = adapter.Anonymous1.Anonymous.IfIndex;
     if index == 0 {
       index = adapter.Ipv6IfIndex;
     }
@@ -142,7 +142,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpNet>> {
   let mut addresses = SmallVec::new();
 
   for adapter in adapters {
-    let mut index = adapter.IfIndex;
+    let mut index = adapter.Anonymous1.Anonymous.IfIndex;
     if index == 0 {
       index = adapter.Ipv6IfIndex;
     }
@@ -175,10 +175,10 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpNet>> {
 
 pub(super) fn interface_multiaddr_table(ifi: u32) -> io::Result<SmallVec<IpAddr>> {
   let adapters = get_adapter_addresses()?;
-  let mut addresses = Vec::new();
+  let mut addresses = SmallVec::new();
 
   for adapter in adapters {
-    let mut index = adapter.IfIndex;
+    let mut index = adapter.Anonymous1.Anonymous.IfIndex;
     if index == 0 {
       index = adapter.Ipv6IfIndex;
     }
