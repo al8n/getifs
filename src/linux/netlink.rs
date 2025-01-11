@@ -147,7 +147,7 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
                   interface.mtu = u32::from_ne_bytes(vbuf[..4].try_into().unwrap());
                 }
                 IFLA_IFNAME => {
-                  interface.name = CStr::from_ptr(vbuf.as_ptr()).to_string_lossy().into();
+                  interface.name = CStr::from_ptr(vbuf.as_ptr() as _).to_string_lossy().into();
                 }
                 IFLA_ADDRESS => match vbuf.len() {
                   // We never return any /32 or /128 IP address
