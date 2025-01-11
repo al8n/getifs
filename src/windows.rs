@@ -87,13 +87,13 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
           flags |= Flags::BROADCAST | Flags::MULTICAST;
         }
         IF_TYPE_PPP | IF_TYPE_TUNNEL => {
-          flags |= Flags::POINTTOPOINT | Flags::MULTICAST;
+          flags |= Flags::POINTOPOINT | Flags::MULTICAST;
         }
         IF_TYPE_SOFTWARE_LOOPBACK => {
           flags |= Flags::LOOPBACK | Flags::MULTICAST;
         }
         IF_TYPE_ATM => {
-          flags |= Flags::BROADCAST | Flags::POINTTOPOINT | Flags::MULTICAST;
+          flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
         }
         _ => {}
       }
@@ -158,6 +158,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpNet>> {
       while !anycast.is_null() {
         let addr = unsafe { &*anycast };
         if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+          let ip = IpNet::new_assert(index as u32, ip, addr.OnLinkPrefixLength);
           addresses.push(ip);
         }
         anycast = addr.Next;
@@ -195,7 +196,7 @@ pub(super) fn interface_multiaddr_table(ifi: u32) -> io::Result<SmallVec<IpAddr>
 
 fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
   unsafe {
-    match (*sockaddr).sa_family as i32 {
+    match (*sockaddr).sa_family {
       AF_INET => {
         let addr = &*(sockaddr as *const SOCKADDR_IN);
         Some(IpAddr::V4(Ipv4Addr::from(u32::from_ne_bytes(
