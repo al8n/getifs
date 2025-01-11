@@ -1,6 +1,6 @@
 use smallvec_wrapper::{OneOrMore, SmallVec};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use windows::{core::*, Win32::NetworkManagement::IpHelper::*, Win32::Networking::WinSock::*};
+use std::{io, net::{IpAddr, Ipv4Addr, Ipv6Addr}};
+use windows::{core::*, Win32::NetworkManagement::{IpHelper::*, Ndis::*}, Win32::Networking::WinSock::*};
 
 use super::{Interface, IpNet, MacAddr, MAC_ADDRESS_SIZE};
 
@@ -30,7 +30,7 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
   loop {
     let result = unsafe {
       GetAdaptersAddresses(
-        AF_UNSPEC,
+        AF_UNSPEC.0 as u32,
         GAA_FLAG_INCLUDE_PREFIX,
         None,
         Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
@@ -71,8 +71,9 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
       index = adapter.Ipv6IfIndex;
     }
 
-    if ifindex == 0 || ifindex == index as i32 {
+    if idx == 0 || idx == index as i32 {
       let name = unsafe { adapter.FriendlyName.to_string()? };
+      let _x = unsafe { adapter.FriendlyName.as_str()? };
 
       let mut flags = Flags::empty();
       if adapter.OperStatus == IfOperStatusUp {
@@ -116,15 +117,16 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
       let interface = Interface {
         index: index as u32,
-        name,
+        name: name.into(),
         flags,
         mtu,
         mac_addr: hardware_addr,
+        addrs: Default::default(),
       };
 
       interfaces.push(interface);
 
-      if ifindex == interface.index {
+      if idx == interface.index {
         break;
       }
     }
