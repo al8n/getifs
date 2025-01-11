@@ -72,8 +72,10 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
     }
 
     if idx == 0 || idx == index as i32 {
-      let name = unsafe { adapter.FriendlyName.to_string()? };
-      let _x = unsafe { adapter.FriendlyName.as_str()? };
+      let hname = unsafe { adapter.FriendlyName.to_hstring() };
+      let osname = hname.to_os_string();
+      let osname_str = osname.as_os_str().to_string_lossy();
+      let name = SmolStr::new(&osname_str);
 
       let mut flags = Flags::empty();
       if adapter.OperStatus == IfOperStatusUp {
@@ -117,7 +119,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
       let interface = Interface {
         index: index as u32,
-        name: name.into(),
+        name,
         flags,
         mtu,
         mac_addr: hardware_addr,
