@@ -9,6 +9,7 @@ use windows::{
   core::*,
   Win32::NetworkManagement::{IpHelper::*, Ndis::*},
   Win32::Networking::WinSock::*,
+  Win32::Foundation::ERROR_BUFFER_OVERFLOW,
 };
 
 use super::{Interface, IpNet, MacAddr, MAC_ADDRESS_SIZE};
@@ -60,7 +61,7 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
   }
 
   let mut adapters = SmallVec::new();
-  let mut current = (buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH);
+  let mut current = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
 
   while !current.is_null() {
     let curr = unsafe { &*current };
@@ -76,12 +77,12 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   let mut interfaces = OneOrMore::new();
 
   for adapter in adapters {
-    let mut index = adapter.Anonymous1.Anonymous.IfIndex;
+    let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
     if index == 0 {
       index = adapter.Ipv6IfIndex;
     }
 
-    if idx == 0 || idx == index as i32 {
+    if idx == 0 || idx == index as u32 {
       let hname = unsafe { adapter.FriendlyName.to_hstring() };
       let osname = hname.to_os_string();
       let osname_str = osname.as_os_str().to_string_lossy();
@@ -152,7 +153,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpNet>> {
   let mut addresses = SmallVec::new();
 
   for adapter in adapters {
-    let mut index = adapter.Anonymous1.Anonymous.IfIndex;
+    let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
     if index == 0 {
       index = adapter.Ipv6IfIndex;
     }
@@ -188,7 +189,7 @@ pub(super) fn interface_multiaddr_table(ifi: u32) -> io::Result<SmallVec<IpAddr>
   let mut addresses = SmallVec::new();
 
   for adapter in adapters {
-    let mut index = adapter.Anonymous1.Anonymous.IfIndex;
+    let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
     if index == 0 {
       index = adapter.Ipv6IfIndex;
     }
