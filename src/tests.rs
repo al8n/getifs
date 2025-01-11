@@ -101,13 +101,16 @@ impl TestInterface {
 }
 
 #[test]
-#[cfg(not(any(
-  target_os = "macos",
-  target_os = "tvos",
-  target_os = "ios",
-  target_os = "watchos",
-  target_os = "visionos",
-)))]
+#[cfg(all(
+  not(any(
+    target_os = "macos",
+    target_os = "tvos",
+    target_os = "ios",
+    target_os = "watchos",
+    target_os = "visionos",
+  )),
+  unix,
+))]
 fn point_to_point_interface() {
   let uid = unsafe { libc::getuid() };
   if uid != 0 {
@@ -165,6 +168,7 @@ fn point_to_point_interface() {
   }
 }
 
+#[cfg(unix)]
 #[test]
 fn test_interface_arrival_and_departure() {
   if std::env::var("RUST_TEST_SHORT").is_ok() {
