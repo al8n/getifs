@@ -1,9 +1,10 @@
 use std::net::IpAddr;
 
 use getifs::{
-  interface_addrs, interface_by_index, interface_by_name, interfaces, ipv4_enabled, ipv6_enabled,
-  Flags, Interface, IpNet,
+  interface_addrs, interface_by_index, interface_by_name, interfaces, Flags, Interface, IpNet,
 };
+
+use iprobe::{ipv4, ipv6};
 
 #[derive(Debug)]
 struct IfStats {
@@ -98,7 +99,7 @@ fn validate_interface_unicast_addrs(ifat: &[IpNet]) -> std::io::Result<RouteStat
 
 fn check_unicast_stats(ifstats: &IfStats, uni_stats: &RouteStats) -> std::io::Result<()> {
   // Test the existence of connected unicast routes for IPv4.
-  if ipv4_enabled() && ifstats.loopback + ifstats.other > 0 && uni_stats.ipv4 == 0 {
+  if ipv4() && ifstats.loopback + ifstats.other > 0 && uni_stats.ipv4 == 0 {
     return Err(std::io::Error::new(
       std::io::ErrorKind::InvalidData,
       "num Ipv4 unicast routes = 0; want>0; summary:{ifstats:?}, {uni_stats:?}",
@@ -108,7 +109,7 @@ fn check_unicast_stats(ifstats: &IfStats, uni_stats: &RouteStats) -> std::io::Re
   // Test the existence of connected unicast routes for IPv6.
   // We can assume the existence of ::1/128 when at least one
   // loopback interface is installed.
-  if ipv6_enabled() && ifstats.loopback > 0 && uni_stats.ipv6 == 0 {
+  if ipv6() && ifstats.loopback > 0 && uni_stats.ipv6 == 0 {
     return Err(std::io::Error::new(
       std::io::ErrorKind::InvalidData,
       format!("num Ipv6 unicast routes = 0; want>0; summary:{ifstats:?}, {uni_stats:?}"),
@@ -162,7 +163,7 @@ fn check_multicast_stats(
   // We can assume the existence of connected multicast
   // route clones when at least two connected unicast
   // routes, ::1/128 and other, are installed.
-  if ipv6_enabled() && ifstats.loopback > 0 && uni_stats.ipv6 > 1 && multi_stats.ipv6 == 0 {
+  if ipv6() && ifstats.loopback > 0 && uni_stats.ipv6 > 1 && multi_stats.ipv6 == 0 {
     return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("num Ipv6 multicast routes = 0; want>0; summary:{ifstats:?}, {uni_stats:?}, {multi_stats:?}")));
   }
 

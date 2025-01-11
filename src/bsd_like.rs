@@ -12,7 +12,7 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{Interface, IpNet, MacAddr};
+use super::{Interface, IpNet, MacAddr, MAC_ADDRESS_SIZE};
 
 #[cfg(any(
   target_os = "macos",
@@ -142,8 +142,8 @@ fn parse(mut b: &[u8]) -> io::Result<(SmolStr, Option<MacAddr>)> {
     SmolStr::default()
   };
 
-  let addr = if alen == 6 {
-    Some(MacAddr(data[..alen].try_into().unwrap()))
+  let addr = if alen == MAC_ADDRESS_SIZE {
+    Some(MacAddr::new(data[..alen].try_into().unwrap()))
   } else {
     None
   };
@@ -401,7 +401,6 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
           if ifam.ifam_type as i32 == RTM_NEWADDR {
             let addrs = parse_addrs(ifam.ifam_addrs as u32, &src[size_of::<ifa_msghdr>()..l])?;
-
             let mask = addrs[RTAX_NETMASK as usize]
               .as_ref()
               .map(|ip| ip_mask_to_prefix(*ip));
@@ -470,7 +469,6 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpNet>> {
 
       if ifam.ifam_type as i32 == RTM_NEWADDR {
         let addrs = parse_addrs(ifam.ifam_addrs as u32, &b[HEADER_SIZE..len])?;
-
         let mask = addrs[RTAX_NETMASK as usize]
           .as_ref()
           .map(|ip| ip_mask_to_prefix(*ip));

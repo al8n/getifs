@@ -3,7 +3,10 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
 
-use std::{io, net::IpAddr};
+use std::{
+  io,
+  net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 pub use os::*;
 
@@ -14,6 +17,9 @@ pub use smol_str::SmolStr;
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod os;
+
+#[cfg(feature = "serde")]
+mod serde_impl;
 
 #[cfg(any(
   target_os = "macos",
@@ -29,43 +35,15 @@ mod os;
 #[path = "bsd_like.rs"]
 mod os;
 
-mod probe;
-pub use probe::*;
+#[cfg(windows)]
+#[path = "windows.rs"]
+mod os;
 
-/// Represents a physical hardware address (MAC address).
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub struct MacAddr([u8; 6]);
+pub use hardware_address::{MacAddr, ParseMacAddrError};
+#[cfg(test)]
+mod tests;
 
-impl MacAddr {
-  /// Returns the hardware address as a byte array.
-  #[inline]
-  pub const fn as_bytes(&self) -> &[u8] {
-    &self.0
-  }
-}
-
-impl AsRef<[u8]> for MacAddr {
-  #[inline]
-  fn as_ref(&self) -> &[u8] {
-    self.as_bytes()
-  }
-}
-
-impl core::fmt::Debug for MacAddr {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    core::fmt::Display::fmt(self, f)
-  }
-}
-
-impl core::fmt::Display for MacAddr {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(
-      f,
-      "{:<02x}:{:<02x}:{:<02x}:{:<02x}:{:<02x}:{:<02x}",
-      self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], self.0[5]
-    )
-  }
-}
+const MAC_ADDRESS_SIZE: usize = 6;
 
 /// The inferface struct
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -224,4 +202,78 @@ impl IpNet {
   pub const fn index(&self) -> u32 {
     self.index
   }
+}
+
+/// Returns the local IPv4 address of the system.
+///
+/// `allow_private` specifies whether to return a private address.
+pub fn local_ip_v4(allow_private: bool) -> io::Result<Option<Ipv4Addr>> {
+  interfaces().map(|ifs| {
+    ifs.into_iter().find_map(|ifi| {
+      if ifi.flags.contains(Flags::LOOPBACK) {
+        return None;
+      }
+
+      for addr in ifi.addrs {
+        if let IpAddr::V4(addr) = addr.addr() {
+          if addr.is_broadcast()
+            || addr.is_multicast()
+            || addr.is_link_local()
+            || addr.is_loopback()
+          {
+            return None;
+          }
+
+          if !allow_private && addr.is_private() {
+            return None;
+          }
+
+          return Some(addr);
+        }
+      }
+
+      None
+    })
+  })
+}
+
+/// Returns the local IPv6 address of the system.
+///
+/// `allow_private` specifies whether to return a private address.
+pub fn local_ip_v6(allow_private: bool) -> io::Result<Option<Ipv6Addr>> {
+  interfaces().map(|ifs| {
+    ifs.into_iter().find_map(|ifi| {
+      if ifi.flags.contains(Flags::LOOPBACK) {
+        return None;
+      }
+
+      for addr in ifi.addrs {
+        if let IpAddr::V6(addr) = addr.addr() {
+          if addr.is_multicast() || addr.is_unicast_link_local() || addr.is_loopback() {
+            return None;
+          }
+
+          if !allow_private && addr.is_unique_local() {
+            return None;
+          }
+
+          return Some(addr);
+        }
+      }
+
+      None
+    })
+  })
+}
+
+#[test]
+fn test_local_ip_v4() {
+  let ip = local_ip_v4(true).unwrap();
+  println!("local_ip_v4: {:?}", ip);
+}
+
+#[test]
+fn test_local_ip_v6() {
+  let ip = local_ip_v6(true).unwrap();
+  println!("local_ip_v6: {:?}", ip);
 }

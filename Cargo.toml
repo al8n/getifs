@@ -7,7 +7,7 @@ homepage = "https://github.com/al8n/getifs"
 documentation = "https://docs.rs/getifs"
 description = "Get network interfaces information (including MTU) in a fast way (say bye to `getifaddrs`)."
 license = "MIT OR Apache-2.0"
-rust-version = "1.73"
+rust-version = "1.84.0"
 
 [[bench]]
 path = "benches/bench.rs"
@@ -16,10 +16,12 @@ harness = false
 
 [features]
 default = []
-serde = ["dep:serde"]
+serde = ["dep:serde", "ipnet/serde", "smallvec-wrapper/serde", "hardware-address/serde"]
 
 [dependencies]
 bitflags = "2"
+hardware-address = "0.1"
+iprobe = "0.1"
 smol_str = "0.3"
 smallvec-wrapper = "0.2"
 ipnet = "2"
@@ -33,11 +35,13 @@ libc = "0.2"
 either = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }
+windows = { version = "0.59", features = ["Win32_Networking_WinSock"] }
 
 [dev-dependencies]
 criterion = "0.5"
 network-interface = "0.1"
+which = "7"
+scopeguard = "1"
 
 
 [package.metadata.docs.rs]

@@ -1,5 +1,6 @@
 use std::{io, net::IpAddr};
 
+use hardware_address::xtoi2;
 use libc::AF_UNSPEC;
 use smallvec_wrapper::{OneOrMore, SmallVec};
 use smol_str::SmolStr;
@@ -190,99 +191,4 @@ fn parse_proc_net_igmp6(path: &str, ifi: Option<&Interface>) -> std::io::Result<
   }
 
   Ok(ifmat)
-}
-
-/// Maximum value to prevent overflow
-const BIG: i32 = 0x7fffffff;
-
-/// Converts a hexadecimal string to an integer.
-/// Returns a tuple containing:
-/// - The parsed number
-/// - Number of characters consumed
-#[inline]
-fn xtoi(s: &str) -> Option<(i32, usize)> {
-  let mut n: i32 = 0;
-  let mut i: usize = 0;
-
-  for &c in s.as_bytes() {
-    match c {
-      b'0'..=b'9' => {
-        n *= 16;
-        n += (c - b'0') as i32;
-      }
-      b'a'..=b'f' => {
-        n *= 16;
-        n += (c - b'a') as i32 + 10;
-      }
-      b'A'..=b'F' => {
-        n *= 16;
-        n += (c - b'A') as i32 + 10;
-      }
-      _ => break,
-    }
-
-    if n == BIG {
-      return None;
-    }
-
-    i += 1;
-  }
-
-  if i == 0 {
-    return None;
-  }
-
-  Some((n, i))
-}
-
-/// Converts the next two hex digits of s into a byte.
-/// If s is longer than 2 bytes then the third byte must match e.
-#[inline]
-fn xtoi2(s: &str, e: u8) -> Option<u8> {
-  // Check if string is longer than 2 chars and third char matches e
-  if s.len() > 2 && s.as_bytes()[2] != e {
-    return None;
-  }
-
-  // Take first two characters and parse them
-  let slice = if s.len() >= 2 { &s[..2] } else { s };
-  xtoi(slice).and_then(|(n, ei)| if ei == 2 { Some(n as u8) } else { None })
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn test_xtoi() {
-    assert_eq!(xtoi(""), None);
-    assert_eq!(xtoi("0"), Some((0, 1)));
-    assert_eq!(xtoi("12"), Some((0x12, 2)));
-    assert_eq!(xtoi("1a"), Some((0x1a, 2)));
-    assert_eq!(xtoi("1A"), Some((0x1a, 2)));
-    assert_eq!(xtoi("12x"), Some((0x12, 2)));
-    assert_eq!(xtoi("x12"), None);
-  }
-
-  #[test]
-  fn test_xtoi2() {
-    assert_eq!(xtoi2("12", b'\0'), Some(0x12));
-    assert_eq!(xtoi2("12x", b'x'), Some(0x12));
-    assert_eq!(xtoi2("12y", b'x'), None);
-    assert_eq!(xtoi2("1", b'\0'), None);
-    assert_eq!(xtoi2("xy", b'\0'), None);
-  }
-}
-
-#[test]
-fn test_interfaces() {
-  let interfaces = interface_addr_table(1).unwrap();
-  for interface in interfaces {
-    println!("{:?}", interface);
-  }
-
-  // let interfaces = interface_table(2).unwrap();
-  // for interface in interfaces {
-  //   println!("{:?}", interface);
-  // }
 }

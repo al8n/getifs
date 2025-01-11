@@ -12,7 +12,7 @@ use std::io;
 use std::mem;
 use std::ptr::read_unaligned;
 
-use super::{Flags, Interface, IpNet, MacAddr};
+use super::{Flags, Interface, IpNet, MacAddr, MAC_ADDRESS_SIZE};
 
 const NLMSG_HDRLEN: usize = mem::size_of::<nlmsghdr>();
 const NLMSG_ALIGNTO: usize = 4;
@@ -166,10 +166,10 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
                       }
                     }
                     if nonzero {
-                      let mut data = [0; 6];
-                      let len = vbuf.len().min(6);
+                      let mut data = [0; MAC_ADDRESS_SIZE];
+                      let len = vbuf.len().min(MAC_ADDRESS_SIZE);
                       data[..len].copy_from_slice(&vbuf[..len]);
-                      interface.mac_addr = Some(MacAddr(data));
+                      interface.mac_addr = Some(MacAddr::new(data));
                     }
                   }
                 },
