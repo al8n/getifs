@@ -91,8 +91,6 @@ jobs:
     - name: Install Rust
       # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable --no-self-update && rustup default stable
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v4
       with:
@@ -125,8 +123,6 @@ jobs:
     - name: Install Rust
       # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable --no-self-update && rustup default stable
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
     - name: Cache ~/.cargo
       uses: actions/cache@v4
       with:

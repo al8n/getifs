@@ -7,9 +7,9 @@ use smallvec_wrapper::{OneOrMore, SmallVec};
 use smol_str::SmolStr;
 use windows::{
   core::*,
+  Win32::Foundation::ERROR_BUFFER_OVERFLOW,
   Win32::NetworkManagement::{IpHelper::*, Ndis::*},
   Win32::Networking::WinSock::*,
-  Win32::Foundation::ERROR_BUFFER_OVERFLOW,
 };
 
 use super::{Interface, IpNet, MacAddr, MAC_ADDRESS_SIZE};
@@ -50,7 +50,7 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
 
     match result {
       0 => break,
-      ERROR_BUFFER_OVERFLOW => {
+      val if val == ERROR_BUFFER_OVERFLOW.0 => {
         if size <= buffer.len() as u32 {
           return Err(Error::from_win32());
         }
@@ -169,15 +169,16 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpNet>> {
         unicast = addr.Next;
       }
 
-      let mut anycast = adapter.FirstAnycastAddress;
-      while !anycast.is_null() {
-        let addr = unsafe { &*anycast };
-        if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-          let ip = IpNet::new_assert(index as u32, ip, addr.OnLinkPrefixLength);
-          addresses.push(ip);
-        }
-        anycast = addr.Next;
-      }
+      // TODO: handle mask here
+      // let mut anycast = adapter.FirstAnycastAddress;
+      // while !anycast.is_null() {
+      //   let addr = unsafe { &*anycast };
+      //   if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+      //     let ip = IpNet::new_assert(index as u32, ip, addr.OnLinkPrefixLength);
+      //     addresses.push(ip);
+      //   }
+      //   anycast = addr.Next;
+      // }
     }
   }
 
