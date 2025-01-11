@@ -186,7 +186,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpNet>> {
   Ok(addresses)
 }
 
-pub(super) fn interface_multiaddr_table(ifi: u32) -> io::Result<SmallVec<IpAddr>> {
+pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {
   let adapters = get_adapter_addresses()?;
   let mut addresses = SmallVec::new();
 
@@ -196,6 +196,7 @@ pub(super) fn interface_multiaddr_table(ifi: u32) -> io::Result<SmallVec<IpAddr>
       index = adapter.Ipv6IfIndex;
     }
 
+    let ifi = ifi.map_or(0, |i| i.index);
     if ifi == 0 || ifi == index as u32 {
       let mut multicast = adapter.FirstMulticastAddress;
       while !multicast.is_null() {

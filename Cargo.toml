@@ -20,6 +20,7 @@ serde = ["dep:serde", "ipnet/serde", "smallvec-wrapper/serde", "hardware-address
 
 [dependencies]
 bitflags = "2"
+either = "1"
 hardware-address = "0.1"
 iprobe = "0.1"
 smol_str = "0.3"

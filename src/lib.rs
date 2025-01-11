@@ -104,6 +104,7 @@ impl Interface {
     target_os = "visionos",
     target_os = "freebsd",
     target_os = "linux",
+    windows
   ))]
   pub fn multicast_addrs(&self) -> io::Result<SmallVec<IpAddr>> {
     interface_multiaddr_table(Some(self))
