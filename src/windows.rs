@@ -30,7 +30,7 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
   loop {
     let result = unsafe {
       GetAdaptersAddresses(
-        AF_UNSPEC as u32,
+        AF_UNSPEC,
         GAA_FLAG_INCLUDE_PREFIX,
         None,
         Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
@@ -119,7 +119,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         name,
         flags,
         mtu,
-        hardware_addr,
+        mac_addr: hardware_addr,
       };
 
       interfaces.push(interface);
