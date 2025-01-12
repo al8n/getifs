@@ -102,17 +102,18 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
     if idx == 0 || idx == index {
       let mut name_buf = [0u8; 256];
-      let name: SmolStr = {
+      let name: SmolStr = if adapter.FriendlyName.is_null() {
         let hname = unsafe { if_indextoname(index, name_buf.as_mut_ptr()) };
-        // let osname = unsafe { std::ffi::CStr::from_ptr(vbuf.as_ptr() as _).to_string_lossy().into() };
-        // let osname_str = core::str::from_utf8(osname)
-        //   .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        // SmolStr::new(osname_str)
         unsafe {
           std::ffi::CStr::from_ptr(hname as _)
             .to_string_lossy()
             .into()
         }
+      } else {
+        let hname = unsafe { adapter.FriendlyName.to_hstring() };
+        let osname = hname.to_os_string();
+        let osname_str = osname.as_os_str().to_string_lossy();
+        SmolStr::new(&osname_str)
       };
 
       let mut flags = Flags::empty();
@@ -155,13 +156,34 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         None
       };
 
+      let mut addrs = SmallVec::new();
+      unsafe {
+        let mut unicast = adapter.FirstUnicastAddress;
+        while let Some(addr) = unicast.as_ref() {
+          if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+            let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
+            addrs.push(ip);
+          }
+          unicast = addr.Next;
+        }
+
+        let mut anycast = adapter.FirstAnycastAddress;
+        while let Some(addr) = anycast.as_ref() {
+          if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+            let ip = IpIf::new(index, ip);
+            addrs.push(ip);
+          }
+          anycast = addr.Next;
+        }
+      }
+
       let interface = Interface {
         index,
         name,
         flags,
         mtu,
         mac_addr: hardware_addr,
-        addrs: Default::default(),
+        addrs,
       };
 
       let ifindex = interface.index;
@@ -191,11 +213,8 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
       unsafe {
         let mut unicast = adapter.FirstUnicastAddress;
         while let Some(addr) = unicast.as_ref() {
-          // println!("{:?}", addr.OnLinkPrefixLength);
           if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            // let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
-            let ip = IpIf::new(index, ip);
-            println!("{:?}", ip);
+            let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
             addresses.push(ip);
           }
           unicast = addr.Next;

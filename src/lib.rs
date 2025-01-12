@@ -93,7 +93,7 @@ impl Interface {
   /// interface.
   #[inline]
   pub fn addrs(&self) -> io::Result<SmallVec<IpIf>> {
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     return interface_addr_table(self.index);
 
     Ok(self.addrs.clone())
@@ -111,6 +111,19 @@ impl Interface {
     target_os = "linux",
     windows
   ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(any(
+      target_os = "macos",
+      target_os = "tvos",
+      target_os = "ios",
+      target_os = "watchos",
+      target_os = "visionos",
+      target_os = "freebsd",
+      target_os = "linux",
+      windows
+    )))
+  )]
   pub fn multicast_addrs(&self) -> io::Result<SmallVec<IpAddr>> {
     interface_multiaddr_table(Some(self))
   }
