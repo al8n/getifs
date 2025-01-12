@@ -159,51 +159,49 @@ jobs:
   #     - name: ASAN / LSAN / TSAN (Linux)
   #       run: ci/sanitizer.sh
 
-  # miri-tb:
-  #   name: miri-tb-${{ matrix.target }}-${{ matrix.cfg }}
-  #   strategy:
-  #     matrix:
-  #       os:
-  #         - ubuntu-latest
-  #         - macos-latest
-  #       target:
-  #         - x86_64-unknown-linux-gnu
-  #         - i686-unknown-linux-gnu
-  #         - powerpc64-unknown-linux-gnu
-  #         - x86_64-apple-darwin
-  #         - aarch64-apple-darwin
-  #       cfg:
-  #         - all_tests
-  #       # Exclude invalid combinations
-  #       exclude:
-  #         - os: ubuntu-latest
-  #           target: x86_64-apple-darwin
-  #         - os: ubuntu-latest
-  #           target: aarch64-apple-darwin
-  #         - os: macos-latest
-  #           target: x86_64-unknown-linux-gnu
-  #         - os: macos-latest
-  #           target: i686-unknown-linux-gnu
-  #         - os: macos-latest
-  #           target: powerpc64-unknown-linux-gnu
-  #   runs-on: ${{ matrix.os }}
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - name: Cache cargo build and registry
-  #       uses: actions/cache@v4
-  #       with:
-  #         path: |
-  #           ~/.cargo/registry
-  #           ~/.cargo/git
-  #           target
-  #         key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
-  #         restore-keys: |
-  #           ${{ runner.os }}-miri-
-  #     - name: Install cargo-hack
-  #       run: cargo install cargo-hack
-  #     - name: Miri
-  #       run: |
-  #         bash ci/miri_tb.sh ${{ matrix.target }} ${{ matrix.cfg }}
+  miri-tb:
+    name: miri-tb-${{ matrix.target }}-${{ matrix.cfg }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        target:
+          - x86_64-unknown-linux-gnu
+          - i686-unknown-linux-gnu
+          - powerpc64-unknown-linux-gnu
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+        # Exclude invalid combinations
+        exclude:
+          - os: ubuntu-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: i686-unknown-linux-gnu
+          - os: macos-latest
+            target: powerpc64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache cargo build and registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-miri-
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: Miri
+        run: |
+          bash ci/miri_tb.sh ${{ matrix.target }}
 
   # miri-sb:
   #   name: miri-sb-${{ matrix.target }}-${{ matrix.cfg }}
