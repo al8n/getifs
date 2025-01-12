@@ -204,10 +204,6 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
   let mut addresses = SmallVec::new();
 
   for adapter in adapters {
-    if adapter.FirstMulticastAddress.is_null() {
-      continue;
-    }
-
     let mut index = 0;
     let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
     if res == NO_ERROR {
