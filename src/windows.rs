@@ -266,13 +266,15 @@ fn friendly_name(adaptr: &IP_ADAPTER_ADDRESSES_LH) -> Option<SmolStr> {
     return None;
   }
 
-  let len = unsafe { wide_str_len(adaptr.FriendlyName) };
-  let s = match widestring::U16CStr::from_ptr(adaptr.FriendlyName, len) {
-    Ok(s) => s,
-    Err(_) => return None,
-  };
-  let osname_str = s.to_string_lossy();
-  Some(SmolStr::new(&osname_str))
+  unsafe {
+    let len = wide_str_len(adaptr.FriendlyName);
+    let s = match widestring::U16CStr::from_ptr(adaptr.FriendlyName, len) {
+      Ok(s) => s,
+      Err(_) => return None,
+    };
+    let osname_str = s.to_string_lossy();
+    Some(SmolStr::new(&osname_str))
+  }
 }
 
 unsafe fn wide_str_len(ptr: *mut u16) -> usize {
