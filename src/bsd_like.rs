@@ -556,7 +556,7 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
 }
 
 #[cfg(target_os = "freebsd")]
-pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<Vec<IpAddr>> {
+pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {
   const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr>();
 
   let idx = ifi.map_or(0, |ifi| ifi.index);
@@ -591,7 +591,7 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<V
       return Err(io::Error::last_os_error());
     }
 
-    let mut results = Vec::new();
+    let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {

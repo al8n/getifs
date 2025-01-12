@@ -19,8 +19,8 @@ pub use smol_str::SmolStr;
 #[path = "linux.rs"]
 mod os;
 
-#[cfg(feature = "serde")]
-mod serde_impl;
+// #[cfg(feature = "serde")]
+// mod serde_impl;
 
 #[cfg(any(
   target_os = "macos",
@@ -96,6 +96,7 @@ impl Interface {
     #[cfg(target_os = "linux")]
     return interface_addr_table(self.index);
 
+    #[cfg(not(target_os = "linux"))]
     Ok(self.addrs.clone())
   }
 
@@ -282,11 +283,12 @@ pub fn local_ip_v6(allow_private: bool) -> io::Result<Option<Ipv6Addr>> {
 
       for addr in ifi.addrs {
         if let IpAddr::V6(addr) = addr.addr() {
-          if addr.is_multicast() || addr.is_unicast_link_local() || addr.is_loopback() {
+          if addr.is_multicast() || Ipv6AddrExt::is_unicast_link_local(&addr) || addr.is_loopback()
+          {
             return None;
           }
 
-          if !allow_private && addr.is_unique_local() {
+          if !allow_private && Ipv6AddrExt::is_unique_local(&addr) {
             return None;
           }
 
@@ -297,6 +299,24 @@ pub fn local_ip_v6(allow_private: bool) -> io::Result<Option<Ipv6Addr>> {
       None
     })
   })
+}
+
+trait Ipv6AddrExt {
+  fn is_unicast_link_local(&self) -> bool;
+
+  fn is_unique_local(&self) -> bool;
+}
+
+impl Ipv6AddrExt for Ipv6Addr {
+  #[inline]
+  fn is_unicast_link_local(&self) -> bool {
+    (self.segments()[0] & 0xffc0) == 0xfe80
+  }
+
+  #[inline]
+  fn is_unique_local(&self) -> bool {
+    (self.segments()[0] & 0xfe00) == 0xfc00
+  }
 }
 
 #[test]

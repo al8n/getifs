@@ -5,9 +5,11 @@ edition = "2021"
 repository = "https://github.com/al8n/getifs"
 homepage = "https://github.com/al8n/getifs"
 documentation = "https://docs.rs/getifs"
-description = "Get network interfaces information (including MTU) in a fast way (say bye to `getifaddrs`)."
+description = "Get network interfaces information (including MTU) in a fast way (say bye to `libc::getifaddrs`)."
 license = "MIT OR Apache-2.0"
-rust-version = "1.84.0"
+rust-version = "1.57.0"
+keywords = ["ifaddrs", "interface", "network-interface", "mtu", "getifaddrs"]
+categories = ["network-programming"]
 
 [[bench]]
 path = "benches/bench.rs"
@@ -16,7 +18,7 @@ harness = false
 
 [features]
 default = []
-serde = ["dep:serde", "ipnet/serde", "smallvec-wrapper/serde", "hardware-address/serde"]
+# serde = ["dep:serde", "ipnet/serde", "smallvec-wrapper/serde", "hardware-address/serde"]
 
 [dependencies]
 bitflags = "2"
@@ -27,7 +29,7 @@ smol_str = "0.3"
 smallvec-wrapper = "0.2"
 ipnet = "2"
 
-serde = { version = "1", features = ["derive"], optional = true }
+# serde = { version = "1", features = ["derive"], optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
 libc = "0.2"
