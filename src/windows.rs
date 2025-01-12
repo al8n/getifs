@@ -7,7 +7,7 @@ use smallvec_wrapper::{OneOrMore, SmallVec};
 use smol_str::SmolStr;
 use windows::{
   core::*,
-  Win32::Foundation::ERROR_BUFFER_OVERFLOW,
+  // Win32::Foundation::ERROR_BUFFER_OVERFLOW,
   Win32::NetworkManagement::{IpHelper::*, Ndis::*},
   Win32::Networking::WinSock::*,
 };
