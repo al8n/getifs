@@ -33,57 +33,64 @@ bitflags::bitflags! {
   }
 }
 
-fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
-  let mut size = 15000u32; // recommended initial size
+struct Information {
+  buffer: Vec<u8>,
+  adapters: SmallVec<IP_ADAPTER_ADDRESSES_LH>,
+}
 
-  let mut buffer = vec![0; size as usize];
-  loop {
-    let result = unsafe {
-      GetAdaptersAddresses(
-        AF_UNSPEC as u32,
-        GAA_FLAG_INCLUDE_PREFIX,
-        std::ptr::null() as _,
-        buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
-        &mut size,
-      )
-    };
+impl Information {
+  fn fetch() -> Result<Self> {
+    let mut size = 15000u32; // recommended initial size
 
-    if result == NO_ERROR {
-      if size == 0 {
-        return Ok(SmallVec::new());
+    let mut buffer = vec![0; size as usize];
+    loop {
+      let result = unsafe {
+        GetAdaptersAddresses(
+          AF_UNSPEC as u32,
+          GAA_FLAG_INCLUDE_PREFIX,
+          std::ptr::null() as _,
+          buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+          &mut size,
+        )
+      };
+
+      if result == NO_ERROR {
+        if size == 0 {
+          return Ok(SmallVec::new());
+        }
+        break;
       }
-      break;
+
+      if result != ERROR_BUFFER_OVERFLOW {
+        return Err(Error::last_os_error());
+      }
+
+      if size <= buffer.len() as u32 {
+        return Err(Error::last_os_error());
+      }
+      buffer.resize(size as usize, 0);
     }
 
-    if result != ERROR_BUFFER_OVERFLOW {
-      return Err(Error::last_os_error());
+    let mut adapters = SmallVec::new();
+    let mut current = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+
+    // Safety: current is guaranteed to be valid as we just allocated it
+    unsafe {
+      while let Some(curr) = current.as_ref() {
+        adapters.push(current);
+        current = curr.Next;
+      }
     }
 
-    if size <= buffer.len() as u32 {
-      return Err(Error::last_os_error());
-    }
-    buffer.resize(size as usize, 0);
+    Ok(Self { buffer, adapters })
   }
-
-  let mut adapters = SmallVec::new();
-  let mut current = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
-
-  // Safety: current is guaranteed to be valid as we just allocated it
-  unsafe {
-    while let Some(curr) = current.as_ref() {
-      adapters.push(*curr);
-      current = curr.Next;
-    }
-  }
-
-  Ok(adapters)
 }
 
 pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
-  let adapters = get_adapter_addresses()?;
+  let info = Information::fetch()?;
   let mut interfaces = OneOrMore::new();
 
-  for adapter in adapters {
+  for adapter in info.adapters.iter() {
     let mut index = 0;
     let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
     if res == NO_ERROR {
@@ -167,10 +174,10 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 }
 
 pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
-  let adapters = get_adapter_addresses()?;
+  let info = Information::fetch()?;
   let mut addresses = SmallVec::new();
 
-  for adapter in adapters {
+  for adapter in info.adapters.iter() {
     let mut index = 0;
     let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
     if res == NO_ERROR {
@@ -207,10 +214,10 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
 }
 
 pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {
-  let adapters = get_adapter_addresses()?;
+  let info = Information::fetch()?;
   let mut addresses = SmallVec::new();
 
-  for adapter in adapters {
+  for adapter in info.adapters.iter() {
     let mut index = 0;
     let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
     if res == NO_ERROR {
