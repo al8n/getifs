@@ -37,7 +37,7 @@ either = "1"
 rustix = { version = "0.38", features = ["net", "param"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.59", features = ["Win32_Networking_WinSock", "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock", "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
 
 [dev-dependencies]
 criterion = "0.5"

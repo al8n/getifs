@@ -5,7 +5,7 @@ use std::{
 
 use smallvec_wrapper::{OneOrMore, SmallVec};
 use smol_str::SmolStr;
-use windows::{
+use windows_sys::{
   core::*,
   Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
   Win32::NetworkManagement::{IpHelper::*, Ndis::*},
@@ -181,21 +181,21 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
         if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
           println!("{:?}", ip);
           // let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
-          let ip = IpIf::new(index, ip);
-          addresses.push(ip);
+          // let ip = IpIf::new(index, ip);
+          // addresses.push(ip);
         }
         unicast = addr.Next;
       }
 
-      let mut anycast = adapter.FirstAnycastAddress;
-      while !anycast.is_null() {
-        let addr = unsafe { &*anycast };
-        if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-          let ip = IpIf::new(index, ip);
-          addresses.push(ip);
-        }
-        anycast = addr.Next;
-      }
+      // let mut anycast = adapter.FirstAnycastAddress;
+      // while !anycast.is_null() {
+      //   let addr = unsafe { &*anycast };
+      //   if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+      //     let ip = IpIf::new(index, ip);
+      //     addresses.push(ip);
+      //   }
+      //   anycast = addr.Next;
+      // }
     }
   }
 
