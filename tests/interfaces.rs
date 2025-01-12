@@ -194,6 +194,7 @@ fn ifis() {
 }
 
 #[test]
+#[cfg(not(windows))]
 fn if_addrs() {
   let ift = interfaces().unwrap();
   let stats = IfStats::stats(&ift);
