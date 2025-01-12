@@ -86,7 +86,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
   for adapter in adapters {
     let mut index = 0;
-    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid.Value, &mut index) };
+    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
     if res == NO_ERROR {
       index = adapter.Ipv6IfIndex;
     }
@@ -167,8 +167,9 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
   let mut addresses = SmallVec::new();
 
   for adapter in adapters {
-    let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
-    if index == 0 {
+    let mut index = 0;
+    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
+    if res == NO_ERROR {
       index = adapter.Ipv6IfIndex;
     }
 
@@ -207,8 +208,9 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
       continue;
     }
 
-    let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
-    if index == 0 {
+    let mut index = 0;
+    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
+    if res == NO_ERROR {
       index = adapter.Ipv6IfIndex;
     }
 
