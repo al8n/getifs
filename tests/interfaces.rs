@@ -184,8 +184,8 @@ fn ifis() {
       ifi.mac_addr()
     );
 
-    // let ifxi = interface_by_index(ifi.index()).unwrap().unwrap();
-    // assert_eq!(ifi, ifxi);
+    let ifxi = interface_by_index(ifi.index()).unwrap().unwrap();
+    assert_eq!(ifi, ifxi);
 
     let ifxn = interface_by_name(ifi.name()).unwrap().unwrap();
 
