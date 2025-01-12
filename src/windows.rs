@@ -184,15 +184,15 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
         unicast = addr.Next;
       }
 
-      let mut anycast = adapter.FirstAnycastAddress;
-      while !anycast.is_null() {
-        let addr = unsafe { &*anycast };
-        if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-          let ip = IpIf::new(index, ip);
-          addresses.push(ip);
-        }
-        anycast = addr.Next;
-      }
+      // let mut anycast = adapter.FirstAnycastAddress;
+      // while !anycast.is_null() {
+      //   let addr = unsafe { &*anycast };
+      //   if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+      //     let ip = IpIf::new(index, ip);
+      //     addresses.push(ip);
+      //   }
+      //   anycast = addr.Next;
+      // }
     }
   }
 
@@ -234,16 +234,14 @@ fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
   unsafe {
     match (*sockaddr).sa_family {
       AF_INET => {
-        // let addr = sockaddr as *const SOCKADDR_IN;
-        // let bytes = unsafe { (*addr).sin_addr.S_un.S_addr.to_ne_bytes() };
-        // Some(IpAddr::V4(bytes.into()))
-        None
+        let addr = sockaddr as *const SOCKADDR_IN;
+        let bytes = unsafe { (*addr).sin_addr.S_un.S_addr.to_ne_bytes() };
+        Some(IpAddr::V4(bytes.into()))
       }
       AF_INET6 => {
-        // let addr = sockaddr as *const SOCKADDR_IN6;
-        // let bytes = unsafe { (*addr).sin6_addr.u.Byte };
-        // Some(IpAddr::V6(bytes.into()))
-        None
+        let addr = sockaddr as *const SOCKADDR_IN6;
+        let bytes = unsafe { (*addr).sin6_addr.u.Byte };
+        Some(IpAddr::V6(bytes.into()))
       }
       _ => None,
     }
