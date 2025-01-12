@@ -82,7 +82,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
       index = adapter.Ipv6IfIndex;
     }
 
-    if idx == 0 || idx == index as u32 {
+    if idx == 0 || idx == index {
       let hname = unsafe { adapter.FriendlyName.to_hstring() };
       let osname = hname.to_os_string();
       let osname_str = osname.as_os_str().to_string_lossy();
@@ -115,7 +115,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
       let mtu = if adapter.Mtu == 0xffffffff {
         0
       } else {
-        adapter.Mtu as u32
+        adapter.Mtu
       };
 
       let hardware_addr = if adapter.PhysicalAddressLength > 0 {
@@ -129,7 +129,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
       };
 
       let interface = Interface {
-        index: index as u32,
+        index,
         name,
         flags,
         mtu,
@@ -159,7 +159,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
       index = adapter.Ipv6IfIndex;
     }
 
-    if ifi == 0 || ifi == index as u32 {
+    if ifi == 0 || ifi == index {
       let mut unicast = adapter.FirstUnicastAddress;
       while !unicast.is_null() {
         let addr = unsafe { &*unicast };
@@ -196,7 +196,7 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
     }
 
     let ifi = ifi.map_or(0, |i| i.index);
-    if ifi == 0 || ifi == index as u32 {
+    if ifi == 0 || ifi == index {
       let mut multicast = adapter.FirstMulticastAddress;
       while !multicast.is_null() {
         let addr = unsafe { &*multicast };
