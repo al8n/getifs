@@ -93,13 +93,22 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
     if idx == 0 || idx == index {
       let mut name_buf = [0u8; 256];
+      // let name = {
+      //   let hname = unsafe { if_indextoname(index, &mut name_buf) };
+      //   let osname = unsafe { hname.as_bytes() };
+      //   let osname_str = core::str::from_utf8(osname)
+      //     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+      //   SmolStr::new(osname_str)
+      // };
       let name = {
-        // let hname = unsafe { if_indextoname(index, &mut name_buf) };
-        let hname = &adapter.AdapterName;
-        let osname = unsafe { hname.as_bytes() };
-        let osname_str = core::str::from_utf8(osname)
-          .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        SmolStr::new(osname_str)
+        let res = unsafe { ConvertInterfaceLuidToNameA(&adapter.Luid, &mut name_buf) };
+        if res == NO_ERROR.0 {
+          let osname = unsafe { core::str::from_utf8(&name_buf) };
+          let osname_str = osname.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+          SmolStr::new(osname_str)
+        } else {
+          return Err(Error::from_win32());
+        }
       };
       // let name = if adapter.FriendlyName.is_null() {
       //   SmolStr::default()
