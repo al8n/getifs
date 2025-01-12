@@ -283,14 +283,14 @@ pub fn local_ip_v6(allow_private: bool) -> io::Result<Option<Ipv6Addr>> {
   })
 }
 
-// #[test]
-// fn test_local_ip_v4() {
-//   let ip = local_ip_v4(true).unwrap();
-//   println!("local_ip_v4: {:?}", ip);
-// }
+#[test]
+fn test_local_ip_v4() {
+  let ip = local_ip_v4(true).unwrap();
+  println!("local_ip_v4: {:?}", ip);
+}
 
-// #[test]
-// fn test_local_ip_v6() {
-//   let ip = local_ip_v6(true).unwrap();
-//   println!("local_ip_v6: {:?}", ip);
-// }
+#[test]
+fn test_local_ip_v6() {
+  let ip = local_ip_v6(true).unwrap();
+  println!("local_ip_v6: {:?}", ip);
+}
