@@ -36,33 +36,33 @@ bitflags::bitflags! {
 fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
   let mut size = 15000u32; // recommended initial size
 
-  // First call to get required size
-  unsafe {
-    GetAdaptersAddresses(
-      AF_UNSPEC.0 as u32,
-      GAA_FLAG_INCLUDE_PREFIX,
-      None,
-      None, // Pass None first to get required size
-      &mut size,
-    )
-  };
-
-  // Allocate buffer with required size
   let mut buffer = vec![0; size as usize];
+  loop {
+    let result = unsafe {
+      GetAdaptersAddresses(
+        AF_UNSPEC.0 as u32,
+        GAA_FLAG_INCLUDE_PREFIX,
+        None,
+        Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+        &mut size,
+      )
+    };
 
-  // Second call to get actual data
-  let result = unsafe {
-    GetAdaptersAddresses(
-      AF_UNSPEC.0 as u32,
-      GAA_FLAG_INCLUDE_PREFIX,
-      None,
-      Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
-      &mut size,
-    )
-  };
+    if result == NO_ERROR {
+      if size == 0 {
+        return Ok(SmallVec::new());
+      }
+      break;
+    }
 
-  if result != 0 {
-    return Err(Error::from_win32());
+    if result != ERROR_BUFFER_OVERFLOW {
+      return Err(Error::from_win32());
+    }
+
+    if size <= buffer.len() as u32 {
+      return Err(Error::from_win32());
+    }
+    buffer.resize(size as usize, 0);
   }
 
   let mut adapters = SmallVec::new();
@@ -92,10 +92,9 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
     }
 
     if idx == 0 || idx == index {
+      let mut name_buf = [0u8; 256];
       let name = if adapter.FriendlyName.is_null() {
-        SmolStr::default()
-      } else {
-        let hname = unsafe { adapter.FriendlyName.to_hstring() };
+        let hname = unsafe { if_indextoname(index, &mut name_buf) };
         let osname = hname.to_os_string();
         let osname_str = osname.as_os_str().to_string_lossy();
         SmolStr::new(&osname_str)
