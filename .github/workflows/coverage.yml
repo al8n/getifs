@@ -42,11 +42,11 @@ jobs:
           toolchain: nightly
           override: true
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin@0.30
       - name: Run Coverage and Generate Report
         run: |
           mkdir -p coverage
-          cargo tarpaulin --avoid-cfg-tarpaulin --out xml --run-types tests --run-types doctests --output-dir coverage/${{ matrix.os }} -j 1
+          cargo tarpaulin --tests --avoid-cfg-tarpaulin --out xml --output-dir coverage/${{ matrix.os }} -j 1
         continue-on-error: true
       - name: Upload Coverage Report as Artifact
         uses: actions/upload-artifact@v4
