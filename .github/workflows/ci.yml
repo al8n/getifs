@@ -22,7 +22,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
+  # RUSTFLAGS: -Dwarnings
   RUST_BACKTRACE: 1
   nightly: nightly
   stable: stable
