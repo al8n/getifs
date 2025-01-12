@@ -166,17 +166,13 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
   let mut addresses = SmallVec::new();
 
   for adapter in adapters {
-    // Add null check for adapter
-    if adapter.FirstUnicastAddress.is_null() && adapter.FirstAnycastAddress.is_null() {
-      continue;
-    }
-
     let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
     if index == 0 {
       index = adapter.Ipv6IfIndex;
     }
 
     if ifi == 0 || ifi == index {
+      println!("adapter: {adapter:?}");
       let mut unicast = adapter.FirstUnicastAddress;
       while !unicast.is_null() {
         let addr = unsafe { &*unicast };
@@ -238,11 +234,6 @@ fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
   }
 
   unsafe {
-    // Add bounds checking for the address family
-    if (*sockaddr).sa_family != AF_INET && (*sockaddr).sa_family != AF_INET6 {
-      return None;
-    }
-
     match (*sockaddr).sa_family {
       AF_INET => {
         // let addr = &*(sockaddr as *const SOCKADDR_IN);
