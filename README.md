@@ -37,6 +37,10 @@ Windows | `GetAdaptersAddresses`
 Because all of current network interfaces crates do not support fetching `MTU`, and almost all of them are using `libc::getifaddrs`. This crate
 tries to avoid unneeded allocation and use more underlying method to achieve the same functionalities.
 
+## Pedigree
+
+- The code in this crate is inspired by Golang's `interface.go`.
+
 #### License
 
 `getifs` is under the terms of both the MIT license and the
@@ -51,4 +55,3 @@ Copyright (c) 2025 Al Liu.
 [doc-url]: https://docs.rs/getifs
 [crates-url]: https://crates.io/crates/getifs
 [codecov-url]: https://app.codecov.io/gh/al8n/getifs/
-[zh-cn-url]: https://github.com/al8n/getifs/tree/main/README-zh_CN.md
