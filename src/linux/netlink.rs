@@ -10,7 +10,6 @@ use smallvec_wrapper::{OneOrMore, SmallVec};
 use std::ffi::CStr;
 use std::io;
 use std::mem;
-use std::ptr::read_unaligned;
 
 use super::{Flags, Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
 
@@ -100,7 +99,7 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
       let mut received = &rb[..nr as usize];
 
       while received.len() >= NLMSG_HDRLEN {
-        let h = read_unaligned::<nlmsghdr>(received.as_ptr() as _);
+        let h = decode_nlmsghdr(received);
         let hlen = h.nlmsg_len as usize;
         let l = nlm_align_of(hlen);
         if hlen < NLMSG_HDRLEN || l > received.len() {
@@ -267,7 +266,7 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IpIf>> 
 
       // means auto choose interface for addr fetching
       while received.len() >= NLMSG_HDRLEN {
-        let h = read_unaligned::<nlmsghdr>(received.as_ptr() as _);
+        let h = decode_nlmsghdr(received);
         let hlen = h.nlmsg_len as usize;
         let l = nlm_align_of(hlen);
         if hlen < NLMSG_HDRLEN || l > received.len() {
@@ -460,4 +459,20 @@ struct IfAddrMessageHeader {
 
 impl IfAddrMessageHeader {
   const SIZE: usize = mem::size_of::<Self>();
+}
+
+#[inline]
+fn decode_nlmsghdr(src: &[u8]) -> nlmsghdr {
+  let hlen = u32::from_ne_bytes(src[..4].try_into().unwrap());
+  let hty = u16::from_ne_bytes(src[4..6].try_into().unwrap());
+  let hflags = u16::from_ne_bytes(src[6..8].try_into().unwrap());
+  let hseq = u32::from_ne_bytes(src[8..12].try_into().unwrap());
+  let hpid = u32::from_ne_bytes(src[12..16].try_into().unwrap());
+  nlmsghdr {
+    nlmsg_len: hlen,
+    nlmsg_type: hty,
+    nlmsg_flags: hflags,
+    nlmsg_seq: hseq,
+    nlmsg_pid: hpid,
+  }
 }
