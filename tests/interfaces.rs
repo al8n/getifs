@@ -227,7 +227,6 @@ fn if_unicast_addrs() {
 }
 
 #[test]
-#[cfg(not(windows))]
 fn if_multicast_addrs() {
   let ift = interfaces().unwrap();
   let if_stats = IfStats::stats(&ift);
