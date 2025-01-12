@@ -1,9 +1,9 @@
 <div align="center">
-<h1>Get Interfaces</h1>
+<h1>GetIfs</h1>
 </div>
 <div align="center">
 
-Get network interfaces information (including MTU) in a fast way (say bye to `libc::getifaddrs`).
+Cross-platform network tools, a bunch of network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
 
 [<img alt="github" src="https://img.shields.io/badge/github-al8n/getifs-8da0cb?style=for-the-badge&logo=Github" height="22">][Github-url]
 <img alt="LoC" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fal8n%2F327b2a8aef9003246e45c6e47fe63937%2Fraw%2Fgetifs" height="22">
@@ -17,25 +17,46 @@ Get network interfaces information (including MTU) in a fast way (say bye to `li
 
 </div>
 
+## Introduction
+
+Cross-platform network tools, a bunch of network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
+
 ## Installation
 
 ```toml
 [dependencies]
-getifs = "0.1"
+getifs = "0.2"
 ```
+
+## Examples
+
+- Fetching all interfaces: [examples/interfaces.rs](./examples/interfaces.rs)
+- Fetching all interface addresses (excluding multicast addrs): [examples/addrs.rs](./examples/addrs.rs)
+- Fetching all interface multicast addresses: [exampels/multicast_addrs.rs](./examples/multicast_addrs.rs)
+- Fetching gateway addresses: [examples/gateway.rs](./examples/gateway.rs)
+- Fetching local ip addresses: [examples/local_ip_addrs.rs](./examples/local_ip_addrs.rs)
+- Fetching ip addresses by RFC: [examples/filter_by_rfc.rs](./examples/filter_by_rfc.rs)
 
 ## Details
 
 OS | Approach
 --- | ---
 Linux | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
-BSD-based | Uses of `sysctl` to retrieve network interfaces
+BSD-like | `sysctl`
 Windows | `GetAdaptersAddresses`
 
 ## Why a new network interfaces crate?
 
 Because all of current network interfaces crates do not support fetching `MTU`, and almost all of them are using `libc::getifaddrs`. This crate
 tries to avoid unneeded allocation and use more underlying method to achieve the same functionalities.
+
+## Roadmap
+
+- [ ] Support fetching routing tables (0.3.0)
+
+## Pedigree
+
+- The code in this crate is inspired by Golang's `interface.go` and [HashiCorp's go-sockaddr](https://github.com/hashicorp/go-sockaddr).
 
 #### License
 
@@ -51,4 +72,3 @@ Copyright (c) 2025 Al Liu.
 [doc-url]: https://docs.rs/getifs
 [crates-url]: https://crates.io/crates/getifs
 [codecov-url]: https://app.codecov.io/gh/al8n/getifs/
-[zh-cn-url]: https://github.com/al8n/getifs/tree/main/README-zh_CN.md

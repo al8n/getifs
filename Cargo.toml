@@ -5,15 +5,25 @@ edition = "2021"
 repository = "https://github.com/al8n/getifs"
 homepage = "https://github.com/al8n/getifs"
 documentation = "https://docs.rs/getifs"
-description = "Get network interfaces information (including MTU) in a fast way (say bye to `libc::getifaddrs`)."
+description = "Cross-platform network tools, a bunch of network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc."
 license = "MIT OR Apache-2.0"
 rust-version = "1.57.0"
 keywords = ["ifaddrs", "interface", "network-interface", "mtu", "getifaddrs"]
 categories = ["network-programming"]
 
 [[bench]]
-path = "benches/bench.rs"
-name = "bench"
+path = "benches/interfaces.rs"
+name = "interfaces"
+harness = false
+
+[[bench]]
+path = "benches/local_ip_address.rs"
+name = "local_ip_address"
+harness = false
+
+[[bench]]
+path = "benches/gateway.rs"
+name = "gateway"
 harness = false
 
 [features]
@@ -25,9 +35,13 @@ bitflags = "2"
 either = "1"
 hardware-address = "0.1"
 iprobe = "0.1"
+ipnet = "2"
+iprfc = "0.2"
+paste = "1"
 smol_str = "0.3"
 smallvec-wrapper = "0.2"
-ipnet = "2"
+triomphe = "0.1"
+
 
 # serde = { version = "1", features = ["derive"], optional = true }
 
@@ -44,6 +58,7 @@ widestring = "1"
 [dev-dependencies]
 criterion = "0.5"
 network-interface = "2"
+local-ip-address = "0.6"
 which = "7"
 scopeguard = "1"
 

@@ -4,7 +4,7 @@ use libc::{
   CTL_NET, NET_RT_IFLIST, NET_RT_IFLIST2, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO,
   RTM_NEWADDR, RTM_VERSION,
 };
-use smallvec_wrapper::{OneOrMore, SmallVec};
+use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 use std::{
   io, mem,
@@ -12,7 +12,84 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
+use super::{
+  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net,
+  MAC_ADDRESS_SIZE,
+};
+
+macro_rules! rt_generic_mod {
+  ($($name:ident($rtf:ident, $rta:ident)), +$(,)?) => {
+    $(
+      paste::paste! {
+        pub(super) use [< rt_ $name >]::*;
+
+        mod [<rt_ $name>] {
+          use std::{
+            io,
+            net::{IpAddr, Ipv4Addr, Ipv6Addr},
+          };
+
+          use libc::{AF_INET, AF_INET6, AF_UNSPEC, $rta, $rtf};
+          use smallvec_wrapper::SmallVec;
+
+          use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
+
+          use super::super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
+
+          pub(crate) fn [<$name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
+            [< $name _addrs_in >](AF_UNSPEC, |_| true)
+          }
+
+          pub(crate) fn [<$name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
+            [< $name _addrs_in >](AF_INET, |_| true)
+          }
+
+          pub(crate) fn [<$name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
+            [< $name _addrs_in >](AF_INET6, |_| true)
+          }
+
+          pub(crate) fn [<$name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
+          where
+            F: FnMut(&IpAddr) -> bool,
+          {
+            [< $name _addrs_in >](AF_UNSPEC, f)
+          }
+
+          pub(crate) fn [<$name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
+          where
+            F: FnMut(&Ipv4Addr) -> bool,
+          {
+            [< $name _addrs_in >](AF_INET, ipv4_filter_to_ip_filter(f))
+          }
+
+          pub(crate) fn [<$name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
+          where
+            F: FnMut(&Ipv6Addr) -> bool,
+          {
+            [< $name _addrs_in >](AF_INET6, ipv6_filter_to_ip_filter(f))
+          }
+
+          fn [<$name _addrs_in >]<A, F>(family: i32, f: F) -> io::Result<SmallVec<A>>
+          where
+            A: Address + Eq,
+            F: FnMut(&IpAddr) -> bool,
+          {
+            super::rt_generic::rt_generic_addrs_in(family, $rtf, $rta, f)
+          }
+        }
+      }
+    )*
+  };
+}
+
+rt_generic_mod!(gateway(RTF_GATEWAY, RTA_GATEWAY),);
+
+pub(super) use local_addr::*;
+
+#[path = "bsd_like/local_addr.rs"]
+mod local_addr;
+#[path = "bsd_like/rt_generic.rs"]
+mod rt_generic;
 
 #[cfg(any(
   target_os = "macos",
@@ -23,17 +100,11 @@ use super::{Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
 ))]
 const KERNAL_ALIGN: usize = 4;
 
-#[cfg(target_os = "dragonfly")]
-const KERNAL_ALIGN: usize = core::mem::size_of::<usize>();
-
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd",))]
 const KERNAL_ALIGN: usize = core::mem::size_of::<usize>();
 
 #[cfg(target_os = "netbsd")]
 const KERNAL_ALIGN: usize = 8;
-
-#[cfg(target_os = "openbsd")]
-const KERNAL_ALIGN: usize = core::mem::size_of::<usize>();
 
 fn invalid_address() -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, "invalid address")
@@ -54,7 +125,7 @@ fn invalid_mask(e: ipnet::PrefixLenError) -> io::Error {
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.
-  #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+  #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub struct Flags: u32 {
     /// Interface is administratively up
     const UP = 0x1;
@@ -339,9 +410,9 @@ fn parse_addrs(addrs: u32, mut b: &[u8]) -> io::Result<[Option<IpAddr>; RTAX_MAX
   Ok(as_)
 }
 
-pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
+fn fetch(family: i32, rt: i32, flag: i32) -> io::Result<Vec<u8>> {
   unsafe {
-    let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, NET_RT_IFLIST, idx as i32];
+    let mut mib = [CTL_NET, AF_ROUTE, 0, family, rt, flag];
 
     // Get buffer size
     let mut len: size_t = 0;
@@ -363,7 +434,14 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
       return Err(io::Error::last_os_error());
     }
 
-    let mut results = OneOrMore::new();
+    Ok(buf)
+  }
+}
+
+pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
+  unsafe {
+    let buf = fetch(AF_UNSPEC, NET_RT_IFLIST, idx as i32)?;
+    let mut results = TinyVec::new();
 
     let mut src = buf.as_slice();
     while src.len() > 4 {
@@ -380,49 +458,19 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         continue;
       }
 
-      match src[3] as i32 {
-        libc::RTM_IFINFO => {
-          let ifm = &*(src.as_ptr() as *const if_msghdr);
-          if ifm.ifm_type as i32 == RTM_IFINFO {
-            let (name, _mac) = parse(&src[size_of::<if_msghdr>()..l])?;
-            let interface = Interface {
-              index: ifm.ifm_index as u32,
-              mtu: ifm.ifm_data.ifi_mtu,
-              name,
-              addrs: SmallVec::new(),
-              mac_addr: _mac,
-              flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
-            };
-            results.push(interface);
-          }
+      if src[3] as i32 == libc::RTM_IFINFO {
+        let ifm = &*(src.as_ptr() as *const if_msghdr);
+        if ifm.ifm_type as i32 == RTM_IFINFO {
+          let (name, mac) = parse(&src[size_of::<if_msghdr>()..l])?;
+          let interface = Interface {
+            index: ifm.ifm_index as u32,
+            mtu: ifm.ifm_data.ifi_mtu,
+            name,
+            mac_addr: mac,
+            flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
+          };
+          results.push(interface);
         }
-        libc::RTM_NEWADDR => {
-          let ifam = &*(src.as_ptr() as *const ifa_msghdr);
-
-          if ifam.ifam_type as i32 == RTM_NEWADDR {
-            let addrs = parse_addrs(ifam.ifam_addrs as u32, &src[size_of::<ifa_msghdr>()..l])?;
-            let mask = addrs[RTAX_NETMASK as usize]
-              .as_ref()
-              .map(|ip| ip_mask_to_prefix(*ip));
-
-            let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
-
-            if let (Some(ip), Some(mask)) = (ip, mask) {
-              let ipnet = IpIf::with_prefix_len_assert(
-                ifam.ifam_index as u32,
-                ip,
-                mask.map_err(invalid_mask)?,
-              );
-              if let Some(ifi) = results
-                .iter_mut()
-                .find(|ifi| ifi.index == ifam.ifam_index as u32)
-              {
-                ifi.addrs.push(ipnet);
-              }
-            }
-          }
-        }
-        _ => {}
       }
 
       src = &src[l..];
@@ -432,32 +480,36 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   }
 }
 
-pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpIf>> {
+pub(super) fn interface_ipv4_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<Ifv4Net>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_addr_table(AF_INET, idx, f)
+}
+
+pub(super) fn interface_ipv6_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<Ifv6Net>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_addr_table(AF_INET6, idx, f)
+}
+
+pub(super) fn interface_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfNet>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_addr_table(AF_UNSPEC, idx, f)
+}
+
+pub(super) fn interface_addr_table<T, F>(family: i32, idx: u32, mut f: F) -> io::Result<SmallVec<T>>
+where
+  T: Net,
+  F: FnMut(&IpAddr) -> bool,
+{
   const HEADER_SIZE: usize = mem::size_of::<ifa_msghdr>();
 
   unsafe {
-    let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, NET_RT_IFLIST, idx as i32];
-
-    // Get buffer size
-    let mut len: size_t = 0;
-    if sysctl(mib.as_mut_ptr(), 6, null_mut(), &mut len, null_mut(), 0) < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Allocate buffer
-    let mut buf = vec![0u8; len];
-    if sysctl(
-      mib.as_mut_ptr(),
-      6,
-      buf.as_mut_ptr() as *mut c_void,
-      &mut len,
-      null_mut(),
-      0,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-
+    let buf = fetch(family, NET_RT_IFLIST, idx as i32)?;
     let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
@@ -465,7 +517,7 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpIf>> {
       let ifam = &*(b.as_ptr() as *const ifa_msghdr);
       let len = ifam.ifam_msglen as usize;
 
-      if ifam.ifam_version as i32 != RTM_VERSION {
+      if (ifam.ifam_version as i32 != RTM_VERSION) || (ifam.ifam_index as u32 != idx && idx != 0) {
         b = &b[len..];
         continue;
       }
@@ -479,11 +531,14 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpIf>> {
         let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
         if let (Some(ip), Some(mask)) = (ip, mask) {
-          results.push(IpIf::with_prefix_len_assert(
+          if let Some(ifa) = T::try_from_with_filter(
             ifam.ifam_index as u32,
             ip,
             mask.map_err(invalid_mask)?,
-          ));
+            |addr| f(addr),
+          ) {
+            results.push(ifa);
+          }
         }
       }
 
@@ -494,103 +549,101 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpIf>> {
   }
 }
 
-#[cfg(any(
-  target_os = "macos",
-  target_os = "tvos",
-  target_os = "ios",
-  target_os = "watchos",
-  target_os = "visionos",
-))]
-pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {
-  const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr2>();
+cfg_bsd_multicast!(
+  pub(super) fn interface_multicast_ipv4_addresses<F>(
+    idx: u32,
+    mut f: F,
+  ) -> io::Result<SmallVec<Ifv4Addr>>
+  where
+    F: FnMut(&std::net::Ipv4Addr) -> bool,
+  {
+    interface_multiaddr_table(AF_INET, idx, |addr| match addr {
+      IpAddr::V4(ip) => f(ip),
+      _ => false,
+    })
+  }
 
-  let idx = ifi.map_or(0, |ifi| ifi.index);
-  unsafe {
-    let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, NET_RT_IFLIST2, idx as i32];
+  pub(super) fn interface_multicast_ipv6_addresses<F>(
+    idx: u32,
+    mut f: F,
+  ) -> io::Result<SmallVec<Ifv6Addr>>
+  where
+    F: FnMut(&Ipv6Addr) -> bool,
+  {
+    interface_multiaddr_table(AF_INET6, idx, |addr| match addr {
+      IpAddr::V6(ip) => f(ip),
+      _ => false,
+    })
+  }
 
-    // Get buffer size
-    let mut len: size_t = 0;
-    if sysctl(mib.as_mut_ptr(), 6, null_mut(), &mut len, null_mut(), 0) < 0 {
-      return Err(io::Error::last_os_error());
-    }
+  pub(super) fn interface_multicast_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfAddr>>
+  where
+    F: FnMut(&IpAddr) -> bool,
+  {
+    interface_multiaddr_table(AF_UNSPEC, idx, f)
+  }
+);
 
-    // Allocate buffer
-    let mut buf = vec![0u8; len];
-    if sysctl(
-      mib.as_mut_ptr(),
-      6,
-      buf.as_mut_ptr() as *mut c_void,
-      &mut len,
-      null_mut(),
-      0,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
+cfg_apple!(
+  pub(super) fn interface_multiaddr_table<T, F>(
+    family: i32,
+    idx: u32,
+    mut f: F,
+  ) -> io::Result<SmallVec<T>>
+  where
+    T: Address,
+    F: FnMut(&IpAddr) -> bool,
+  {
+    const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr2>();
 
-    let mut results = SmallVec::new();
-    let mut b = buf.as_slice();
+    unsafe {
+      let buf = fetch(family, NET_RT_IFLIST2, idx as i32)?;
 
-    while b.len() > HEADER_SIZE {
-      let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr2);
-      let len = ifam.ifmam_msglen as usize;
+      let mut results = SmallVec::new();
+      let mut b = buf.as_slice();
 
-      if ifam.ifmam_version as i32 != RTM_VERSION {
+      while b.len() > HEADER_SIZE {
+        let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr2);
+        let len = ifam.ifmam_msglen as usize;
+
+        if ifam.ifmam_version as i32 != RTM_VERSION {
+          b = &b[len..];
+          continue;
+        }
+
+        if ifam.ifmam_type as i32 == libc::RTM_NEWMADDR2 {
+          let addrs = parse_addrs(ifam.ifmam_addrs as u32, &b[HEADER_SIZE..len])?;
+
+          if let Some(ip) = addrs[RTAX_IFA as usize].as_ref() {
+            if let Some(ip) = T::try_from_with_filter(ifam.ifmam_index as u32, *ip, |addr| f(addr))
+            {
+              results.push(ip);
+            }
+          }
+        }
+
         b = &b[len..];
-        continue;
       }
 
-      if ifam.ifmam_type as i32 == libc::RTM_NEWMADDR2 {
-        let addrs = parse_addrs(ifam.ifmam_addrs as u32, &b[HEADER_SIZE..len])?;
-
-        if let Some(ip) = addrs[RTAX_IFA as usize].as_ref() {
-          results.push(*ip);
-        }
-      }
-
-      b = &b[len..];
+      Ok(results)
     }
-
-    Ok(results)
   }
-}
+);
 
 #[cfg(target_os = "freebsd")]
-pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {
+pub(super) fn interface_multiaddr_table<T, F>(
+  family: i32,
+  idx: u32,
+  mut f: F,
+) -> io::Result<SmallVec<T>>
+where
+  T: Address,
+  F: FnMut(&IpAddr) -> bool,
+{
   const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr>();
 
-  let idx = ifi.map_or(0, |ifi| ifi.index);
-
   unsafe {
-    let mut mib = [
-      CTL_NET,
-      AF_ROUTE,
-      0,
-      AF_UNSPEC,
-      libc::NET_RT_IFMALIST,
-      idx as i32,
-    ];
-
-    // Get buffer size
-    let mut len: size_t = 0;
-    if sysctl(mib.as_mut_ptr(), 6, null_mut(), &mut len, null_mut(), 0) < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Allocate buffer
-    let mut buf = vec![0u8; len];
-    if sysctl(
-      mib.as_mut_ptr(),
-      6,
-      buf.as_mut_ptr() as *mut c_void,
-      &mut len,
-      null_mut(),
-      0,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-
+    let buf = fetch(family, libc::NET_RT_IFMALIST, idx as i32)?;
     let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
@@ -607,7 +660,9 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
         let addrs = parse_addrs(ifam.ifmam_addrs as u32, &b[HEADER_SIZE..len])?;
 
         if let Some(ip) = addrs[RTAX_IFA as usize].as_ref() {
-          results.push(*ip);
+          if let Some(ip) = T::try_from_with_filter(ifam.ifmam_index as u32, *ip, |addr| f(addr)) {
+            results.push(ip);
+          }
         }
       }
 
