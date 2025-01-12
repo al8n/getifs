@@ -92,8 +92,11 @@ impl Interface {
   /// Returns a list of unicast interface addrs for a specific
   /// interface.
   #[inline]
-  pub fn addrs(&self) -> &[IpIf] {
-    &self.addrs
+  pub fn addrs(&self) -> io::Result<SmallVec<IpIf>> {
+    #[cfg(any(windows, target_os = "linux"))]
+    return interface_addr_table(self.index);
+
+    Ok(self.addrs.clone())
   }
 
   /// Returns a list of multicast, joined group addrs

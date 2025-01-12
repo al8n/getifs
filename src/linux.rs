@@ -66,21 +66,7 @@ bitflags::bitflags! {
 }
 
 pub(super) fn interface_table(index: u32) -> io::Result<OneOrMore<Interface>> {
-  let mut ift = netlink_interface(AF_UNSPEC, index)?;
-  if index == 0 {
-    for i in ift.iter_mut() {
-      let addrs = netlink_addr(AF_UNSPEC, i.index)?;
-      i.addrs = addrs;
-    }
-
-    Ok(ift)
-  } else {
-    if let Some(ifi) = ift.iter_mut().find(|i| i.index == index) {
-      ifi.addrs = netlink_addr(AF_UNSPEC, ifi.index)?;
-    }
-
-    Ok(ift)
-  }
+  netlink_interface(AF_UNSPEC, index)
 }
 
 pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {

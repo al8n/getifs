@@ -221,7 +221,7 @@ fn test_interface_arrival_and_departure() {
         continue;
       }
 
-      let addrs = ifi.addrs();
+      let addrs = ifi.addrs().unwrap();
       for addr in addrs {
         if let IpAddr::V4(addr_ip) = addr.addr() {
           if ip == IpAddr::V4(addr_ip) {

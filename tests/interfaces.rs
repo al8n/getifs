@@ -216,9 +216,9 @@ fn if_unicast_addrs() {
 
   let mut uni_stats = RouteStats::default();
   for ifi in ift {
-    let ifat = ifi.addrs();
+    let ifat = ifi.addrs().unwrap();
 
-    let stats = validate_interface_unicast_addrs(ifat).unwrap();
+    let stats = validate_interface_unicast_addrs(&ifat).unwrap();
 
     uni_stats.ipv4 += stats.ipv4;
     uni_stats.ipv6 += stats.ipv6;
