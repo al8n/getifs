@@ -35,38 +35,46 @@ bitflags::bitflags! {
 
 fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
   let mut size = 15000u32; // recommended initial size
-  let mut buffer: Vec<u8> = vec![0; size as usize];
 
-  loop {
-    let result = unsafe {
-      GetAdaptersAddresses(
-        AF_UNSPEC.0 as u32,
-        GAA_FLAG_INCLUDE_PREFIX,
-        None,
-        Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
-        &mut size,
-      )
-    };
+  // First call to get required size
+  unsafe {
+    GetAdaptersAddresses(
+      AF_UNSPEC.0 as u32,
+      GAA_FLAG_INCLUDE_PREFIX,
+      None,
+      None, // Pass None first to get required size
+      &mut size,
+    )
+  };
 
-    match result {
-      0 => break,
-      val if val == ERROR_BUFFER_OVERFLOW.0 => {
-        if size <= buffer.len() as u32 {
-          return Err(Error::from_win32());
-        }
-        continue;
-      }
-      _ => return Err(Error::from_win32()),
-    }
+  // Allocate buffer with required size
+  let mut buffer = vec![0; size as usize];
+
+  // Second call to get actual data
+  let result = unsafe {
+    GetAdaptersAddresses(
+      AF_UNSPEC.0 as u32,
+      GAA_FLAG_INCLUDE_PREFIX,
+      None,
+      Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+      &mut size,
+    )
+  };
+
+  if result != 0 {
+    return Err(Error::from_win32());
   }
 
   let mut adapters = SmallVec::new();
   let mut current = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
 
+  // Safety: current is guaranteed to be valid as we just allocated it
   while !current.is_null() {
-    let curr = unsafe { &*current };
-    adapters.push(*curr);
-    current = curr.Next;
+    unsafe {
+      let curr = &*current;
+      adapters.push(*curr);
+      current = curr.Next;
+    }
   }
 
   Ok(adapters)
@@ -154,6 +162,11 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
   let mut addresses = SmallVec::new();
 
   for adapter in adapters {
+    // Add null check for adapter
+    if adapter.FirstUnicastAddress.is_null() && adapter.FirstAnycastAddress.is_null() {
+      continue;
+    }
+
     let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
     if index == 0 {
       index = adapter.Ipv6IfIndex;
@@ -190,6 +203,10 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
   let mut addresses = SmallVec::new();
 
   for adapter in adapters {
+    if adapter.FirstMulticastAddress.is_null() {
+      continue;
+    }
+
     let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
     if index == 0 {
       index = adapter.Ipv6IfIndex;
@@ -212,7 +229,16 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
 }
 
 fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
+  if sockaddr.is_null() {
+    return None;
+  }
+
   unsafe {
+    // Add bounds checking for the address family
+    if (*sockaddr).sa_family != AF_INET && (*sockaddr).sa_family != AF_INET6 {
+      return None;
+    }
+
     match (*sockaddr).sa_family {
       AF_INET => {
         let addr = &*(sockaddr as *const SOCKADDR_IN);
