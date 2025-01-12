@@ -184,10 +184,10 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
         let addr = unsafe { &*unicast };
         // println!("{:?}", addr.OnLinkPrefixLength);
         if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-          let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
+          // let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
+          let ip = IpIf::new(index, ip);
           println!("{:?}", ip);
-          // let ip = IpIf::new(index, ip);
-          // addresses.push(ip);
+          addresses.push(ip);
         }
         unicast = addr.Next;
       }
