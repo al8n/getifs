@@ -81,78 +81,78 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
 }
 
 pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
-  let _adapters = get_adapter_addresses()?;
+  let adapters = get_adapter_addresses()?;
   let mut interfaces = OneOrMore::new();
 
-  // for adapter in adapters {
-  //   let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
-  //   if index == 0 {
-  //     index = adapter.Ipv6IfIndex;
-  //   }
+  for adapter in adapters {
+    let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
+    if index == 0 {
+      index = adapter.Ipv6IfIndex;
+    }
 
-  //   if idx == 0 || idx == index {
-  //     let hname = unsafe { adapter.FriendlyName.to_hstring() };
-  //     let osname = hname.to_os_string();
-  //     let osname_str = osname.as_os_str().to_string_lossy();
-  //     let name = SmolStr::new(&osname_str);
+    if idx == 0 || idx == index {
+      let hname = unsafe { adapter.FriendlyName.to_hstring() };
+      let osname = hname.to_os_string();
+      let osname_str = osname.as_os_str().to_string_lossy();
+      let name = SmolStr::new(&osname_str);
 
-  //     let mut flags = Flags::empty();
-  //     if adapter.OperStatus == IfOperStatusUp {
-  //       flags |= Flags::UP | Flags::RUNNING;
-  //     }
+      let mut flags = Flags::empty();
+      if adapter.OperStatus == IfOperStatusUp {
+        flags |= Flags::UP | Flags::RUNNING;
+      }
 
-  //     match adapter.IfType {
-  //       IF_TYPE_ETHERNET_CSMACD
-  //       | IF_TYPE_IEEE80211
-  //       | IF_TYPE_IEEE1394
-  //       | IF_TYPE_ISO88025_TOKENRING => {
-  //         flags |= Flags::BROADCAST | Flags::MULTICAST;
-  //       }
-  //       IF_TYPE_PPP | IF_TYPE_TUNNEL => {
-  //         flags |= Flags::POINTOPOINT | Flags::MULTICAST;
-  //       }
-  //       IF_TYPE_SOFTWARE_LOOPBACK => {
-  //         flags |= Flags::LOOPBACK | Flags::MULTICAST;
-  //       }
-  //       IF_TYPE_ATM => {
-  //         flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
-  //       }
-  //       _ => {}
-  //     }
+      match adapter.IfType {
+        IF_TYPE_ETHERNET_CSMACD
+        | IF_TYPE_IEEE80211
+        | IF_TYPE_IEEE1394
+        | IF_TYPE_ISO88025_TOKENRING => {
+          flags |= Flags::BROADCAST | Flags::MULTICAST;
+        }
+        IF_TYPE_PPP | IF_TYPE_TUNNEL => {
+          flags |= Flags::POINTOPOINT | Flags::MULTICAST;
+        }
+        IF_TYPE_SOFTWARE_LOOPBACK => {
+          flags |= Flags::LOOPBACK | Flags::MULTICAST;
+        }
+        IF_TYPE_ATM => {
+          flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
+        }
+        _ => {}
+      }
 
-  //     let mtu = if adapter.Mtu == 0xffffffff {
-  //       0
-  //     } else {
-  //       adapter.Mtu
-  //     };
+      let mtu = if adapter.Mtu == 0xffffffff {
+        0
+      } else {
+        adapter.Mtu
+      };
 
-  //     let hardware_addr = if adapter.PhysicalAddressLength > 0 {
-  //       let mut buf = [0u8; MAC_ADDRESS_SIZE];
-  //       let max_addr_len = (adapter.PhysicalAddressLength as usize).min(MAC_ADDRESS_SIZE);
-  //       let addr = &adapter.PhysicalAddress[..max_addr_len];
-  //       buf[..max_addr_len].copy_from_slice(addr);
-  //       Some(MacAddr::new(buf))
-  //     } else {
-  //       None
-  //     };
+      // let hardware_addr = if adapter.PhysicalAddressLength > 0 {
+      //   let mut buf = [0u8; MAC_ADDRESS_SIZE];
+      //   let max_addr_len = (adapter.PhysicalAddressLength as usize).min(MAC_ADDRESS_SIZE);
+      //   let addr = &adapter.PhysicalAddress[..max_addr_len];
+      //   buf[..max_addr_len].copy_from_slice(addr);
+      //   Some(MacAddr::new(buf))
+      // } else {
+      //   None
+      // };
 
-  //     let interface = Interface {
-  //       index,
-  //       name,
-  //       flags,
-  //       mtu,
-  //       mac_addr: hardware_addr,
-  //       addrs: Default::default(),
-  //     };
+      // let interface = Interface {
+      //   index,
+      //   name,
+      //   flags,
+      //   mtu,
+      //   mac_addr: hardware_addr,
+      //   addrs: Default::default(),
+      // };
 
-  //     let ifindex = interface.index;
-  //     interfaces.push(interface);
+      // let ifindex = interface.index;
+      // interfaces.push(interface);
 
-  //     if idx == ifindex {
-  //       break;
-  //     }
-  //   }
-  // }
+      // if idx == ifindex {
+      //   break;
+      // }
+    }
+  }
 
   Ok(interfaces)
 }
