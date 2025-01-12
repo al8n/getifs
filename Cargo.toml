@@ -34,10 +34,10 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 either = "1"
-rustix = { version = "0.38", features = ["net", "param"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock", "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
+widestring = "1"
 
 [dev-dependencies]
 criterion = "0.5"

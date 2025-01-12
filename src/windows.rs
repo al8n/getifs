@@ -101,19 +101,17 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
     }
 
     if idx == 0 || idx == index {
-      let mut name_buf = [0u8; 256];
-      let name: SmolStr = if adapter.FriendlyName.is_null() {
-        let hname = unsafe { if_indextoname(index, name_buf.as_mut_ptr()) };
-        unsafe {
-          std::ffi::CStr::from_ptr(hname as _)
-            .to_string_lossy()
-            .into()
+      let name = match friendly_name(adapter) {
+        Some(name) => name,
+        None => {
+          let mut name_buf = [0u8; 256];
+          let hname = unsafe { if_indextoname(index, name_buf.as_mut_ptr()) };
+          unsafe {
+            std::ffi::CStr::from_ptr(hname as _)
+              .to_string_lossy()
+              .into()
+          }
         }
-      } else {
-        let hname = unsafe { adapter.FriendlyName.to_hstring() };
-        let osname = hname.to_os_string();
-        let osname_str = osname.as_os_str().to_string_lossy();
-        SmolStr::new(&osname_str)
       };
 
       let mut flags = Flags::empty();
@@ -263,6 +261,19 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
   Ok(addresses)
 }
 
+fn friendly_name(adaptr: &IP_ADAPTER_ADDRESSES_LH) -> Option<SmolStr> {
+  if adaptr.FriendlyName.is_null() {
+    return None;
+  }
+
+  let s = match widestring::U16CStr::from_ptr(adaptr.FriendlyName) {
+    Ok(s) => s,
+    Err(_) => return None,
+  };
+  let osname_str = s.to_string_lossy();
+  SmolStr::new(&osname_str)
+}
+
 fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
   if sockaddr.is_null() {
     return None;
@@ -275,7 +286,7 @@ fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
         if addr.is_null() {
           return None;
         }
-        let bytes = unsafe { (*addr).sin_addr.S_un.S_addr.to_ne_bytes() };
+        let bytes = (*addr).sin_addr.S_un.S_addr.to_ne_bytes();
         Some(IpAddr::V4(bytes.into()))
       }
       AF_INET6 => {
@@ -283,7 +294,7 @@ fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
         if addr.is_null() {
           return None;
         }
-        let bytes = unsafe { (*addr).sin6_addr.u.Byte };
+        let bytes = (*addr).sin6_addr.u.Byte;
         Some(IpAddr::V6(bytes.into()))
       }
       _ => None,
