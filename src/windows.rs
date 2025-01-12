@@ -41,7 +41,7 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
     let result = unsafe {
       GetAdaptersAddresses(
         AF_UNSPEC.0 as u32,
-        GAA_FLAG_INCLUDE_PREFIX,
+        Default::default(),
         None,
         Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
         &mut size,
