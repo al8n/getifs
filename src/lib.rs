@@ -8,6 +8,7 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
+use either::Either;
 pub use os::*;
 
 pub use ipnet;
@@ -39,9 +40,10 @@ mod os;
 #[path = "windows.rs"]
 mod os;
 
-pub use hardware_address::{MacAddr, ParseMacAddrError};
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests;
+
+pub use hardware_address::{MacAddr, ParseMacAddrError};
 
 const MAC_ADDRESS_SIZE: usize = 6;
 
@@ -52,7 +54,7 @@ pub struct Interface {
   mtu: u32,
   name: SmolStr,
   mac_addr: Option<MacAddr>,
-  addrs: SmallVec<IpNet>,
+  addrs: SmallVec<IpIf>,
   flags: Flags,
 }
 
@@ -90,7 +92,7 @@ impl Interface {
   /// Returns a list of unicast interface addrs for a specific
   /// interface.
   #[inline]
-  pub fn addrs(&self) -> &[IpNet] {
+  pub fn addrs(&self) -> &[IpIf] {
     &self.addrs
   }
 
@@ -131,7 +133,7 @@ pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
 ///
 /// The returned list does not identify the associated interface; use
 /// [`interfaces`] and [`Interface::addrs`] for more detail.
-pub fn interface_addrs() -> io::Result<SmallVec<IpNet>> {
+pub fn interface_addrs() -> io::Result<SmallVec<IpIf>> {
   interface_addr_table(0)
 }
 
@@ -139,61 +141,39 @@ pub fn interface_addrs() -> io::Result<SmallVec<IpNet>> {
 ///
 /// A wrapper over [`ipnet::IpNet`], with an additional field `index`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct IpNet {
-  net: ipnet::IpNet,
+pub struct IpIf {
+  net: Either<ipnet::IpNet, IpAddr>,
   index: u32,
 }
 
-impl From<IpNet> for ipnet::IpNet {
-  fn from(ipnet: IpNet) -> Self {
-    ipnet.net
+impl IpIf {
+  /// Creates a new `IpIf` with the given IP network address.
+  #[inline]
+  pub fn new(index: u32, net: IpAddr) -> Self {
+    Self {
+      net: Either::Right(net),
+      index,
+    }
   }
-}
 
-impl core::ops::Deref for IpNet {
-  type Target = ipnet::IpNet;
-
-  fn deref(&self) -> &Self::Target {
-    &self.net
-  }
-}
-
-impl core::convert::AsRef<ipnet::IpNet> for IpNet {
-  fn as_ref(&self) -> &ipnet::IpNet {
-    &self.net
-  }
-}
-
-impl core::ops::DerefMut for IpNet {
-  fn deref_mut(&mut self) -> &mut Self::Target {
-    &mut self.net
-  }
-}
-
-impl core::convert::AsMut<ipnet::IpNet> for IpNet {
-  fn as_mut(&mut self) -> &mut ipnet::IpNet {
-    &mut self.net
-  }
-}
-
-impl core::borrow::Borrow<ipnet::IpNet> for IpNet {
-  fn borrow(&self) -> &ipnet::IpNet {
-    &self.net
-  }
-}
-
-impl IpNet {
   /// See [`ipnet::IpNet::new`](ipnet::IpNet::new).
   #[inline]
-  pub fn new(index: u32, addr: IpAddr, prefix_len: u8) -> Result<Self, ipnet::PrefixLenError> {
-    ipnet::IpNet::new(addr, prefix_len).map(|net| Self { net, index })
+  pub fn with_prefix_len(
+    index: u32,
+    addr: IpAddr,
+    prefix_len: u8,
+  ) -> Result<Self, ipnet::PrefixLenError> {
+    ipnet::IpNet::new(addr, prefix_len).map(|net| Self {
+      net: Either::Left(net),
+      index,
+    })
   }
 
   /// See [`ipnet::IpNet::new_assert`](ipnet::IpNet::new_assert).
   #[inline]
-  pub fn new_assert(index: u32, addr: IpAddr, prefix_len: u8) -> Self {
+  pub fn with_prefix_len_assert(index: u32, addr: IpAddr, prefix_len: u8) -> Self {
     Self {
-      net: ipnet::IpNet::new_assert(addr, prefix_len),
+      net: Either::Left(ipnet::IpNet::new_assert(addr, prefix_len)),
       index,
     }
   }
@@ -202,6 +182,42 @@ impl IpNet {
   #[inline]
   pub const fn index(&self) -> u32 {
     self.index
+  }
+
+  /// Returns the IP network address.
+  #[inline]
+  pub fn addr(&self) -> IpAddr {
+    match self.net {
+      Either::Left(ref net) => net.addr(),
+      Either::Right(addr) => addr,
+    }
+  }
+
+  /// Returns the prefix length of the IP network address.
+  #[inline]
+  pub fn prefix_len(&self) -> Option<u8> {
+    match self.net {
+      Either::Left(ref net) => Some(net.prefix_len()),
+      Either::Right(_) => None,
+    }
+  }
+
+  /// Returns the maximum prefix length of the IP network address.
+  #[inline]
+  pub fn max_prefix_len(&self) -> Option<u8> {
+    match self.net {
+      Either::Left(ref net) => Some(net.max_prefix_len()),
+      Either::Right(_) => None,
+    }
+  }
+
+  /// Returns the IP network address as an `IpNet`.
+  #[inline]
+  pub fn as_net(&self) -> Option<&ipnet::IpNet> {
+    match self.net {
+      Either::Left(ref net) => Some(net),
+      Either::Right(_) => None,
+    }
   }
 }
 

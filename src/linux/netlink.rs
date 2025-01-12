@@ -12,7 +12,7 @@ use std::io;
 use std::mem;
 use std::ptr::read_unaligned;
 
-use super::{Flags, Interface, IpNet, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Flags, Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
 
 const NLMSG_HDRLEN: usize = mem::size_of::<nlmsghdr>();
 const NLMSG_ALIGNTO: usize = 4;
@@ -191,7 +191,7 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
   }
 }
 
-pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IpNet>> {
+pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IpIf>> {
   unsafe {
     // Create socket
     let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
@@ -328,12 +328,20 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IpNet>>
               match ifam.family as i32 {
                 AF_INET => {
                   let ip: [u8; 4] = vbuf[..4].try_into().unwrap();
-                  addrs.push(IpNet::new_assert(ifam.index, ip.into(), ifam.prefix_len));
+                  addrs.push(IpIf::with_prefix_len_assert(
+                    ifam.index,
+                    ip.into(),
+                    ifam.prefix_len,
+                  ));
                   continue 'outer;
                 }
                 AF_INET6 if vbuf.len() >= 16 => {
                   let ip: [u8; 16] = vbuf[..16].try_into().unwrap();
-                  addrs.push(IpNet::new_assert(ifam.index, ip.into(), ifam.prefix_len));
+                  addrs.push(IpIf::with_prefix_len_assert(
+                    ifam.index,
+                    ip.into(),
+                    ifam.prefix_len,
+                  ));
                   continue 'outer;
                 }
                 _ => {}

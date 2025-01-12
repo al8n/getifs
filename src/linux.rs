@@ -5,7 +5,7 @@ use libc::AF_UNSPEC;
 use smallvec_wrapper::{OneOrMore, SmallVec};
 use smol_str::SmolStr;
 
-use super::{Interface, IpNet, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
 
 #[path = "linux/netlink.rs"]
 mod netlink;
@@ -83,7 +83,7 @@ pub(super) fn interface_table(index: u32) -> io::Result<OneOrMore<Interface>> {
   }
 }
 
-pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpNet>> {
+pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
   netlink_addr(AF_UNSPEC, ifi)
 }
 

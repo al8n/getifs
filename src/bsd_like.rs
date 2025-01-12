@@ -12,7 +12,7 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{Interface, IpNet, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
 
 #[cfg(any(
   target_os = "macos",
@@ -408,8 +408,11 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
             let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
             if let (Some(ip), Some(mask)) = (ip, mask) {
-              let ipnet =
-                IpNet::new_assert(ifam.ifam_index as u32, ip, mask.map_err(invalid_mask)?);
+              let ipnet = IpIf::with_prefix_len_assert(
+                ifam.ifam_index as u32,
+                ip,
+                mask.map_err(invalid_mask)?,
+              );
               if let Some(ifi) = results
                 .iter_mut()
                 .find(|ifi| ifi.index == ifam.ifam_index as u32)
@@ -429,7 +432,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   }
 }
 
-pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpNet>> {
+pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpIf>> {
   const HEADER_SIZE: usize = mem::size_of::<ifa_msghdr>();
 
   unsafe {
@@ -476,7 +479,7 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpNet>> {
         let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
         if let (Some(ip), Some(mask)) = (ip, mask) {
-          results.push(IpNet::new_assert(
+          results.push(IpIf::with_prefix_len_assert(
             ifam.ifam_index as u32,
             ip,
             mask.map_err(invalid_mask)?,
