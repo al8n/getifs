@@ -136,21 +136,21 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         None
       };
 
-      // let interface = Interface {
-      //   index,
-      //   name,
-      //   flags,
-      //   mtu,
-      //   mac_addr: None,
-      //   addrs: Default::default(),
-      // };
+      let interface = Interface {
+        index,
+        name,
+        flags,
+        mtu,
+        mac_addr: None,
+        addrs: Default::default(),
+      };
 
-      // let ifindex = interface.index;
-      // interfaces.push(interface);
+      let ifindex = interface.index;
+      interfaces.push(interface);
 
-      // if idx == ifindex {
-      //   break;
-      // }
+      if idx == ifindex {
+        break;
+      }
     }
   }
 
