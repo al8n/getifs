@@ -126,31 +126,31 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         adapter.Mtu
       };
 
-      // let hardware_addr = if adapter.PhysicalAddressLength > 0 {
-      //   let mut buf = [0u8; MAC_ADDRESS_SIZE];
-      //   let max_addr_len = (adapter.PhysicalAddressLength as usize).min(MAC_ADDRESS_SIZE);
-      //   let addr = &adapter.PhysicalAddress[..max_addr_len];
-      //   buf[..max_addr_len].copy_from_slice(addr);
-      //   Some(MacAddr::new(buf))
-      // } else {
-      //   None
-      // };
-
-      let interface = Interface {
-        index,
-        name,
-        flags,
-        mtu,
-        mac_addr: None,
-        addrs: Default::default(),
+      let hardware_addr = if adapter.PhysicalAddressLength > 0 {
+        let mut buf = [0u8; MAC_ADDRESS_SIZE];
+        let max_addr_len = (adapter.PhysicalAddressLength as usize).min(MAC_ADDRESS_SIZE);
+        let addr = &adapter.PhysicalAddress[..max_addr_len];
+        buf[..max_addr_len].copy_from_slice(addr);
+        Some(MacAddr::new(buf))
+      } else {
+        None
       };
 
-      let ifindex = interface.index;
-      interfaces.push(interface);
+      // let interface = Interface {
+      //   index,
+      //   name,
+      //   flags,
+      //   mtu,
+      //   mac_addr: None,
+      //   addrs: Default::default(),
+      // };
 
-      if idx == ifindex {
-        break;
-      }
+      // let ifindex = interface.index;
+      // interfaces.push(interface);
+
+      // if idx == ifindex {
+      //   break;
+      // }
     }
   }
 
