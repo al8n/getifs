@@ -41,7 +41,7 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
     let result = unsafe {
       GetAdaptersAddresses(
         AF_UNSPEC.0 as u32,
-        Default::default(),
+        GAA_FLAG_INCLUDE_PREFIX,
         None,
         Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
         &mut size,
@@ -174,26 +174,28 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
     }
 
     if ifi == 0 || ifi == index {
-      // let mut unicast = adapter.FirstUnicastAddress;
-      // while !unicast.is_null() {
-      //   let addr = unsafe { &*unicast };
-      //   println!("{:?}", addr.OnLinkPrefixLength);
-      //   // if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-      //   //   let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
-      //   //   addresses.push(ip);
-      //   // }
-      //   unicast = addr.Next;
-      // }
+      let mut unicast = adapter.FirstUnicastAddress;
+      while !unicast.is_null() {
+        let addr = unsafe { &*unicast };
+        // println!("{:?}", addr.OnLinkPrefixLength);
+        if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+          println!("{:?}", ip);
+          // let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
+          let ip = IpIf::new(index, ip);
+          addresses.push(ip);
+        }
+        unicast = addr.Next;
+      }
 
-      // let mut anycast = adapter.FirstAnycastAddress;
-      // while !anycast.is_null() {
-      //   let addr = unsafe { &*anycast };
-      //   if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-      //     let ip = IpIf::new(index, ip);
-      //     addresses.push(ip);
-      //   }
-      //   anycast = addr.Next;
-      // }
+      let mut anycast = adapter.FirstAnycastAddress;
+      while !anycast.is_null() {
+        let addr = unsafe { &*anycast };
+        if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+          let ip = IpIf::new(index, ip);
+          addresses.push(ip);
+        }
+        anycast = addr.Next;
+      }
     }
   }
 
