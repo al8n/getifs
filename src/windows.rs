@@ -7,7 +7,7 @@ use smallvec_wrapper::{OneOrMore, SmallVec};
 use smol_str::SmolStr;
 use windows::{
   core::*,
-  // Win32::Foundation::ERROR_BUFFER_OVERFLOW,
+  Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
   Win32::NetworkManagement::{IpHelper::*, Ndis::*},
   Win32::Networking::WinSock::*,
 };
@@ -85,8 +85,9 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   let mut interfaces = OneOrMore::new();
 
   for adapter in adapters {
-    let mut index = unsafe { adapter.Anonymous1.Anonymous.IfIndex };
-    if index == 0 {
+    let mut index = 0;
+    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid.Value, &mut index) };
+    if res == NO_ERROR {
       index = adapter.Ipv6IfIndex;
     }
 
@@ -132,10 +133,9 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
       let hardware_addr = if adapter.PhysicalAddressLength > 0 {
         let mut buf = [0u8; MAC_ADDRESS_SIZE];
-        // let max_addr_len = (adapter.PhysicalAddressLength as usize).min(MAC_ADDRESS_SIZE);
-        println!("max_addr_len: {}", adapter.PhysicalAddressLength);
-        // let addr = &adapter.PhysicalAddress[..max_addr_len];
-        // buf[..max_addr_len].copy_from_slice(addr);
+        let max_addr_len = (adapter.PhysicalAddressLength as usize).min(MAC_ADDRESS_SIZE);
+        let addr = &adapter.PhysicalAddress[..max_addr_len];
+        buf[..max_addr_len].copy_from_slice(addr);
         Some(MacAddr::new(buf))
       } else {
         None
@@ -236,16 +236,14 @@ fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
   unsafe {
     match (*sockaddr).sa_family {
       AF_INET => {
-        // let addr = &*(sockaddr as *const SOCKADDR_IN);
-        // Some(IpAddr::V4(Ipv4Addr::from(u32::from_ne_bytes(
-        //   addr.sin_addr.S_un.S_addr.to_ne_bytes(),
-        // ))))
-        None
+        let addr = &*(sockaddr as *const SOCKADDR_IN);
+        Some(IpAddr::V4(Ipv4Addr::from(u32::from_ne_bytes(
+          addr.sin_addr.S_un.S_addr.to_ne_bytes(),
+        ))))
       }
       AF_INET6 => {
-        // let addr = &*(sockaddr as *const SOCKADDR_IN6);
-        // Some(IpAddr::V6(Ipv6Addr::from(addr.sin6_addr.u.Byte)))
-        None
+        let addr = &*(sockaddr as *const SOCKADDR_IN6);
+        Some(IpAddr::V6(Ipv6Addr::from(addr.sin6_addr.u.Byte)))
       }
       _ => None,
     }
