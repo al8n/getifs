@@ -142,7 +142,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
       let interface = Interface {
         index,
-        name: Default::default(),
+        name,
         flags,
         mtu,
         mac_addr: None,
