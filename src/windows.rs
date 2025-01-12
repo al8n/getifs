@@ -102,12 +102,12 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
       // };
       let name = {
         let res = unsafe { ConvertInterfaceLuidToNameA(&adapter.Luid, &mut name_buf) };
-        if res == NO_ERROR.0 {
+        if res == NO_ERROR {
           let osname = unsafe { core::str::from_utf8(&name_buf) };
           let osname_str = osname.map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
           SmolStr::new(osname_str)
         } else {
-          return Err(Error::from_win32());
+          return Err(Error::from_win32().into());
         }
       };
       // let name = if adapter.FriendlyName.is_null() {
