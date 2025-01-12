@@ -69,9 +69,8 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
   let mut current = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
 
   // Safety: current is guaranteed to be valid as we just allocated it
-  while !current.is_null() {
+  while let Some(curr) = current.as_ref() {
     unsafe {
-      let curr = &*current;
       adapters.push(*curr);
       current = curr.Next;
     }
