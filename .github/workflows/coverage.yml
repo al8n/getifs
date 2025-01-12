@@ -46,7 +46,7 @@ jobs:
       - name: Run Coverage and Generate Report
         run: |
           mkdir -p coverage
-          cargo tarpaulin --out xml --run-types tests --run-types doctests --output-dir coverage/${{ matrix.os }} -j 1
+          cargo tarpaulin --avoid-cfg-tarpaulin --out xml --run-types tests --run-types doctests --output-dir coverage/${{ matrix.os }} -j 1
         continue-on-error: true
       - name: Upload Coverage Report as Artifact
         uses: actions/upload-artifact@v4
