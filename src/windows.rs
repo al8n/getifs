@@ -249,12 +249,13 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
     let ifi = ifi.map_or(0, |i| i.index);
     if ifi == 0 || ifi == index {
       let mut multicast = adapter.FirstMulticastAddress;
-      while !multicast.is_null() {
-        let addr = unsafe { &*multicast };
-        if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-          addresses.push(ip);
+      unsafe {
+        while let Some(addr) = multicast.as_ref() {
+          if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+            addresses.push(ip);
+          }
+          multicast = addr.Next;
         }
-        multicast = addr.Next;
       }
     }
   }
