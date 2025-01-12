@@ -42,7 +42,7 @@ jobs:
           toolchain: nightly
           override: true
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin@0.30.0
+        run: cargo install cargo-tarpaulin@0.29.1
       - name: Run Coverage and Generate Report
         run: |
           mkdir -p coverage
