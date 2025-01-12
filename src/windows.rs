@@ -56,7 +56,10 @@ impl Information {
 
       if result == NO_ERROR {
         if size == 0 {
-          return Ok(SmallVec::new());
+          return Ok(Self {
+            buffer: Vec::new(),
+            adapters: SmallVec::new(),
+          });
         }
         break;
       }
@@ -77,7 +80,7 @@ impl Information {
     // Safety: current is guaranteed to be valid as we just allocated it
     unsafe {
       while let Some(curr) = current.as_ref() {
-        adapters.push(current);
+        adapters.push(*curr);
         current = curr.Next;
       }
     }
