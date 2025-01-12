@@ -1,5 +1,5 @@
 use std::{
-  io,
+  io::{Error, Result},
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -40,22 +40,22 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
   loop {
     let result = unsafe {
       GetAdaptersAddresses(
-        AF_UNSPEC.0 as u32,
+        AF_UNSPEC as u32,
         GAA_FLAG_INCLUDE_PREFIX,
-        None,
-        Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+        std::ptr::null() as _,
+        buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
         &mut size,
       )
     };
 
-    if result == NO_ERROR.0 {
+    if result == NO_ERROR {
       if size == 0 {
         return Ok(SmallVec::new());
       }
       break;
     }
 
-    if result != ERROR_BUFFER_OVERFLOW.0 {
+    if result != ERROR_BUFFER_OVERFLOW {
       return Err(Error::from_win32());
     }
 
@@ -93,12 +93,13 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
     if idx == 0 || idx == index {
       let mut name_buf = [0u8; 256];
-      let name = {
-        let hname = unsafe { if_indextoname(index, &mut name_buf) };
-        let osname = unsafe { hname.as_bytes() };
-        let osname_str = core::str::from_utf8(osname)
-          .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        SmolStr::new(osname_str)
+      let name: SmolStr = {
+        let hname = unsafe { if_indextoname(index, name_buf.as_mut_ptr()) };
+        // let osname = unsafe { std::ffi::CStr::from_ptr(vbuf.as_ptr() as _).to_string_lossy().into() };
+        // let osname_str = core::str::from_utf8(osname)
+        //   .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        // SmolStr::new(osname_str)
+        unsafe { std::ffi::CStr::from_ptr(vbuf.as_ptr() as _).to_string_lossy().into() }
       };
 
       let mut flags = Flags::empty();
