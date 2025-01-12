@@ -194,7 +194,6 @@ fn ifis() {
 }
 
 #[test]
-#[cfg(not(windows))]
 fn if_addrs() {
   let ift = interfaces().unwrap();
   let stats = IfStats::stats(&ift);
@@ -206,7 +205,6 @@ fn if_addrs() {
 }
 
 #[test]
-#[cfg(not(windows))]
 fn if_unicast_addrs() {
   let ift = interfaces().unwrap();
   let if_stats = IfStats::stats(&ift);
@@ -225,7 +223,6 @@ fn if_unicast_addrs() {
 }
 
 #[test]
-#[cfg(not(windows))]
 fn if_multicast_addrs() {
   let ift = interfaces().unwrap();
   let if_stats = IfStats::stats(&ift);
