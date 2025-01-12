@@ -149,7 +149,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   Ok(interfaces)
 }
 
-pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpNet>> {
+pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
   let adapters = get_adapter_addresses()?;
   let mut addresses = SmallVec::new();
 
