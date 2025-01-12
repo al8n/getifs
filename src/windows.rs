@@ -133,6 +133,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
       let hardware_addr = if adapter.PhysicalAddressLength > 0 {
         let mut buf = [0u8; MAC_ADDRESS_SIZE];
         // let max_addr_len = (adapter.PhysicalAddressLength as usize).min(MAC_ADDRESS_SIZE);
+        println!("max_addr_len: {}", adapter.PhysicalAddressLength);
         // let addr = &adapter.PhysicalAddress[..max_addr_len];
         // buf[..max_addr_len].copy_from_slice(addr);
         Some(MacAddr::new(buf))
