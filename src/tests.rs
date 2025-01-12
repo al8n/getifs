@@ -148,8 +148,8 @@ fn point_to_point_interface() {
           if ti.name != ifi.name {
             continue;
           }
-          let ifat = ifi.addrs();
-          for ifa in ifat {
+          let ifat = ifi.addrs().unwrap();
+          for ifa in &ifat {
             if ifa.addr() == remote {
               ti.teardown().unwrap();
               panic!("got {ifa:?}");
