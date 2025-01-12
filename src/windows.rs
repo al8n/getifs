@@ -177,10 +177,11 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
       let mut unicast = adapter.FirstUnicastAddress;
       while !unicast.is_null() {
         let addr = unsafe { &*unicast };
-        if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-          let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
-          addresses.push(ip);
-        }
+        println!("{:?}", addr.OnLinkPrefixLength);
+        // if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+        //   let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
+        //   addresses.push(ip);
+        // }
         unicast = addr.Next;
       }
 
