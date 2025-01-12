@@ -92,14 +92,13 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
     if idx == 0 || idx == index {
       let name = if adapter.FriendlyName.is_null() {
-        SmolStr::new()
+        SmolStr::default()
       } else {
         let hname = unsafe { adapter.FriendlyName.to_hstring() };
         let osname = hname.to_os_string();
         let osname_str = osname.as_os_str().to_string_lossy();
         SmolStr::new(&osname_str)
       };
-      
 
       let mut flags = Flags::empty();
       if adapter.OperStatus == IfOperStatusUp {
