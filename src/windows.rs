@@ -1,5 +1,5 @@
 use std::{
-  io::{Error, Result},
+  io::{self, Error, Result},
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -56,11 +56,11 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
     }
 
     if result != ERROR_BUFFER_OVERFLOW {
-      return Err(Error::from_win32());
+      return Err(Error::last_os_error());
     }
 
     if size <= buffer.len() as u32 {
-      return Err(Error::from_win32());
+      return Err(Error::last_os_error());
     }
     buffer.resize(size as usize, 0);
   }
@@ -99,7 +99,11 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         // let osname_str = core::str::from_utf8(osname)
         //   .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         // SmolStr::new(osname_str)
-        unsafe { std::ffi::CStr::from_ptr(vbuf.as_ptr() as _).to_string_lossy().into() }
+        unsafe {
+          std::ffi::CStr::from_ptr(hname as _)
+            .to_string_lossy()
+            .into()
+        }
       };
 
       let mut flags = Flags::empty();
