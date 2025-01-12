@@ -41,8 +41,6 @@ jobs:
         with:
           toolchain: nightly
           override: true
-      - name: Setup loopback interface
-        run: ci/setup_subnet_ubuntu.sh
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
       - name: Run Coverage and Generate Report
