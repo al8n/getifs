@@ -177,7 +177,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
       while !unicast.is_null() {
         let addr = unsafe { &*unicast };
         if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-          let ip = IpIf::with_prefix_len_assert(index as u32, ip, addr.OnLinkPrefixLength);
+          let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
           addresses.push(ip);
         }
         unicast = addr.Next;
@@ -187,7 +187,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
       while !anycast.is_null() {
         let addr = unsafe { &*anycast };
         if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-          let ip = IpIf::new(index as u32, ip);
+          let ip = IpIf::new(index, ip);
           addresses.push(ip);
         }
         anycast = addr.Next;
