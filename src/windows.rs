@@ -48,14 +48,14 @@ fn get_adapter_addresses() -> Result<SmallVec<IP_ADAPTER_ADDRESSES_LH>> {
       )
     };
 
-    if result == NO_ERROR {
+    if result == NO_ERROR.0 {
       if size == 0 {
         return Ok(SmallVec::new());
       }
       break;
     }
 
-    if result != ERROR_BUFFER_OVERFLOW {
+    if result != ERROR_BUFFER_OVERFLOW.0 {
       return Err(Error::from_win32());
     }
 
@@ -95,9 +95,10 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
       let mut name_buf = [0u8; 256];
       let name = if adapter.FriendlyName.is_null() {
         let hname = unsafe { if_indextoname(index, &mut name_buf) };
-        let osname = hname.to_os_string();
-        let osname_str = osname.as_os_str().to_string_lossy();
-        SmolStr::new(&osname_str)
+        let osname = unsafe { hname.as_bytes() };
+        let osname_str = core::str::from_utf8(osname)
+          .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        SmolStr::new(osname_str)
       };
 
       let mut flags = Flags::empty();
