@@ -27,7 +27,7 @@ env:
 jobs:
   coverage-report:
     name: Generate Coverage for ${{ matrix.os }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os:
