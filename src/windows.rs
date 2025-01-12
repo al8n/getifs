@@ -145,7 +145,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         name,
         flags,
         mtu,
-        mac_addr: None,
+        mac_addr: hardware_addr,
         addrs: Default::default(),
       };
 
@@ -172,7 +172,6 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
     }
 
     if ifi == 0 || ifi == index {
-      println!("adapter: {adapter:?}");
       let mut unicast = adapter.FirstUnicastAddress;
       while !unicast.is_null() {
         let addr = unsafe { &*unicast };
