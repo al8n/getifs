@@ -234,14 +234,16 @@ fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
   unsafe {
     match (*sockaddr).sa_family {
       AF_INET => {
-        let addr = sockaddr as *const SOCKADDR_IN;
-        let bytes = unsafe { (*addr).sin_addr.S_un.S_addr.to_ne_bytes() };
-        Some(IpAddr::V4(bytes.into()))
+        // let addr = sockaddr as *const SOCKADDR_IN;
+        // let bytes = unsafe { (*addr).sin_addr.S_un.S_addr.to_ne_bytes() };
+        // Some(IpAddr::V4(bytes.into()))
+        None
       }
       AF_INET6 => {
-        let addr = sockaddr as *const SOCKADDR_IN6;
-        let bytes = unsafe { (*addr).sin6_addr.u.Byte };
-        Some(IpAddr::V6(bytes.into()))
+        // let addr = sockaddr as *const SOCKADDR_IN6;
+        // let bytes = unsafe { (*addr).sin6_addr.u.Byte };
+        // Some(IpAddr::V6(bytes.into()))
+        None
       }
       _ => None,
     }
