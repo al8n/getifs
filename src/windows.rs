@@ -93,21 +93,27 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
 
     if idx == 0 || idx == index {
       let mut name_buf = [0u8; 256];
-      // let name = {
-      //   let hname = unsafe { if_indextoname(index, &mut name_buf) };
-      //   let osname = unsafe { hname.as_bytes() };
-      //   let osname_str = core::str::from_utf8(osname)
-      //     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-      //   SmolStr::new(osname_str)
-      // };
-      let name = if adapter.FriendlyName.is_null() {
-        SmolStr::default()
-      } else {
-        let hname = unsafe { adapter.FriendlyName.to_string().map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))? };
-        // let osname = hname.to_os_string();
-        // let osname_str = osname.as_os_str().to_string_lossy();
-        SmolStr::from(hname)
+      let name = {
+        // let hname = unsafe { if_indextoname(index, &mut name_buf) };
+        let hname = &adapter.AdapterName;
+        let osname = unsafe { hname.as_bytes() };
+        let osname_str = core::str::from_utf8(osname)
+          .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        SmolStr::new(osname_str)
       };
+      // let name = if adapter.FriendlyName.is_null() {
+      //   SmolStr::default()
+      // } else {
+      //   let hname = unsafe {
+      //     adapter
+      //       .FriendlyName
+      //       .to_string()
+      //       .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+      //   };
+      //   // let osname = hname.to_os_string();
+      //   // let osname_str = osname.as_os_str().to_string_lossy();
+      //   SmolStr::from(hname)
+      // };
 
       let mut flags = Flags::empty();
       if adapter.OperStatus == IfOperStatusUp {
