@@ -1,7 +1,8 @@
 use std::net::IpAddr;
 
 use getifs::{
-  interface_addrs, interface_by_index, interface_by_name, interfaces, Flags, Interface, IpIf,
+  gateway_addrs, interface_addrs, interface_by_index, interface_by_name, interfaces, local_addrs,
+  Flags, IfAddr, IfNet, Interface,
 };
 
 use iprobe::{ipv4, ipv6};
@@ -36,7 +37,7 @@ struct RouteStats {
   ipv6: u32, // # of active connected unicast or multicast addrs
 }
 
-fn validate_interface_unicast_addrs(ifat: &[IpIf]) -> std::io::Result<RouteStats> {
+fn validate_interface_unicast_addrs(ifat: &[IfNet]) -> std::io::Result<RouteStats> {
   // Note: BSD variants allow assigning any IPv4/IPv6 address
   // prefix to IP interface. For example,
   //   - 0.0.0.0/0 through 255.255.255.255/32
@@ -52,8 +53,8 @@ fn validate_interface_unicast_addrs(ifat: &[IpIf]) -> std::io::Result<RouteStats
       ));
     }
 
-    let prefix_len = ifa.prefix_len().unwrap();
-    let max_prefix_len = ifa.max_prefix_len().unwrap();
+    let prefix_len = ifa.prefix_len();
+    let max_prefix_len = ifa.max_prefix_len();
     match ifa.addr() {
       IpAddr::V4(addr) => {
         if prefix_len == 0 || prefix_len > 8 * 4 || max_prefix_len != 8 * 4 {
@@ -102,7 +103,7 @@ fn check_unicast_stats(ifstats: &IfStats, uni_stats: &RouteStats) -> std::io::Re
   if ipv4() && ifstats.loopback + ifstats.other > 0 && uni_stats.ipv4 == 0 {
     return Err(std::io::Error::new(
       std::io::ErrorKind::InvalidData,
-      "num Ipv4 unicast routes = 0; want>0; summary:{ifstats:?}, {uni_stats:?}",
+      format!("num Ipv4 unicast routes = 0; want>0; summary:{ifstats:?}, {uni_stats:?}"),
     ));
   }
 
@@ -119,9 +120,9 @@ fn check_unicast_stats(ifstats: &IfStats, uni_stats: &RouteStats) -> std::io::Re
   Ok(())
 }
 
-fn validate_interface_multicast_addrs(ifmat: &[IpAddr]) -> std::io::Result<RouteStats> {
+fn validate_interface_multicast_addrs(ifmat: &[IfAddr]) -> std::io::Result<RouteStats> {
   let mut stats = RouteStats::default();
-  for ifa in ifmat {
+  for ifa in ifmat.iter().map(|ifa| ifa.addr()) {
     if ifa.is_unspecified() || !ifa.is_multicast() {
       return Err(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -223,6 +224,22 @@ fn if_unicast_addrs() {
   }
 
   check_unicast_stats(&if_stats, &uni_stats).unwrap();
+}
+
+#[test]
+fn gw_addrs() {
+  let addrs = gateway_addrs().unwrap();
+  for addr in addrs {
+    println!("Gateway {}", addr);
+  }
+}
+
+#[test]
+fn lc_addrs() {
+  let addrs = local_addrs().unwrap();
+  for addr in addrs {
+    println!("Local {}", addr);
+  }
 }
 
 #[test]

@@ -3,24 +3,47 @@
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
 
-use std::{
-  io,
-  net::{IpAddr, Ipv4Addr, Ipv6Addr},
-};
+#[macro_use]
+mod macros;
 
-use either::Either;
-pub use os::*;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+pub use gateway::*;
+pub use hardware_address::{MacAddr, ParseMacAddrError};
+pub use idx_to_name::ifindex_to_name;
+pub use ifaddr::*;
+pub use ifnet::*;
+pub use interfaces::*;
 pub use ipnet;
-use smallvec_wrapper::{OneOrMore, SmallVec};
+/// Known RFCs for IP addresses
+#[doc(inline)]
+pub use iprfc as rfc;
+/// IP protocol probing
+#[doc(inline)]
+pub use iprobe as probe;
+pub use local_addrs::*;
+pub use name_to_idx::ifname_to_index;
+pub use os::Flags;
+pub use private_ip_addrs::*;
+pub use public_ip_addrs::*;
 pub use smol_str::SmolStr;
+
+// #[cfg(feature = "serde")]
+// mod serde_impl;
+mod gateway;
+mod idx_to_name;
+mod ifaddr;
+mod ifnet;
+mod interfaces;
+mod local_addrs;
+mod name_to_idx;
+mod private_ip_addrs;
+mod public_ip_addrs;
+mod utils;
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod os;
-
-// #[cfg(feature = "serde")]
-// mod serde_impl;
 
 #[cfg(any(
   target_os = "macos",
@@ -43,264 +66,163 @@ mod os;
 #[cfg(all(test, not(windows)))]
 mod tests;
 
-pub use hardware_address::{MacAddr, ParseMacAddrError};
-
 const MAC_ADDRESS_SIZE: usize = 6;
 
-/// The inferface struct
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Interface {
-  index: u32,
-  mtu: u32,
-  name: SmolStr,
-  mac_addr: Option<MacAddr>,
-  addrs: SmallVec<IpIf>,
-  flags: Flags,
+#[allow(dead_code)]
+trait Address: Sized {
+  fn try_from(index: u32, addr: IpAddr) -> Option<Self>;
+
+  fn try_from_with_filter<F>(index: u32, addr: IpAddr, mut f: F) -> Option<Self>
+  where
+    F: FnMut(&IpAddr) -> bool,
+  {
+    if !f(&addr) {
+      return None;
+    }
+
+    <Self as Address>::try_from(index, addr)
+  }
+
+  fn addr(&self) -> IpAddr;
+
+  fn index(&self) -> u32;
 }
 
-impl Interface {
-  /// Returns the interface index.
+impl Address for IfAddr {
   #[inline]
-  pub const fn index(&self) -> u32 {
-    self.index
+  fn try_from(index: u32, addr: IpAddr) -> Option<Self> {
+    Some(IfAddr::new(index, addr))
   }
 
-  /// Returns the interface name.
   #[inline]
-  pub const fn name(&self) -> &SmolStr {
-    &self.name
+  fn addr(&self) -> IpAddr {
+    self.addr()
   }
 
-  /// Returns the interface MTU.
   #[inline]
-  pub const fn mtu(&self) -> u32 {
-    self.mtu
-  }
-
-  /// Returns the hardware address of the interface.
-  #[inline]
-  pub const fn mac_addr(&self) -> Option<MacAddr> {
-    self.mac_addr
-  }
-
-  /// Returns the flags of the interface.
-  #[inline]
-  pub const fn flags(&self) -> Flags {
-    self.flags
-  }
-
-  /// Returns a list of unicast interface addrs for a specific
-  /// interface.
-  #[inline]
-  pub fn addrs(&self) -> io::Result<SmallVec<IpIf>> {
-    #[cfg(target_os = "linux")]
-    return interface_addr_table(self.index);
-
-    #[cfg(not(target_os = "linux"))]
-    Ok(self.addrs.clone())
-  }
-
-  /// Returns a list of multicast, joined group addrs
-  /// for a specific interface.
-  #[cfg(any(
-    target_os = "macos",
-    target_os = "tvos",
-    target_os = "ios",
-    target_os = "watchos",
-    target_os = "visionos",
-    target_os = "freebsd",
-    target_os = "linux",
-    windows
-  ))]
-  #[cfg_attr(
-    docsrs,
-    doc(cfg(any(
-      target_os = "macos",
-      target_os = "tvos",
-      target_os = "ios",
-      target_os = "watchos",
-      target_os = "visionos",
-      target_os = "freebsd",
-      target_os = "linux",
-      windows
-    )))
-  )]
-  pub fn multicast_addrs(&self) -> io::Result<SmallVec<IpAddr>> {
-    interface_multiaddr_table(Some(self))
+  fn index(&self) -> u32 {
+    self.index()
   }
 }
 
-/// Returns a list of the system's network interfaces.
-pub fn interfaces() -> io::Result<OneOrMore<Interface>> {
-  interface_table(0)
-}
-
-/// Returns the interface specified by index.
-pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
-  interface_table(index).map(|v| v.into_iter().find(|ifi| ifi.index == index))
-}
-
-/// Returns the interface specified by name.
-pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
-  interface_table(0).map(|v| v.into_iter().find(|ifi| ifi.name == name))
-}
-
-/// Returns a list of the system's unicast interface
-/// addrs.
-///
-/// The returned list does not identify the associated interface; use
-/// [`interfaces`] and [`Interface::addrs`] for more detail.
-pub fn interface_addrs() -> io::Result<SmallVec<IpIf>> {
-  interface_addr_table(0)
-}
-
-/// An IP network address, either IPv4 or IPv6.
-///
-/// A wrapper over [`ipnet::IpNet`], with an additional field `index`.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct IpIf {
-  net: Either<ipnet::IpNet, IpAddr>,
-  index: u32,
-}
-
-impl IpIf {
-  /// Creates a new `IpIf` with the given IP network address.
+impl Address for Ifv4Addr {
   #[inline]
-  pub fn new(index: u32, net: IpAddr) -> Self {
-    Self {
-      net: Either::Right(net),
-      index,
+  fn try_from(index: u32, addr: IpAddr) -> Option<Self> {
+    match addr {
+      IpAddr::V4(ip) => Some(Ifv4Addr::new(index, ip)),
+      _ => None,
     }
   }
 
-  /// See [`ipnet::IpNet::new`](ipnet::IpNet::new).
   #[inline]
-  pub fn with_prefix_len(
-    index: u32,
-    addr: IpAddr,
-    prefix_len: u8,
-  ) -> Result<Self, ipnet::PrefixLenError> {
-    ipnet::IpNet::new(addr, prefix_len).map(|net| Self {
-      net: Either::Left(net),
-      index,
-    })
+  fn addr(&self) -> IpAddr {
+    self.addr().into()
   }
 
-  /// See [`ipnet::IpNet::new_assert`](ipnet::IpNet::new_assert).
   #[inline]
-  pub fn with_prefix_len_assert(index: u32, addr: IpAddr, prefix_len: u8) -> Self {
-    Self {
-      net: Either::Left(ipnet::IpNet::new_assert(addr, prefix_len)),
-      index,
-    }
-  }
-
-  /// Returns the interface index.
-  #[inline]
-  pub const fn index(&self) -> u32 {
-    self.index
-  }
-
-  /// Returns the IP network address.
-  #[inline]
-  pub fn addr(&self) -> IpAddr {
-    match self.net {
-      Either::Left(ref net) => net.addr(),
-      Either::Right(addr) => addr,
-    }
-  }
-
-  /// Returns the prefix length of the IP network address.
-  #[inline]
-  pub fn prefix_len(&self) -> Option<u8> {
-    match self.net {
-      Either::Left(ref net) => Some(net.prefix_len()),
-      Either::Right(_) => None,
-    }
-  }
-
-  /// Returns the maximum prefix length of the IP network address.
-  #[inline]
-  pub fn max_prefix_len(&self) -> Option<u8> {
-    match self.net {
-      Either::Left(ref net) => Some(net.max_prefix_len()),
-      Either::Right(_) => None,
-    }
-  }
-
-  /// Returns the IP network address as an `IpNet`.
-  #[inline]
-  pub fn as_net(&self) -> Option<&ipnet::IpNet> {
-    match self.net {
-      Either::Left(ref net) => Some(net),
-      Either::Right(_) => None,
-    }
+  fn index(&self) -> u32 {
+    self.index()
   }
 }
 
-/// Returns the local IPv4 address of the system.
-///
-/// `allow_private` specifies whether to return a private address.
-pub fn local_ip_v4(allow_private: bool) -> io::Result<Option<Ipv4Addr>> {
-  interfaces().map(|ifs| {
-    ifs.into_iter().find_map(|ifi| {
-      if ifi.flags.contains(Flags::LOOPBACK) {
-        return None;
-      }
+impl Address for Ifv6Addr {
+  #[inline]
+  fn try_from(index: u32, addr: IpAddr) -> Option<Self> {
+    match addr {
+      IpAddr::V6(ip) => Some(Ifv6Addr::new(index, ip)),
+      _ => None,
+    }
+  }
 
-      for addr in ifi.addrs {
-        if let IpAddr::V4(addr) = addr.addr() {
-          if addr.is_broadcast()
-            || addr.is_multicast()
-            || addr.is_link_local()
-            || addr.is_loopback()
-          {
-            return None;
-          }
+  #[inline]
+  fn addr(&self) -> IpAddr {
+    self.addr().into()
+  }
 
-          if !allow_private && addr.is_private() {
-            return None;
-          }
-
-          return Some(addr);
-        }
-      }
-
-      None
-    })
-  })
+  #[inline]
+  fn index(&self) -> u32 {
+    self.index()
+  }
 }
 
-/// Returns the local IPv6 address of the system.
-///
-/// `allow_private` specifies whether to return a private address.
-pub fn local_ip_v6(allow_private: bool) -> io::Result<Option<Ipv6Addr>> {
-  interfaces().map(|ifs| {
-    ifs.into_iter().find_map(|ifi| {
-      if ifi.flags.contains(Flags::LOOPBACK) {
-        return None;
-      }
+#[allow(dead_code)]
+trait Net: Sized {
+  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self>;
 
-      for addr in ifi.addrs {
-        if let IpAddr::V6(addr) = addr.addr() {
-          if addr.is_multicast() || Ipv6AddrExt::is_unicast_link_local(&addr) || addr.is_loopback()
-          {
-            return None;
-          }
+  fn try_from_with_filter<F>(index: u32, addr: IpAddr, prefix: u8, mut f: F) -> Option<Self>
+  where
+    F: FnMut(&IpAddr) -> bool,
+  {
+    if !f(&addr) {
+      return None;
+    }
 
-          if !allow_private && Ipv6AddrExt::is_unique_local(&addr) {
-            return None;
-          }
+    <Self as Net>::try_from(index, addr, prefix)
+  }
 
-          return Some(addr);
-        }
-      }
+  fn addr(&self) -> IpAddr;
 
-      None
-    })
-  })
+  fn index(&self) -> u32;
 }
 
+impl Net for IfNet {
+  #[inline]
+  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
+    Some(IfNet::with_prefix_len_assert(index, addr, prefix))
+  }
+
+  #[inline]
+  fn addr(&self) -> IpAddr {
+    self.addr()
+  }
+
+  #[inline]
+  fn index(&self) -> u32 {
+    self.index()
+  }
+}
+
+impl Net for Ifv4Net {
+  #[inline]
+  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
+    match addr {
+      IpAddr::V4(ip) => Some(Ifv4Net::with_prefix_len_assert(index, ip, prefix)),
+      _ => None,
+    }
+  }
+
+  #[inline]
+  fn addr(&self) -> IpAddr {
+    self.addr().into()
+  }
+
+  #[inline]
+  fn index(&self) -> u32 {
+    self.index()
+  }
+}
+
+impl Net for Ifv6Net {
+  #[inline]
+  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
+    match addr {
+      IpAddr::V6(ip) => Some(Ifv6Net::with_prefix_len_assert(index, ip, prefix)),
+      _ => None,
+    }
+  }
+
+  #[inline]
+  fn addr(&self) -> IpAddr {
+    self.addr().into()
+  }
+
+  #[inline]
+  fn index(&self) -> u32 {
+    self.index()
+  }
+}
+
+#[allow(dead_code)]
 trait Ipv6AddrExt {
   fn is_unicast_link_local(&self) -> bool;
 
@@ -319,14 +241,38 @@ impl Ipv6AddrExt for Ipv6Addr {
   }
 }
 
-#[test]
-fn test_local_ip_v4() {
-  let ip = local_ip_v4(true).unwrap();
-  println!("local_ip_v4: {:?}", ip);
+#[inline]
+fn ipv4_filter_to_ip_filter<F>(mut f: F) -> impl FnMut(&IpAddr) -> bool
+where
+  F: FnMut(&Ipv4Addr) -> bool,
+{
+  move |addr: &IpAddr| match addr {
+    IpAddr::V4(ip) => f(ip),
+    _ => false,
+  }
 }
 
-#[test]
-fn test_local_ip_v6() {
-  let ip = local_ip_v6(true).unwrap();
-  println!("local_ip_v6: {:?}", ip);
+#[inline]
+fn ipv6_filter_to_ip_filter<F>(mut f: F) -> impl FnMut(&IpAddr) -> bool
+where
+  F: FnMut(&Ipv6Addr) -> bool,
+{
+  move |addr: &IpAddr| match addr {
+    IpAddr::V6(ip) => f(ip),
+    _ => false,
+  }
+}
+
+#[inline]
+fn local_ip_filter(addr: &IpAddr) -> bool {
+  match addr {
+    IpAddr::V4(addr) => !(addr.is_loopback() || addr.is_link_local()),
+    IpAddr::V6(addr) => !(addr.is_loopback() || Ipv6AddrExt::is_unicast_link_local(addr)),
+  }
+}
+
+#[allow(dead_code)]
+#[inline]
+fn is_ipv6_unspecified(addr: [u8; 16]) -> bool {
+  u128::from_be_bytes(addr) == u128::from_be_bytes(Ipv6Addr::UNSPECIFIED.octets())
 }

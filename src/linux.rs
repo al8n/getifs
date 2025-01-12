@@ -1,16 +1,87 @@
-use std::{io, net::IpAddr};
+use std::{
+  io,
+  net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 use hardware_address::xtoi2;
-use libc::AF_UNSPEC;
-use smallvec_wrapper::{OneOrMore, SmallVec};
+use libc::{AF_INET, AF_INET6, AF_UNSPEC};
+use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 
-use super::{Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
+use super::{
+  IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE,
+};
+
+pub(super) use local_addr::*;
 
 #[path = "linux/netlink.rs"]
 mod netlink;
 
+#[path = "linux/local_addr.rs"]
+mod local_addr;
+
 use netlink::{netlink_addr, netlink_interface};
+
+macro_rules! rt_generic_mod {
+  ($($name:ident($rta:ident, $rtn:expr)), +$(,)?) => {
+    $(
+      paste::paste! {
+        pub(super) use [< rt_ $name >]::*;
+
+        mod [< rt_ $name >] {
+          use libc::{AF_INET, AF_INET6, AF_UNSPEC, $rta};
+          use smallvec_wrapper::SmallVec;
+          use std::{
+            io,
+            net::{IpAddr, Ipv4Addr, Ipv6Addr},
+          };
+
+          use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
+
+          use super::{
+            super::{IfAddr, Ifv4Addr, Ifv6Addr},
+            netlink::rt_generic_addrs,
+          };
+
+          pub(crate) fn [< $name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
+            rt_generic_addrs(AF_UNSPEC, $rta, $rtn, |_| true)
+          }
+
+          pub(crate) fn [< $name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
+            rt_generic_addrs(AF_INET, $rta, $rtn, |_| true)
+          }
+
+          pub(crate) fn [< $name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
+            rt_generic_addrs(AF_INET6, $rta, $rtn, |_| true)
+          }
+
+          pub(crate) fn [< $name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
+          where
+            F: FnMut(&IpAddr) -> bool,
+          {
+            rt_generic_addrs(AF_UNSPEC, $rta, $rtn, f)
+          }
+
+          pub(crate) fn [< $name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
+          where
+            F: FnMut(&Ipv4Addr) -> bool,
+          {
+            rt_generic_addrs(AF_INET, $rta, $rtn, ipv4_filter_to_ip_filter(f))
+          }
+
+          pub(crate) fn [< $name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
+          where
+            F: FnMut(&Ipv6Addr) -> bool,
+          {
+            rt_generic_addrs(AF_INET6, $rta, $rtn, ipv6_filter_to_ip_filter(f))
+          }
+        }
+      }
+    )*
+  };
+}
+
+rt_generic_mod!(gateway(RTA_GATEWAY, None),);
 
 impl Interface {
   #[inline]
@@ -18,7 +89,6 @@ impl Interface {
     Self {
       index,
       mtu: 0,
-      addrs: SmallVec::new(),
       name: SmolStr::default(),
       mac_addr: None,
       flags,
@@ -65,37 +135,83 @@ bitflags::bitflags! {
   }
 }
 
-pub(super) fn interface_table(index: u32) -> io::Result<OneOrMore<Interface>> {
+pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   netlink_interface(AF_UNSPEC, index)
 }
 
-pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
-  netlink_addr(AF_UNSPEC, ifi)
+pub(super) fn interface_ipv4_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<Ifv4Net>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  netlink_addr(AF_INET, index, f)
 }
 
-pub(super) fn interface_multiaddr_table(
-  ifi: Option<&Interface>,
-) -> std::io::Result<SmallVec<IpAddr>> {
-  let mut addrs = SmallVec::new();
+pub(super) fn interface_ipv6_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<Ifv6Net>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  netlink_addr(AF_INET6, index, f)
+}
 
+pub(super) fn interface_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<IfNet>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  netlink_addr(AF_UNSPEC, index, f)
+}
+
+const IGMP_PATH: &str = "/proc/net/igmp";
+const IGMP6_PATH: &str = "/proc/net/igmp6";
+
+pub(super) fn interface_multicast_ipv4_addresses<F>(
+  ifi: u32,
+  f: F,
+) -> io::Result<SmallVec<Ifv4Addr>>
+where
+  F: FnMut(&Ipv4Addr) -> bool,
+{
+  parse_proc_net_igmp(IGMP_PATH, ifi, f)
+}
+
+pub(super) fn interface_multicast_ipv6_addresses<F>(
+  ifi: u32,
+  f: F,
+) -> io::Result<SmallVec<Ifv6Addr>>
+where
+  F: FnMut(&Ipv6Addr) -> bool,
+{
+  parse_proc_net_igmp6(IGMP6_PATH, ifi, f)
+}
+
+pub(super) fn interface_multicast_addresses<F>(ifi: u32, mut f: F) -> io::Result<SmallVec<IfAddr>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
   // Parse IPv4 multicast addrs
-  let ifmat4 = parse_proc_net_igmp("/proc/net/igmp", ifi)?;
-  addrs.extend(ifmat4);
+  let ifmat4 = parse_proc_net_igmp("/proc/net/igmp", ifi, |addr| f(&(*addr).into()))?;
 
   // Parse IPv6 multicast addrs
-  let ifmat6 = parse_proc_net_igmp6("/proc/net/igmp6", ifi)?;
-  addrs.extend(ifmat6);
+  let ifmat6 = parse_proc_net_igmp6("/proc/net/igmp6", ifi, |addr| f(&(*addr).into()))?;
 
-  Ok(addrs)
+  Ok(
+    ifmat4
+      .into_iter()
+      .map(From::from)
+      .chain(ifmat6.into_iter().map(From::from))
+      .collect(),
+  )
 }
 
-fn parse_proc_net_igmp(path: &str, ifi: Option<&Interface>) -> std::io::Result<Vec<IpAddr>> {
+fn parse_proc_net_igmp<F>(path: &str, ifi: u32, mut f: F) -> std::io::Result<SmallVec<Ifv4Addr>>
+where
+  F: FnMut(&Ipv4Addr) -> bool,
+{
   use std::io::BufRead;
 
   let file = std::fs::File::open(path)?;
   let reader = std::io::BufReader::new(file);
-  let mut ifmat = Vec::new();
-  let mut name = SmolStr::default();
+  let mut ifmat = SmallVec::new();
+  let mut idx = 0;
   let mut lines = reader.lines();
 
   // Skip first line
@@ -115,23 +231,26 @@ fn parse_proc_net_igmp(path: &str, ifi: Option<&Interface>) -> std::io::Result<V
     match () {
       () if !line.starts_with(' ') && !line.starts_with('\t') => {
         // New interface line
-        name = SmolStr::from(fields[1]);
+        match fields[0].parse() {
+          Ok(res) => idx = res,
+          Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+        }
       }
       () if fields[0].len() == 8 => {
-        match ifi {
-          Some(ifi) if ifi.name != name => continue,
-          _ => {
-            // The Linux kernel puts the IP
-            // address in /proc/net/igmp in native
-            // endianness.
-            let src = fields[0];
-            let mut b = [0u8; 4];
-            for i in (0..src.len()).step_by(2) {
-              b[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
-            }
+        if ifi == 0 || ifi == idx {
+          // The Linux kernel puts the IP
+          // address in /proc/net/igmp in native
+          // endianness.
+          let src = fields[0];
+          let mut b = [0u8; 4];
+          for i in (0..src.len()).step_by(2) {
+            b[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
+          }
 
-            b.reverse();
-            ifmat.push(IpAddr::V4(b.into()));
+          b.reverse();
+          let ip = b.into();
+          if f(&ip) {
+            ifmat.push(Ifv4Addr::new(idx, ip));
           }
         }
       }
@@ -142,12 +261,15 @@ fn parse_proc_net_igmp(path: &str, ifi: Option<&Interface>) -> std::io::Result<V
   Ok(ifmat)
 }
 
-fn parse_proc_net_igmp6(path: &str, ifi: Option<&Interface>) -> std::io::Result<Vec<IpAddr>> {
+fn parse_proc_net_igmp6<F>(path: &str, ifi: u32, mut f: F) -> io::Result<SmallVec<Ifv6Addr>>
+where
+  F: FnMut(&Ipv6Addr) -> bool,
+{
   use std::io::BufRead;
 
   let file = std::fs::File::open(path)?;
   let reader = std::io::BufReader::new(file);
-  let mut ifmat = Vec::new();
+  let mut ifmat = SmallVec::new();
 
   for line in reader.lines() {
     let line = line?;
@@ -160,18 +282,23 @@ fn parse_proc_net_igmp6(path: &str, ifi: Option<&Interface>) -> std::io::Result<
       continue;
     }
 
-    match ifi {
-      Some(ifi) if ifi.name != fields[1] => {}
-      _ => {
-        let mut i = 0;
-        let src = fields[2];
-        let mut data = [0u8; 16];
-        while i + 1 < src.len() {
-          data[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
-          i += 2;
-        }
+    let idx = match fields[0].parse() {
+      Ok(res) => res,
+      Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+    };
 
-        ifmat.push(IpAddr::V6(data.into()));
+    if ifi == 0 || ifi == idx {
+      let mut i = 0;
+      let src = fields[2];
+      let mut data = [0u8; 16];
+      while i + 1 < src.len() {
+        data[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
+        i += 2;
+      }
+
+      let ip = data.into();
+      if f(&ip) {
+        ifmat.push(Ifv6Addr::new(idx, ip));
       }
     }
   }
