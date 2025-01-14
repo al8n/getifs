@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 
 use getifs::{
-  interface_addrs, interface_by_index, interface_by_name, interfaces, Flags, Interface, IpIf,
+  interface_addrs, interface_by_index, interface_by_name, interfaces, Flags, Interface, IfAddr,
 };
 
 use iprobe::{ipv4, ipv6};
@@ -36,7 +36,7 @@ struct RouteStats {
   ipv6: u32, // # of active connected unicast or multicast addrs
 }
 
-fn validate_interface_unicast_addrs(ifat: &[IpIf]) -> std::io::Result<RouteStats> {
+fn validate_interface_unicast_addrs(ifat: &[IfAddr]) -> std::io::Result<RouteStats> {
   // Note: BSD variants allow assigning any IPv4/IPv6 address
   // prefix to IP interface. For example,
   //   - 0.0.0.0/0 through 255.255.255.255/32

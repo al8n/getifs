@@ -12,7 +12,7 @@ use windows_sys::{
   Win32::Networking::WinSock::*,
 };
 
-use super::{Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Interface, IfAddr, MacAddr, MAC_ADDRESS_SIZE};
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.
@@ -159,7 +159,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         let mut unicast = adapter.FirstUnicastAddress;
         while let Some(addr) = unicast.as_ref() {
           if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
+            let ip = IfAddr::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
             addrs.push(ip);
           }
           unicast = addr.Next;
@@ -168,7 +168,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         let mut anycast = adapter.FirstAnycastAddress;
         while let Some(addr) = anycast.as_ref() {
           if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            let ip = IpIf::new(index, ip);
+            let ip = IfAddr::new(index, ip);
             addrs.push(ip);
           }
           anycast = addr.Next;
@@ -196,7 +196,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   Ok(interfaces)
 }
 
-pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
+pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IfAddr>> {
   let info = Information::fetch()?;
   let mut addresses = SmallVec::new();
 
@@ -212,7 +212,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
         let mut unicast = adapter.FirstUnicastAddress;
         while let Some(addr) = unicast.as_ref() {
           if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            let ip = IpIf::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
+            let ip = IfAddr::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
             addresses.push(ip);
           }
           unicast = addr.Next;
@@ -221,7 +221,7 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IpIf>> {
         let mut anycast = adapter.FirstAnycastAddress;
         while let Some(addr) = anycast.as_ref() {
           if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            let ip = IpIf::new(index, ip);
+            let ip = IfAddr::new(index, ip);
             addresses.push(ip);
           }
           anycast = addr.Next;

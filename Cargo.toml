@@ -27,7 +27,9 @@ hardware-address = "0.1"
 iprobe = "0.1"
 smol_str = "0.3"
 smallvec-wrapper = "0.2"
+triomphe = "0.1"
 ipnet = "2"
+iprfc = "0.1"
 
 # serde = { version = "1", features = ["derive"], optional = true }
 
@@ -44,6 +46,7 @@ widestring = "1"
 [dev-dependencies]
 criterion = "0.5"
 network-interface = "2"
+local-ip-address = "0.6"
 which = "7"
 scopeguard = "1"
 

@@ -1,4 +1,5 @@
-use core::slice;
+use core::{slice, sync::atomic::{AtomicU32, Ordering}};
+
 use libc::{
   bind, close, getsockname, nlmsghdr, recvfrom, sendto, sockaddr_nl, socket, socklen_t, AF_INET,
   AF_INET6, AF_NETLINK, ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6, EINVAL, IFA_ADDRESS,
@@ -11,7 +12,9 @@ use std::ffi::CStr;
 use std::io;
 use std::mem;
 
-use super::{Flags, Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Flags, Interface, IfAddr, MacAddr, MAC_ADDRESS_SIZE};
+
+static SEQ_ID: AtomicU32 = AtomicU32::new(1);
 
 const NLMSG_HDRLEN: usize = mem::size_of::<nlmsghdr>();
 const NLMSG_ALIGNTO: usize = 4;
@@ -49,7 +52,7 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
     }
 
     // Create and send netlink request
-    let req = NetlinkRouteRequest::new(RTM_GETLINK, 1, family as u8);
+    let req = NetlinkRouteRequest::new(RTM_GETLINK, SEQ_ID.fetch_add(1, Ordering::AcqRel), family as u8);
     if sendto(
       sock,
       req.as_bytes().as_ptr() as _,
@@ -190,7 +193,7 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
   }
 }
 
-pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IpIf>> {
+pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfAddr>> {
   unsafe {
     // Create socket
     let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
@@ -215,7 +218,7 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IpIf>> 
     }
 
     // Create and send netlink request
-    let req = NetlinkRouteRequest::new(RTM_GETADDR, 1, family as u8);
+    let req = NetlinkRouteRequest::new(RTM_GETADDR, SEQ_ID.fetch_add(1, Ordering::AcqRel), family as u8);
     if sendto(
       sock,
       req.as_bytes().as_ptr() as _,
@@ -327,7 +330,7 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IpIf>> 
               match ifam.family as i32 {
                 AF_INET => {
                   let ip: [u8; 4] = vbuf[..4].try_into().unwrap();
-                  addrs.push(IpIf::with_prefix_len_assert(
+                  addrs.push(IfAddr::with_prefix_len_assert(
                     ifam.index,
                     ip.into(),
                     ifam.prefix_len,
@@ -336,7 +339,7 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IpIf>> 
                 }
                 AF_INET6 if vbuf.len() >= 16 => {
                   let ip: [u8; 16] = vbuf[..16].try_into().unwrap();
-                  addrs.push(IpIf::with_prefix_len_assert(
+                  addrs.push(IfAddr::with_prefix_len_assert(
                     ifam.index,
                     ip.into(),
                     ifam.prefix_len,
@@ -394,7 +397,7 @@ impl NetlinkRouteRequest {
         nlmsg_type: proto,
         nlmsg_flags: (libc::NLM_F_DUMP | libc::NLM_F_REQUEST) as u16,
         nlmsg_seq: seq,
-        nlmsg_pid: 0,
+        nlmsg_pid: std::process::id(),
       },
       data: RtGenMessage { family },
     }

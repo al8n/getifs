@@ -12,7 +12,7 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{Interface, IpIf, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Interface, IfAddr, MacAddr, MAC_ADDRESS_SIZE};
 
 #[cfg(any(
   target_os = "macos",
@@ -54,7 +54,7 @@ fn invalid_mask(e: ipnet::PrefixLenError) -> io::Error {
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.
-  #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+  #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub struct Flags: u32 {
     /// Interface is administratively up
     const UP = 0x1;
@@ -388,8 +388,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
             let interface = Interface {
               index: ifm.ifm_index as u32,
               mtu: ifm.ifm_data.ifi_mtu,
-              name,
-              addrs: SmallVec::new(),
+              name, 
               mac_addr: _mac,
               flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
             };
@@ -408,7 +407,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
             let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
             if let (Some(ip), Some(mask)) = (ip, mask) {
-              let ipnet = IpIf::with_prefix_len_assert(
+              let ipnet = IfAddr::with_prefix_len_assert(
                 ifam.ifam_index as u32,
                 ip,
                 mask.map_err(invalid_mask)?,
@@ -417,7 +416,8 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
                 .iter_mut()
                 .find(|ifi| ifi.index == ifam.ifam_index as u32)
               {
-                ifi.addrs.push(ipnet);
+                // ifi.addrs.push(ipnet);
+                todo!()
               }
             }
           }
@@ -432,7 +432,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   }
 }
 
-pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpIf>> {
+pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IfAddr>> {
   const HEADER_SIZE: usize = mem::size_of::<ifa_msghdr>();
 
   unsafe {
@@ -465,7 +465,7 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpIf>> {
       let ifam = &*(b.as_ptr() as *const ifa_msghdr);
       let len = ifam.ifam_msglen as usize;
 
-      if ifam.ifam_version as i32 != RTM_VERSION {
+      if (ifam.ifam_version as i32 != RTM_VERSION) || (ifam.ifam_index as u32 != idx && idx != 0) {
         b = &b[len..];
         continue;
       }
@@ -479,7 +479,7 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IpIf>> {
         let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
         if let (Some(ip), Some(mask)) = (ip, mask) {
-          results.push(IpIf::with_prefix_len_assert(
+          results.push(IfAddr::with_prefix_len_assert(
             ifam.ifam_index as u32,
             ip,
             mask.map_err(invalid_mask)?,
