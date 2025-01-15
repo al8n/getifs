@@ -8,18 +8,24 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use either::Either;
-use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use smallvec_wrapper::{OneOrMore, SmallVec};
 
+pub use hardware_address::{MacAddr, ParseMacAddrError};
+pub use idx_to_name::ifindex_to_name;
 pub use ifaddr::*;
+pub use ifnet::*;
 pub use ipnet;
+pub use name_to_idx::ifname_to_index;
 pub use os::*;
 pub use smol_str::SmolStr;
 
 // #[cfg(feature = "serde")]
 // mod serde_impl;
+mod idx_to_name;
 mod ifaddr;
+mod ifnet;
+mod name_to_idx;
+mod utils;
 
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
@@ -45,8 +51,6 @@ mod os;
 
 #[cfg(all(test, not(windows)))]
 mod tests;
-
-pub use hardware_address::{MacAddr, ParseMacAddrError};
 
 const MAC_ADDRESS_SIZE: usize = 6;
 
@@ -94,21 +98,21 @@ impl Interface {
   /// Returns a list of unicast interface addrs for a specific
   /// interface.
   #[inline]
-  pub fn addrs(&self) -> io::Result<SmallVec<IfAddr>> {
+  pub fn addrs(&self) -> io::Result<SmallVec<IfNet>> {
     interface_addresses(self.index)
   }
 
   /// Returns a list of unicast, IPv4 interface addrs for a specific
   /// interface.
   #[inline]
-  pub fn ipv4_addrs(&self) -> io::Result<SmallVec<Ifv4Addr>> {
+  pub fn ipv4_addrs(&self) -> io::Result<SmallVec<Ifv4Net>> {
     interface_ipv4_addresses(self.index)
   }
 
   /// Returns a list of unicast, IPv6 interface addrs for a specific
   /// interface.
   #[inline]
-  pub fn ipv6_addrs(&self) -> io::Result<SmallVec<Ifv6Addr>> {
+  pub fn ipv6_addrs(&self) -> io::Result<SmallVec<Ifv6Net>> {
     interface_ipv6_addresses(self.index)
   }
 
@@ -162,26 +166,23 @@ pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
 ///
 /// The returned list does not identify the associated interface; use
 /// [`interfaces`] and [`Interface::addrs`] for more detail.
-pub fn interface_addrs() -> io::Result<SmallVec<IfAddr>> {
+pub fn interface_addrs() -> io::Result<SmallVec<IfNet>> {
   interface_addresses(0)
 }
 
-/// Returns the IPv4 gateway address of the system.
-pub fn gateway_ipv4() -> io::Result<Option<Ipv4Addr>> {
-  os::gateway_ipv4()
-}
-
-/// Returns the IPv6 gateway address of the system.
-pub fn gateway_ipv6() -> io::Result<Option<Ipv6Addr>> {
-  os::gateway_ipv6()
-}
-
 trait Address: Sized {
-  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self>;
+  fn try_from(index: u32, addr: IpAddr) -> Option<Self>;
 
-  fn try_from_with_filter<F>(index: u32, addr: IpAddr, prefix: u8, f: F) -> Option<Self>
+  fn try_from_with_filter<F>(index: u32, addr: IpAddr, mut f: F) -> Option<Self>
   where
-    F: FnMut(&IpAddr) -> bool;
+    F: FnMut(&IpAddr) -> bool,
+  {
+    if !f(&addr) {
+      return None;
+    }
+
+    <Self as Address>::try_from(index, addr)
+  }
 
   fn addr(&self) -> IpAddr;
 
@@ -190,19 +191,8 @@ trait Address: Sized {
 
 impl Address for IfAddr {
   #[inline]
-  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
-    Some(IfAddr::with_prefix_len_assert(index, addr, prefix))
-  }
-
-  fn try_from_with_filter<F>(index: u32, addr: IpAddr, prefix: u8, f: F) -> Option<Self>
-  where
-    F: FnOnce(&IpAddr) -> bool,
-  {
-    if !f(&addr) {
-      return None;
-    }
-
-    <Self as Address>::try_from(index, addr, prefix)
+  fn try_from(index: u32, addr: IpAddr) -> Option<Self> {
+    Some(IfAddr::new(index, addr))
   }
 
   #[inline]
@@ -218,23 +208,11 @@ impl Address for IfAddr {
 
 impl Address for Ifv4Addr {
   #[inline]
-  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
+  fn try_from(index: u32, addr: IpAddr) -> Option<Self> {
     match addr {
-      IpAddr::V4(ip) => Some(Ifv4Addr::with_prefix_len_assert(index, ip, prefix)),
+      IpAddr::V4(ip) => Some(Ifv4Addr::new(index, ip)),
       _ => None,
     }
-  }
-
-  #[inline]
-  fn try_from_with_filter<F>(index: u32, addr: IpAddr, prefix: u8, f: F) -> Option<Self>
-  where
-    F: FnOnce(&IpAddr) -> bool,
-  {
-    if !f(&addr) {
-      return None;
-    }
-
-    <Self as Address>::try_from(index, addr, prefix)
   }
 
   #[inline]
@@ -250,23 +228,87 @@ impl Address for Ifv4Addr {
 
 impl Address for Ifv6Addr {
   #[inline]
-  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
+  fn try_from(index: u32, addr: IpAddr) -> Option<Self> {
     match addr {
-      IpAddr::V6(ip) => Some(Ifv6Addr::with_prefix_len_assert(index, ip, prefix)),
+      IpAddr::V6(ip) => Some(Ifv6Addr::new(index, ip)),
       _ => None,
     }
   }
 
   #[inline]
-  fn try_from_with_filter<F>(index: u32, addr: IpAddr, prefix: u8, f: F) -> Option<Self>
+  fn addr(&self) -> IpAddr {
+    self.addr().into()
+  }
+
+  #[inline]
+  fn index(&self) -> u32 {
+    self.index()
+  }
+}
+
+trait Net: Sized {
+  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self>;
+
+  fn try_from_with_filter<F>(index: u32, addr: IpAddr, prefix: u8, mut f: F) -> Option<Self>
   where
-    F: FnOnce(&IpAddr) -> bool,
+    F: FnMut(&IpAddr) -> bool,
   {
     if !f(&addr) {
       return None;
     }
 
-    <Self as Address>::try_from(index, addr, prefix)
+    <Self as Net>::try_from(index, addr, prefix)
+  }
+
+  fn addr(&self) -> IpAddr;
+
+  fn index(&self) -> u32;
+}
+
+impl Net for IfNet {
+  #[inline]
+  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
+    Some(IfNet::with_prefix_len_assert(index, addr, prefix))
+  }
+
+  #[inline]
+  fn addr(&self) -> IpAddr {
+    self.addr()
+  }
+
+  #[inline]
+  fn index(&self) -> u32 {
+    self.index()
+  }
+}
+
+impl Net for Ifv4Net {
+  #[inline]
+  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
+    match addr {
+      IpAddr::V4(ip) => Some(Ifv4Net::with_prefix_len_assert(index, ip, prefix)),
+      _ => None,
+    }
+  }
+
+  #[inline]
+  fn addr(&self) -> IpAddr {
+    self.addr().into()
+  }
+
+  #[inline]
+  fn index(&self) -> u32 {
+    self.index()
+  }
+}
+
+impl Net for Ifv6Net {
+  #[inline]
+  fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
+    match addr {
+      IpAddr::V6(ip) => Some(Ifv6Net::with_prefix_len_assert(index, ip, prefix)),
+      _ => None,
+    }
   }
 
   #[inline]

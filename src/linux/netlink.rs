@@ -15,7 +15,7 @@ use std::ffi::CStr;
 use std::io;
 use std::mem;
 
-use super::{Flags, IfAddr, Interface, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Flags, IfNet, Interface, MacAddr, MAC_ADDRESS_SIZE};
 
 static SEQ_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -200,7 +200,7 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
   }
 }
 
-pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfAddr>> {
+pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfNet>> {
   unsafe {
     // Create socket
     let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
@@ -297,7 +297,7 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfAddr>
           NLMSG_DONE => break 'outer,
           NLMSG_ERROR => return Err(io::Error::from_raw_os_error(EINVAL)),
           val if val == RTM_NEWADDR as i32 => {
-            let ifam = IfAddrMessageHeader {
+            let ifam = IfNetMessageHeader {
               family: msg_buf[0],
               prefix_len: msg_buf[1],
               flags: msg_buf[2],
@@ -305,7 +305,7 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfAddr>
               index: u32::from_ne_bytes(msg_buf[4..8].try_into().unwrap()),
             };
 
-            let mut ifa_msg_data = &msg_buf[IfAddrMessageHeader::SIZE..];
+            let mut ifa_msg_data = &msg_buf[IfNetMessageHeader::SIZE..];
             let mut point_to_point = false;
             let mut attrs = SmallVec::new();
             while ifa_msg_data.len() >= RtAttr::SIZE {
@@ -342,7 +342,7 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfAddr>
                 AF_INET => {
                   let ip: [u8; 4] = vbuf[..4].try_into().unwrap();
                   if attr.ty == IFA_ADDRESS || attr.ty == IFA_LOCAL {
-                    addrs.push(IfAddr::with_prefix_len_assert(
+                    addrs.push(IfNet::with_prefix_len_assert(
                       ifam.index,
                       ip.into(),
                       ifam.prefix_len,
@@ -353,7 +353,7 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfAddr>
                 AF_INET6 if vbuf.len() >= 16 => {
                   let ip: [u8; 16] = vbuf[..16].try_into().unwrap();
                   if attr.ty == IFA_ADDRESS || attr.ty == IFA_LOCAL {
-                    addrs.push(IfAddr::with_prefix_len_assert(
+                    addrs.push(IfNet::with_prefix_len_assert(
                       ifam.index,
                       ip.into(),
                       ifam.prefix_len,
@@ -467,7 +467,7 @@ impl RtAttr {
 
 #[repr(C)]
 #[derive(Debug)]
-struct IfAddrMessageHeader {
+struct IfNetMessageHeader {
   family: u8,
   prefix_len: u8,
   flags: u8,
@@ -475,7 +475,7 @@ struct IfAddrMessageHeader {
   index: u32,
 }
 
-impl IfAddrMessageHeader {
+impl IfNetMessageHeader {
   const SIZE: usize = mem::size_of::<Self>();
 }
 

@@ -12,9 +12,9 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr, Interface, MacAddr, MAC_ADDRESS_SIZE};
+use super::{IfNet, Ifv4Net, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
 
-pub(super) use gateway::{gateway_ipv4, gateway_ipv6};
+pub use gateway::*;
 pub use local_addr::*;
 
 #[path = "bsd_like/local_addr.rs"]
@@ -418,21 +418,21 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   }
 }
 
-pub(super) fn interface_ipv4_addresses(idx: u32) -> io::Result<SmallVec<Ifv4Addr>> {
+pub(super) fn interface_ipv4_addresses(idx: u32) -> io::Result<SmallVec<Ifv4Net>> {
   interface_addr_table(AF_INET, idx, |_| true)
 }
 
-pub(super) fn interface_ipv6_addresses(idx: u32) -> io::Result<SmallVec<Ifv6Addr>> {
+pub(super) fn interface_ipv6_addresses(idx: u32) -> io::Result<SmallVec<Ifv6Net>> {
   interface_addr_table(AF_INET6, idx, |_| true)
 }
 
-pub(super) fn interface_addresses(idx: u32) -> io::Result<SmallVec<IfAddr>> {
+pub(super) fn interface_addresses(idx: u32) -> io::Result<SmallVec<IfNet>> {
   interface_addr_table(AF_UNSPEC, idx, |_| true)
 }
 
 pub(super) fn interface_addr_table<T, F>(family: i32, idx: u32, mut f: F) -> io::Result<SmallVec<T>>
 where
-  T: Address,
+  T: Net,
   F: FnMut(&IpAddr) -> bool,
 {
   const HEADER_SIZE: usize = mem::size_of::<ifa_msghdr>();
