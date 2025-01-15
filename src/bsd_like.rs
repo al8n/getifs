@@ -12,7 +12,10 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{IfNet, Ifv4Net, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
+use super::{
+  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net,
+  MAC_ADDRESS_SIZE,
+};
 
 pub use gateway::*;
 pub use local_addr::*;
@@ -418,16 +421,25 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   }
 }
 
-pub(super) fn interface_ipv4_addresses(idx: u32) -> io::Result<SmallVec<Ifv4Net>> {
-  interface_addr_table(AF_INET, idx, |_| true)
+pub(super) fn interface_ipv4_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<Ifv4Net>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_addr_table(AF_INET, idx, f)
 }
 
-pub(super) fn interface_ipv6_addresses(idx: u32) -> io::Result<SmallVec<Ifv6Net>> {
-  interface_addr_table(AF_INET6, idx, |_| true)
+pub(super) fn interface_ipv6_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<Ifv6Net>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_addr_table(AF_INET6, idx, f)
 }
 
-pub(super) fn interface_addresses(idx: u32) -> io::Result<SmallVec<IfNet>> {
-  interface_addr_table(AF_UNSPEC, idx, |_| true)
+pub(super) fn interface_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfNet>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_addr_table(AF_UNSPEC, idx, f)
 }
 
 pub(super) fn interface_addr_table<T, F>(family: i32, idx: u32, mut f: F) -> io::Result<SmallVec<T>>
@@ -478,46 +490,78 @@ where
   }
 }
 
-#[cfg(any(
-  target_os = "macos",
-  target_os = "tvos",
-  target_os = "ios",
-  target_os = "watchos",
-  target_os = "visionos",
-))]
-pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {
-  const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr2>();
-
-  let idx = ifi.map_or(0, |ifi| ifi.index);
-  unsafe {
-    let buf = fetch(AF_UNSPEC, NET_RT_IFLIST2, idx as i32)?;
-
-    let mut results = SmallVec::new();
-    let mut b = buf.as_slice();
-
-    while b.len() > HEADER_SIZE {
-      let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr2);
-      let len = ifam.ifmam_msglen as usize;
-
-      if ifam.ifmam_version as i32 != RTM_VERSION {
-        b = &b[len..];
-        continue;
-      }
-
-      if ifam.ifmam_type as i32 == libc::RTM_NEWMADDR2 {
-        let addrs = parse_addrs(ifam.ifmam_addrs as u32, &b[HEADER_SIZE..len])?;
-
-        if let Some(ip) = addrs[RTAX_IFA as usize].as_ref() {
-          results.push(*ip);
-        }
-      }
-
-      b = &b[len..];
-    }
-
-    Ok(results)
+cfg_apple!(
+  pub(super) fn interface_multicast_ipv4_addresses<F>(
+    idx: u32,
+    f: F,
+  ) -> io::Result<SmallVec<Ifv4Addr>>
+  where
+    F: FnMut(&IpAddr) -> bool,
+  {
+    interface_multiaddr_table(AF_INET, idx, f)
   }
-}
+
+  pub(super) fn interface_multicast_ipv6_addresses<F>(
+    idx: u32,
+    f: F,
+  ) -> io::Result<SmallVec<Ifv6Addr>>
+  where
+    F: FnMut(&IpAddr) -> bool,
+  {
+    interface_multiaddr_table(AF_INET6, idx, f)
+  }
+
+  pub(super) fn interface_multicast_ip_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfAddr>>
+  where
+    F: FnMut(&IpAddr) -> bool,
+  {
+    interface_multiaddr_table(AF_UNSPEC, idx, f)
+  }
+
+  pub(super) fn interface_multiaddr_table<T, F>(
+    family: i32,
+    idx: u32,
+    mut f: F,
+  ) -> io::Result<SmallVec<T>>
+  where
+    T: Address,
+    F: FnMut(&IpAddr) -> bool,
+  {
+    const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr2>();
+
+    unsafe {
+      let buf = fetch(family, NET_RT_IFLIST2, idx as i32)?;
+
+      let mut results = SmallVec::new();
+      let mut b = buf.as_slice();
+
+      while b.len() > HEADER_SIZE {
+        let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr2);
+        let len = ifam.ifmam_msglen as usize;
+
+        if ifam.ifmam_version as i32 != RTM_VERSION {
+          b = &b[len..];
+          continue;
+        }
+
+        if ifam.ifmam_type as i32 == libc::RTM_NEWMADDR2 {
+          let addrs = parse_addrs(ifam.ifmam_addrs as u32, &b[HEADER_SIZE..len])?;
+
+          if let Some(ip) = addrs[RTAX_IFA as usize].as_ref() {
+            if let Some(ip) = T::try_from_with_filter(ifam.ifmam_index as u32, *ip, |addr| f(addr))
+            {
+              results.push(ip);
+            }
+          }
+        }
+
+        b = &b[len..];
+      }
+
+      Ok(results)
+    }
+  }
+);
 
 #[cfg(target_os = "freebsd")]
 pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {

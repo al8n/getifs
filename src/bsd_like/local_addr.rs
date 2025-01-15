@@ -1,11 +1,17 @@
-use std::{io, net::IpAddr};
+use std::{
+  io,
+  net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_DUMP, RTA_DST, RTF_UP};
 use smallvec_wrapper::SmallVec;
 
 use crate::Ipv6AddrExt;
 
-use super::{fetch, invalid_message, message_too_short, IfNet, Ifv4Net, Ifv6Net, Net};
+use super::{
+  super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter},
+  fetch, invalid_message, message_too_short, IfNet, Ifv4Net, Ifv6Net, Net,
+};
 
 /// Returns the IPv4 addresses from the interface with the best default route.
 /// The "best" interface is determined by the routing metrics of default routes (`0.0.0.0`).
@@ -280,9 +286,9 @@ where
 /// ```
 pub fn local_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Net>>
 where
-  F: FnMut(&IpAddr) -> bool,
+  F: FnMut(&Ipv4Addr) -> bool,
 {
-  all_local_ip_addrs_in(AF_INET, f)
+  all_local_ip_addrs_in(AF_INET, ipv4_filter_to_ip_filter(f))
 }
 
 /// Returns all IPv6 addresses from interfaces that have valid routes.
@@ -301,9 +307,9 @@ where
 /// ```
 pub fn local_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Net>>
 where
-  F: FnMut(&IpAddr) -> bool,
+  F: FnMut(&Ipv6Addr) -> bool,
 {
-  all_local_ip_addrs_in(AF_INET6, f)
+  all_local_ip_addrs_in(AF_INET6, ipv6_filter_to_ip_filter(f))
 }
 
 /// Returns all IP addresses (both IPv4 and IPv6) from interfaces that have valid routes.
