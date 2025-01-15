@@ -12,7 +12,7 @@ use windows_sys::{
   Win32::Networking::WinSock::*,
 };
 
-use super::{Interface, IfAddr, MacAddr, MAC_ADDRESS_SIZE};
+use super::{IfAddr, Interface, MacAddr, MAC_ADDRESS_SIZE};
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.

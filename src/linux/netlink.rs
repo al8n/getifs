@@ -1,4 +1,7 @@
-use core::{slice, sync::atomic::{AtomicU32, Ordering}};
+use core::{
+  slice,
+  sync::atomic::{AtomicU32, Ordering},
+};
 
 use libc::{
   bind, close, getsockname, nlmsghdr, recvfrom, sendto, sockaddr_nl, socket, socklen_t, AF_INET,
@@ -12,7 +15,7 @@ use std::ffi::CStr;
 use std::io;
 use std::mem;
 
-use super::{Flags, Interface, IfAddr, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Flags, IfAddr, Interface, MacAddr, MAC_ADDRESS_SIZE};
 
 static SEQ_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -52,7 +55,11 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
     }
 
     // Create and send netlink request
-    let req = NetlinkRouteRequest::new(RTM_GETLINK, SEQ_ID.fetch_add(1, Ordering::AcqRel), family as u8);
+    let req = NetlinkRouteRequest::new(
+      RTM_GETLINK,
+      SEQ_ID.fetch_add(1, Ordering::AcqRel),
+      family as u8,
+    );
     if sendto(
       sock,
       req.as_bytes().as_ptr() as _,
@@ -218,7 +225,11 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfAddr>
     }
 
     // Create and send netlink request
-    let req = NetlinkRouteRequest::new(RTM_GETADDR, SEQ_ID.fetch_add(1, Ordering::AcqRel), family as u8);
+    let req = NetlinkRouteRequest::new(
+      RTM_GETADDR,
+      SEQ_ID.fetch_add(1, Ordering::AcqRel),
+      family as u8,
+    );
     if sendto(
       sock,
       req.as_bytes().as_ptr() as _,
@@ -330,21 +341,25 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfAddr>
               match ifam.family as i32 {
                 AF_INET => {
                   let ip: [u8; 4] = vbuf[..4].try_into().unwrap();
-                  addrs.push(IfAddr::with_prefix_len_assert(
-                    ifam.index,
-                    ip.into(),
-                    ifam.prefix_len,
-                  ));
-                  continue 'outer;
+                  if attr.ty == IFA_ADDRESS || attr.ty == IFA_LOCAL {
+                    addrs.push(IfAddr::with_prefix_len_assert(
+                      ifam.index,
+                      ip.into(),
+                      ifam.prefix_len,
+                    ));
+                  }
+                  // continue 'outer;
                 }
                 AF_INET6 if vbuf.len() >= 16 => {
                   let ip: [u8; 16] = vbuf[..16].try_into().unwrap();
-                  addrs.push(IfAddr::with_prefix_len_assert(
-                    ifam.index,
-                    ip.into(),
-                    ifam.prefix_len,
-                  ));
-                  continue 'outer;
+                  if attr.ty == IFA_ADDRESS || attr.ty == IFA_LOCAL {
+                    addrs.push(IfAddr::with_prefix_len_assert(
+                      ifam.index,
+                      ip.into(),
+                      ifam.prefix_len,
+                    ));
+                  }
+                  // continue 'outer;
                 }
                 _ => {}
               }

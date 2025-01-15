@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 
 use getifs::{
-  interface_addrs, interface_by_index, interface_by_name, interfaces, Flags, Interface, IfAddr,
+  interface_addrs, interface_by_index, interface_by_name, interfaces, Flags, IfAddr, Interface,
 };
 
 use iprobe::{ipv4, ipv6};

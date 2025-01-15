@@ -5,7 +5,7 @@ use libc::AF_UNSPEC;
 use smallvec_wrapper::{OneOrMore, SmallVec};
 use smol_str::SmolStr;
 
-use super::{Interface, IfAddr, MacAddr, MAC_ADDRESS_SIZE};
+use super::{IfAddr, Interface, MacAddr, MAC_ADDRESS_SIZE};
 
 #[path = "linux/netlink.rs"]
 mod netlink;

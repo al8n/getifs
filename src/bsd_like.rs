@@ -12,7 +12,16 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{Interface, IfAddr, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr, Interface, MacAddr, MAC_ADDRESS_SIZE};
+
+pub(super) use gateway::{gateway_ipv4, gateway_ipv6};
+pub use local_addr::*;
+
+#[path = "bsd_like/local_addr.rs"]
+mod local_addr;
+
+#[path = "bsd_like/gateway.rs"]
+mod gateway;
 
 #[cfg(any(
   target_os = "macos",
@@ -339,9 +348,9 @@ fn parse_addrs(addrs: u32, mut b: &[u8]) -> io::Result<[Option<IpAddr>; RTAX_MAX
   Ok(as_)
 }
 
-pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
+fn fetch(family: i32, rt: i32, flag: i32) -> io::Result<Vec<u8>> {
   unsafe {
-    let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, NET_RT_IFLIST, idx as i32];
+    let mut mib = [CTL_NET, AF_ROUTE, 0, family, rt, flag];
 
     // Get buffer size
     let mut len: size_t = 0;
@@ -363,6 +372,13 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
       return Err(io::Error::last_os_error());
     }
 
+    Ok(buf)
+  }
+}
+
+pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
+  unsafe {
+    let buf = fetch(AF_UNSPEC, NET_RT_IFLIST, idx as i32)?;
     let mut results = OneOrMore::new();
 
     let mut src = buf.as_slice();
@@ -380,49 +396,19 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
         continue;
       }
 
-      match src[3] as i32 {
-        libc::RTM_IFINFO => {
-          let ifm = &*(src.as_ptr() as *const if_msghdr);
-          if ifm.ifm_type as i32 == RTM_IFINFO {
-            let (name, _mac) = parse(&src[size_of::<if_msghdr>()..l])?;
-            let interface = Interface {
-              index: ifm.ifm_index as u32,
-              mtu: ifm.ifm_data.ifi_mtu,
-              name, 
-              mac_addr: _mac,
-              flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
-            };
-            results.push(interface);
-          }
+      if src[3] as i32 == libc::RTM_IFINFO {
+        let ifm = &*(src.as_ptr() as *const if_msghdr);
+        if ifm.ifm_type as i32 == RTM_IFINFO {
+          let (name, mac) = parse(&src[size_of::<if_msghdr>()..l])?;
+          let interface = Interface {
+            index: ifm.ifm_index as u32,
+            mtu: ifm.ifm_data.ifi_mtu,
+            name,
+            mac_addr: mac,
+            flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
+          };
+          results.push(interface);
         }
-        libc::RTM_NEWADDR => {
-          let ifam = &*(src.as_ptr() as *const ifa_msghdr);
-
-          if ifam.ifam_type as i32 == RTM_NEWADDR {
-            let addrs = parse_addrs(ifam.ifam_addrs as u32, &src[size_of::<ifa_msghdr>()..l])?;
-            let mask = addrs[RTAX_NETMASK as usize]
-              .as_ref()
-              .map(|ip| ip_mask_to_prefix(*ip));
-
-            let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
-
-            if let (Some(ip), Some(mask)) = (ip, mask) {
-              let ipnet = IfAddr::with_prefix_len_assert(
-                ifam.ifam_index as u32,
-                ip,
-                mask.map_err(invalid_mask)?,
-              );
-              if let Some(ifi) = results
-                .iter_mut()
-                .find(|ifi| ifi.index == ifam.ifam_index as u32)
-              {
-                // ifi.addrs.push(ipnet);
-                todo!()
-              }
-            }
-          }
-        }
-        _ => {}
       }
 
       src = &src[l..];
@@ -432,32 +418,27 @@ pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
   }
 }
 
-pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IfAddr>> {
+pub(super) fn interface_ipv4_addresses(idx: u32) -> io::Result<SmallVec<Ifv4Addr>> {
+  interface_addr_table(AF_INET, idx, |_| true)
+}
+
+pub(super) fn interface_ipv6_addresses(idx: u32) -> io::Result<SmallVec<Ifv6Addr>> {
+  interface_addr_table(AF_INET6, idx, |_| true)
+}
+
+pub(super) fn interface_addresses(idx: u32) -> io::Result<SmallVec<IfAddr>> {
+  interface_addr_table(AF_UNSPEC, idx, |_| true)
+}
+
+pub(super) fn interface_addr_table<T, F>(family: i32, idx: u32, mut f: F) -> io::Result<SmallVec<T>>
+where
+  T: Address,
+  F: FnMut(&IpAddr) -> bool,
+{
   const HEADER_SIZE: usize = mem::size_of::<ifa_msghdr>();
 
   unsafe {
-    let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, NET_RT_IFLIST, idx as i32];
-
-    // Get buffer size
-    let mut len: size_t = 0;
-    if sysctl(mib.as_mut_ptr(), 6, null_mut(), &mut len, null_mut(), 0) < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Allocate buffer
-    let mut buf = vec![0u8; len];
-    if sysctl(
-      mib.as_mut_ptr(),
-      6,
-      buf.as_mut_ptr() as *mut c_void,
-      &mut len,
-      null_mut(),
-      0,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-
+    let buf = fetch(family, NET_RT_IFLIST, idx as i32)?;
     let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
@@ -479,11 +460,14 @@ pub(super) fn interface_addr_table(idx: u32) -> io::Result<SmallVec<IfAddr>> {
         let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
         if let (Some(ip), Some(mask)) = (ip, mask) {
-          results.push(IfAddr::with_prefix_len_assert(
+          if let Some(ifa) = T::try_from_with_filter(
             ifam.ifam_index as u32,
             ip,
             mask.map_err(invalid_mask)?,
-          ));
+            |addr| f(addr),
+          ) {
+            results.push(ifa);
+          }
         }
       }
 
@@ -506,27 +490,7 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
 
   let idx = ifi.map_or(0, |ifi| ifi.index);
   unsafe {
-    let mut mib = [CTL_NET, AF_ROUTE, 0, AF_UNSPEC, NET_RT_IFLIST2, idx as i32];
-
-    // Get buffer size
-    let mut len: size_t = 0;
-    if sysctl(mib.as_mut_ptr(), 6, null_mut(), &mut len, null_mut(), 0) < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Allocate buffer
-    let mut buf = vec![0u8; len];
-    if sysctl(
-      mib.as_mut_ptr(),
-      6,
-      buf.as_mut_ptr() as *mut c_void,
-      &mut len,
-      null_mut(),
-      0,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
+    let buf = fetch(AF_UNSPEC, NET_RT_IFLIST2, idx as i32)?;
 
     let mut results = SmallVec::new();
     let mut b = buf.as_slice();
@@ -562,35 +526,7 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
   let idx = ifi.map_or(0, |ifi| ifi.index);
 
   unsafe {
-    let mut mib = [
-      CTL_NET,
-      AF_ROUTE,
-      0,
-      AF_UNSPEC,
-      libc::NET_RT_IFMALIST,
-      idx as i32,
-    ];
-
-    // Get buffer size
-    let mut len: size_t = 0;
-    if sysctl(mib.as_mut_ptr(), 6, null_mut(), &mut len, null_mut(), 0) < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Allocate buffer
-    let mut buf = vec![0u8; len];
-    if sysctl(
-      mib.as_mut_ptr(),
-      6,
-      buf.as_mut_ptr() as *mut c_void,
-      &mut len,
-      null_mut(),
-      0,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-
+    let buf = fetch(libc::AF_UNSPEC, libc::NET_RT_IFMALIST, idx as i32)?;
     let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
