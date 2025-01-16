@@ -490,25 +490,31 @@ where
   }
 }
 
-cfg_apple!(
+cfg_bsd_multicast!(
   pub(super) fn interface_multicast_ipv4_addresses<F>(
     idx: u32,
-    f: F,
+    mut f: F,
   ) -> io::Result<SmallVec<Ifv4Addr>>
   where
-    F: FnMut(&IpAddr) -> bool,
+    F: FnMut(&std::net::Ipv4Addr) -> bool,
   {
-    interface_multiaddr_table(AF_INET, idx, f)
+    interface_multiaddr_table(AF_INET, idx, |addr| match addr {
+      IpAddr::V4(ip) => f(ip),
+      _ => false,
+    })
   }
 
   pub(super) fn interface_multicast_ipv6_addresses<F>(
     idx: u32,
-    f: F,
+    mut f: F,
   ) -> io::Result<SmallVec<Ifv6Addr>>
   where
-    F: FnMut(&IpAddr) -> bool,
+    F: FnMut(&Ipv6Addr) -> bool,
   {
-    interface_multiaddr_table(AF_INET6, idx, f)
+    interface_multiaddr_table(AF_INET6, idx, |addr| match addr {
+      IpAddr::V6(ip) => f(ip),
+      _ => false,
+    })
   }
 
   pub(super) fn interface_multicast_ip_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfAddr>>
@@ -517,7 +523,9 @@ cfg_apple!(
   {
     interface_multiaddr_table(AF_UNSPEC, idx, f)
   }
+);
 
+cfg_apple!(
   pub(super) fn interface_multiaddr_table<T, F>(
     family: i32,
     idx: u32,
@@ -564,13 +572,19 @@ cfg_apple!(
 );
 
 #[cfg(target_os = "freebsd")]
-pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {
+pub(super) fn interface_multiaddr_table<T, F>(
+  family: i32,
+  idx: u32,
+  mut f: F,
+) -> io::Result<SmallVec<T>>
+where
+  T: Address,
+  F: FnMut(&IpAddr) -> bool,
+{
   const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr>();
 
-  let idx = ifi.map_or(0, |ifi| ifi.index);
-
   unsafe {
-    let buf = fetch(libc::AF_UNSPEC, libc::NET_RT_IFMALIST, idx as i32)?;
+    let buf = fetch(family, libc::NET_RT_IFMALIST, idx as i32)?;
     let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
@@ -587,7 +601,9 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
         let addrs = parse_addrs(ifam.ifmam_addrs as u32, &b[HEADER_SIZE..len])?;
 
         if let Some(ip) = addrs[RTAX_IFA as usize].as_ref() {
-          results.push(*ip);
+          if let Some(ip) = T::try_from_with_filter(ifam.ifmam_index as u32, *ip, |addr| f(addr)) {
+            results.push(ip);
+          }
         }
       }
 

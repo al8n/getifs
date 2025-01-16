@@ -41,6 +41,33 @@ macro_rules! cfg_apple {
   }
 }
 
+macro_rules! cfg_bsd_multicast {
+  ($($item:item)*) => {
+    $(
+      #[cfg(any(
+        target_os = "macos",
+        target_os = "tvos",
+        target_os = "ios",
+        target_os = "watchos",
+        target_os = "visionos",
+        target_os = "freebsd",
+      ))]
+      #[cfg_attr(
+        docsrs,
+        doc(cfg(any(
+          target_os = "macos",
+          target_os = "tvos",
+          target_os = "ios",
+          target_os = "watchos",
+          target_os = "visionos",
+          target_os = "freebsd",
+        )))
+      )]
+      $item
+    )*
+  };
+}
+
 macro_rules! cfg_multicast {
   ($($item:item)*) => {
     $(
@@ -232,7 +259,7 @@ impl Interface {
     where
       F: FnMut(&Ipv4Addr) -> bool,
     {
-      os::interface_multicast_ipv4_addresses(self.index, ipv4_filter_to_ip_filter(f))
+      os::interface_multicast_ipv4_addresses(self.index, f)
     }
 
     /// Returns a list of multicast, joined group IPv6 addrs
@@ -248,7 +275,7 @@ impl Interface {
     where
       F: FnMut(&Ipv6Addr) -> bool,
     {
-      os::interface_multicast_ipv6_addresses(self.index, ipv6_filter_to_ip_filter(f))
+      os::interface_multicast_ipv6_addresses(self.index, f)
     }
   );
 }
@@ -430,7 +457,7 @@ cfg_multicast!(
   where
     F: FnMut(&Ipv4Addr) -> bool,
   {
-    os::interface_multicast_ipv4_addresses(0, ipv4_filter_to_ip_filter(f))
+    os::interface_multicast_ipv4_addresses(0, f)
   }
 
   /// Returns a list of the system's multicast, IPv6 interface
@@ -464,7 +491,7 @@ cfg_multicast!(
   where
     F: FnMut(&Ipv6Addr) -> bool,
   {
-    os::interface_multicast_ipv6_addresses(0, ipv6_filter_to_ip_filter(f))
+    os::interface_multicast_ipv6_addresses(0, f)
   }
 );
 
@@ -669,11 +696,11 @@ fn test_local_ip() {
   // println!("local_ip: {:?}", ip);
   let addrs = interface_addrs().unwrap();
   for addr in addrs {
-    if !addr.addr().is_loopback() {
-      println!("{}", addr);
-    }
+    // if !addr.addr().is_loopback() {
+    println!("{}", addr);
+    // }
   }
-  println!("local {}", local_ip_address::local_ip().unwrap());
-  println!("local v6 {}", local_ip_address::local_ipv6().unwrap());
+  // println!("local {}", local_ip_address::local_ip().unwrap());
+  // println!("local v6 {}", local_ip_address::local_ipv6().unwrap());
   // println!("local broadcast {}", local_ip_address::local_broadcast_ip().unwrap())
 }

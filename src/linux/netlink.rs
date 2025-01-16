@@ -6,16 +6,16 @@ use core::{
 use libc::{
   bind, close, getsockname, nlmsghdr, recvfrom, sendto, sockaddr_nl, socket, socklen_t, AF_INET,
   AF_INET6, AF_NETLINK, ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6, EINVAL, IFA_ADDRESS,
-  IFA_LOCAL, IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU, NETLINK_ROUTE, NLMSG_DONE, NLMSG_ERROR,
-  RTM_NEWLINK, SOCK_CLOEXEC, SOCK_RAW,
+  IFA_LOCAL, IFA_MULTICAST, IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU, NETLINK_ROUTE, NLMSG_DONE,
+  NLMSG_ERROR, RTM_NEWLINK, SOCK_CLOEXEC, SOCK_RAW,
 };
 use libc::{RTM_GETADDR, RTM_GETLINK, RTM_NEWADDR};
 use smallvec_wrapper::{OneOrMore, SmallVec};
-use std::ffi::CStr;
 use std::io;
 use std::mem;
+use std::{ffi::CStr, net::IpAddr};
 
-use super::{Flags, IfNet, Interface, MacAddr, MAC_ADDRESS_SIZE};
+use super::{Flags, IfNet, Ifv4Net, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
 
 static SEQ_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -200,7 +200,11 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
   }
 }
 
-pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfNet>> {
+pub(super) fn netlink_addr<N, F>(family: i32, ifi: u32, mut f: F) -> io::Result<SmallVec<N>>
+where
+  N: Net,
+  F: FnMut(&IpAddr) -> bool,
+{
   unsafe {
     // Create socket
     let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
@@ -225,11 +229,7 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfNet>>
     }
 
     // Create and send netlink request
-    let req = NetlinkRouteRequest::new(
-      RTM_GETADDR,
-      SEQ_ID.fetch_add(1, Ordering::AcqRel),
-      family as u8,
-    );
+    let req = NetlinkRouteRequest::new(RTM_GETADDR, 1, family as u8);
     if sendto(
       sock,
       req.as_bytes().as_ptr() as _,
@@ -342,24 +342,26 @@ pub(super) fn netlink_addr(family: i32, ifi: u32) -> io::Result<SmallVec<IfNet>>
                 AF_INET => {
                   let ip: [u8; 4] = vbuf[..4].try_into().unwrap();
                   if attr.ty == IFA_ADDRESS || attr.ty == IFA_LOCAL {
-                    addrs.push(IfNet::with_prefix_len_assert(
-                      ifam.index,
-                      ip.into(),
-                      ifam.prefix_len,
-                    ));
+                    if let Some(addr) =
+                      N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
+                        f(addr)
+                      })
+                    {
+                      addrs.push(addr);
+                    }
                   }
-                  // continue 'outer;
                 }
                 AF_INET6 if vbuf.len() >= 16 => {
                   let ip: [u8; 16] = vbuf[..16].try_into().unwrap();
                   if attr.ty == IFA_ADDRESS || attr.ty == IFA_LOCAL {
-                    addrs.push(IfNet::with_prefix_len_assert(
-                      ifam.index,
-                      ip.into(),
-                      ifam.prefix_len,
-                    ));
+                    if let Some(addr) =
+                      N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
+                        f(addr)
+                      })
+                    {
+                      addrs.push(addr);
+                    }
                   }
-                  // continue 'outer;
                 }
                 _ => {}
               }
