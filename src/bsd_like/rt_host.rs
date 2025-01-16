@@ -3,32 +3,55 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_FLAGS, RTA_DST, RTA_GATEWAY, RTF_GATEWAY, RTF_UP};
+use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_FLAGS, RTA_DST, RTF_HOST, RTF_UP};
 use smallvec_wrapper::SmallVec;
+
+use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
 
 use super::{
   super::{Address, IfAddr, Ifv4Addr, Ifv6Addr},
   fetch, invalid_message, message_too_short,
 };
 
-pub(crate) fn gateway_ip_addrs() -> io::Result<SmallVec<IfAddr>> {
-  gateway_addrs_in(AF_UNSPEC, |_| true)
+pub(crate) fn rt_host_ip_addrs() -> io::Result<SmallVec<IfAddr>> {
+  rt_host_addrs_in(AF_UNSPEC, |_| true)
 }
 
-pub(crate) fn gateway_ipv4_addrs() -> io::Result<SmallVec<Ifv4Addr>> {
-  gateway_addrs_in(AF_INET, |_| true)
+pub(crate) fn rt_host_ipv4_addrs() -> io::Result<SmallVec<Ifv4Addr>> {
+  rt_host_addrs_in(AF_INET, |_| true)
 }
 
-pub(crate) fn gateway_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
-  gateway_addrs_in(AF_INET6, |_| true)
+pub(crate) fn rt_host_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
+  rt_host_addrs_in(AF_INET6, |_| true)
 }
 
-fn gateway_addrs_in<A, F>(family: i32, mut f: F) -> io::Result<SmallVec<A>>
+pub(crate) fn rt_host_ip_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfAddr>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  rt_host_addrs_in(AF_UNSPEC, f)
+}
+
+pub(crate) fn rt_host_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
+where
+  F: FnMut(&Ipv4Addr) -> bool,
+{
+  rt_host_addrs_in(AF_INET, ipv4_filter_to_ip_filter(f))
+}
+
+pub(crate) fn rt_host_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
+where
+  F: FnMut(&Ipv6Addr) -> bool,
+{
+  rt_host_addrs_in(AF_INET6, ipv6_filter_to_ip_filter(f))
+}
+
+fn rt_host_addrs_in<A, F>(family: i32, mut f: F) -> io::Result<SmallVec<A>>
 where
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
 {
-  let buf = fetch(family, NET_RT_FLAGS, RTF_GATEWAY)?;
+  let buf = fetch(family, NET_RT_FLAGS, RTF_HOST)?;
   let mut results = SmallVec::new();
   unsafe {
     let mut src = buf.as_slice();
@@ -56,7 +79,7 @@ where
       let rtm = &*(src.as_ptr() as *const libc::rt_msghdr);
 
       // Only consider UP routes
-      if (rtm.rtm_flags & (RTF_UP | RTF_GATEWAY)) == 0 {
+      if (rtm.rtm_flags & RTF_UP) == 0 {
         src = &src[l..];
         continue;
       }
@@ -71,10 +94,8 @@ where
       while addrs != 0 {
         if (addrs & 1) != 0 {
           let sa = &*(addr_ptr as *const libc::sockaddr);
-          let data_len = sa.sa_len;
-          let data = sa.sa_data;
           match (family, sa.sa_family as i32, i) {
-            (AF_INET, AF_INET, RTA_GATEWAY) | (AF_UNSPEC, AF_INET, RTA_GATEWAY) => {
+            (AF_INET, AF_INET, RTA_DST) | (AF_UNSPEC, AF_INET, RTA_DST) => {
               let sa_in = &*(addr_ptr as *const libc::sockaddr_in);
               if sa_in.sin_addr.s_addr != 0 {
                 let addr = Ipv4Addr::from(sa_in.sin_addr.s_addr.swap_bytes());
@@ -87,21 +108,7 @@ where
                 }
               }
             }
-            (AF_INET6, AF_INET6, RTA_GATEWAY) | (AF_UNSPEC, AF_INET6, RTA_GATEWAY) => {
-              let sa_in6 = &*(addr_ptr as *const libc::sockaddr_in6);
-              if !sa_in6.sin6_addr.s6_addr.iter().all(|&x| x == 0) {
-                let addr = Ipv6Addr::from(sa_in6.sin6_addr.s6_addr);
-                if let Some(addr) =
-                  A::try_from_with_filter(rtm.rtm_index as u32, addr.into(), |addr| f(addr))
-                {
-                  if !results.contains(&addr) {
-                    results.push(addr);
-                  }
-                }
-              }
-            }
-            (AF_INET6, AF_UNSPEC, RTA_GATEWAY) | (AF_UNSPEC, AF_UNSPEC, RTA_GATEWAY) => {
-              println!("{data:?} {data_len}");
+            (AF_INET6, AF_INET6, RTA_DST) | (AF_UNSPEC, AF_INET6, RTA_DST) => {
               let sa_in6 = &*(addr_ptr as *const libc::sockaddr_in6);
               if !sa_in6.sin6_addr.s6_addr.iter().all(|&x| x == 0) {
                 let addr = Ipv6Addr::from(sa_in6.sin6_addr.s6_addr);
@@ -134,12 +141,4 @@ where
   }
 
   Ok(results)
-}
-
-#[test]
-fn test_rt_broadcast_ip_addrs() {
-  let addrs = gateway_ip_addrs().unwrap();
-  for addr in addrs {
-    println!("{addr}");
-  }
 }

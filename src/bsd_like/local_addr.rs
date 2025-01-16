@@ -6,69 +6,21 @@ use std::{
 use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_DUMP, RTA_DST, RTF_UP};
 use smallvec_wrapper::SmallVec;
 
-use crate::Ipv6AddrExt;
-
 use super::{
-  super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter},
-  fetch, invalid_message, message_too_short, IfNet, Ifv4Net, Ifv6Net, Net,
+  super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
+  fetch, interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, invalid_message,
+  message_too_short, IfNet, Ifv4Net, Ifv6Net, Net,
 };
 
-/// Returns the IPv4 addresses from the interface with the best default route.
-/// The "best" interface is determined by the routing metrics of default routes (`0.0.0.0`).
-///
-/// See also [`local_ipv4_addrs`].
-///
-/// ## Example
-///
-/// ```rust
-/// use getifs::best_local_ipv4_addrs;
-///
-/// let ipv4_addrs = best_local_ipv4_addrs()?;
-/// for addr in ipv4_addrs {
-///   println!("IPv4: {} on interface {}", addr.addr, addr.ifindex);
-/// }
-/// ```
-pub fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
+pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
   bast_local_ip_addrs_in(AF_INET)
 }
 
-/// Returns the IPv6 addresses from the interface with the best default route.
-/// The "best" interface is determined by the routing metrics of default routes (`::`).
-///
-/// See also [`local_ipv6_addrs`].
-///
-/// ## Example
-///
-/// ```rust
-/// use getifs::best_local_ipv6_addrs;
-///
-/// let ipv6_addrs = best_local_ipv6_addrs()?;
-/// // Will only contain addresses from the interface with best default route
-/// for addr in ipv6_addrs {
-///   println!("IPv6: {} on interface {}", addr.addr, addr.ifindex);
-/// }
-/// ```
-pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
+pub(crate) fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
   bast_local_ip_addrs_in(AF_INET6)
 }
 
-/// Returns both IPv4 and IPv6 addresses from the interfaces with the best default routes.
-/// The "best" interfaces are determined by the routing metrics of default routes.
-///
-/// See also [`local_ip_addrs`].
-///
-/// ## Example
-///
-/// ```rust
-/// use getifs::best_local_ip_addrs;
-///
-/// let all_addrs = best_local_ip_addrs()?;
-/// // Will only contain addresses from interfaces with best default routes
-/// for addr in all_addrs {
-///   println!("IP: {} on interface {}", addr.addr, addr.ifindex);
-/// }
-/// ```
-pub fn best_local_ip_addrs() -> io::Result<SmallVec<IfNet>> {
+pub(crate) fn best_local_ip_addrs() -> io::Result<SmallVec<IfNet>> {
   bast_local_ip_addrs_in(AF_UNSPEC)
 }
 
@@ -153,191 +105,37 @@ fn bast_local_ip_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
   }
 }
 
-/// Returns all IPv4 addresses from interfaces that have valid routes (excluding loopback).
-/// This ensures we only return addresses that can be used for communication.
-///
-/// See also [`best_local_ipv4_addrs`] and [`local_ipv4_addrs_by_filter`].
-///
-/// ## Example
-///
-/// ```rust
-/// use getifs::local_ipv4_addrs;
-///
-/// let ipv4_addrs = local_ipv4_addrs()?;
-/// for addr in ipv4_addrs {
-///   println!("IPv4: {}", addr);
-/// }
-/// ```
-pub fn local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
-  all_local_ip_addrs_in(AF_INET, local_ip_filter)
+pub(crate) fn local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
+  interface_ipv4_addresses(0, local_ip_filter)
 }
 
-/// Returns all IPv6 addresses from interfaces that have valid routes (excluding loopback).
-/// This ensures we only return addresses that can be used for communication.
-///
-/// See also [`best_local_ipv6_addrs`] and [`local_ipv6_addrs_by_filter`].
-///
-/// ## Example
-///
-/// ```rust
-/// use getifs::local_ipv6_addrs;
-///
-/// let ipv6_addrs = local_ipv6_addrs()?;
-/// for addr in ipv6_addrs {
-///   println!("IPv6: {}", addr);
-/// }
-/// ```
-pub fn local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
-  all_local_ip_addrs_in(AF_INET6, local_ip_filter)
+pub(crate) fn local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
+  interface_ipv6_addresses(0, local_ip_filter)
 }
 
-/// Returns all IP addresses (both IPv4 and IPv6) from interfaces that have valid routes (excluding loopback).
-/// This ensures we only return addresses that can be used for communication.
-///
-/// See also [`best_local_ip_addrs`] and [`local_ip_addrs_by_filter`].
-///
-/// ## Example
-///
-/// ```rust
-/// use getifs::local_ip_addrs;
-///
-/// let all_addrs = local_ip_addrs()?;
-/// for addr in all_addrs {
-///     println!("IP: {}", addr);
-/// }
-/// ```
-pub fn local_ip_addrs() -> io::Result<SmallVec<IfNet>> {
-  all_local_ip_addrs_in(AF_UNSPEC, local_ip_filter)
+pub(crate) fn local_ip_addrs() -> io::Result<SmallVec<IfNet>> {
+  interface_addresses(0, local_ip_filter)
 }
 
-/// Returns all local IP addresses from interfaces that have valid routes (excluding loopback).
-/// This ensures we only get addresses that can be used for communication.
-fn all_local_ip_addrs_in<T, F>(family: i32, f: F) -> io::Result<SmallVec<T>>
-where
-  T: Net,
-  F: FnMut(&IpAddr) -> bool,
-{
-  // First get all routes to find valid interface indices
-  let routes = fetch(family, NET_RT_DUMP, 0)?;
-  let mut valid_ifindices = SmallVec::new();
-
-  unsafe {
-    let mut src = routes.as_slice();
-    while src.len() > 4 {
-      let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
-      if l == 0 {
-        return Err(invalid_message());
-      }
-      if src.len() < l {
-        return Err(message_too_short());
-      }
-      if src[2] as i32 != libc::RTM_VERSION {
-        src = &src[l..];
-        continue;
-      }
-
-      let rtm = &*(src.as_ptr() as *const libc::rt_msghdr);
-      // Only consider UP routes
-      if (rtm.rtm_flags & RTF_UP) == 0 {
-        src = &src[l..];
-        continue;
-      }
-
-      // Add interface index to valid set
-      valid_ifindices.push(rtm.rtm_index as u32);
-      src = &src[l..];
-    }
-  }
-
-  valid_ifindices.dedup();
-
-  match valid_ifindices.len() {
-    0 => Ok(SmallVec::new()),
-    1 if valid_ifindices[0] != 0 => {
-      // If only one valid interface, return its addresses
-      super::interface_addr_table(family, valid_ifindices[0], f)
-    }
-    _ => {
-      // Get addresses only from interfaces that have valid routes
-      let all_addrs = super::interface_addr_table(family, 0, f)?;
-      Ok(
-        all_addrs
-          .into_iter()
-          .filter(|i: &T| !i.addr().is_loopback() && valid_ifindices.contains(&i.index()))
-          .collect(),
-      )
-    }
-  }
-}
-
-/// Returns all IPv4 addresses from interfaces that have valid routes.
-///
-/// Use the provided filter to further refine the results.
-///
-/// ## Example
-///
-/// ```rust
-/// use getifs::local_ipv4_addrs_by_filter;
-///
-/// let addrs = local_ipv4_addrs_by_filter(|addr| !addr.is_loopback())?;
-/// for addr in addrs {
-///   println!("IPv4: {}", addr);
-/// }
-/// ```
-pub fn local_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Net>>
+pub(crate) fn local_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Net>>
 where
   F: FnMut(&Ipv4Addr) -> bool,
 {
-  all_local_ip_addrs_in(AF_INET, ipv4_filter_to_ip_filter(f))
+  let mut f = ipv4_filter_to_ip_filter(f);
+  interface_ipv4_addresses(0, move |addr| f(addr) && local_ip_filter(addr))
 }
 
-/// Returns all IPv6 addresses from interfaces that have valid routes.
-///
-/// Use the provided filter to further refine the results.
-///
-/// ## Example
-///
-/// ```rust
-/// use getifs::local_ipv6_addrs_by_filter;
-///
-/// let addrs = local_ipv6_addrs_by_filter(|addr| !addr.is_loopback())?;
-/// for addr in addrs {
-///   println!("IPv6: {}", addr);
-/// }
-/// ```
-pub fn local_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Net>>
+pub(crate) fn local_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Net>>
 where
   F: FnMut(&Ipv6Addr) -> bool,
 {
-  all_local_ip_addrs_in(AF_INET6, ipv6_filter_to_ip_filter(f))
+  let mut f = ipv6_filter_to_ip_filter(f);
+  interface_ipv6_addresses(0, move |addr| f(addr) && local_ip_filter(addr))
 }
 
-/// Returns all IP addresses (both IPv4 and IPv6) from interfaces that have valid routes.
-///
-/// Use the provided filter to further refine the results.
-///
-/// ## Example
-///
-/// ```rust
-/// use getifs::local_ip_addrs_by_filter;
-///
-///
-/// let addrs = local_ip_addrs_by_filter(|addr| !addr.is_loopback())?;
-/// for addr in addrs {
-///   println!("IP: {}", addr);
-/// }
-/// ```
-pub fn local_ip_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfNet>>
+pub(crate) fn local_ip_addrs_by_filter<F>(mut f: F) -> io::Result<SmallVec<IfNet>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  all_local_ip_addrs_in(AF_UNSPEC, f)
-}
-
-#[inline]
-fn local_ip_filter(addr: &IpAddr) -> bool {
-  match addr {
-    IpAddr::V4(addr) => !(addr.is_loopback() || addr.is_link_local()),
-    IpAddr::V6(addr) => !(addr.is_loopback() || Ipv6AddrExt::is_unicast_link_local(addr)),
-  }
+  interface_addresses(0, |addr| f(addr) && local_ip_filter(addr))
 }

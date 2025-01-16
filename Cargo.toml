@@ -12,8 +12,18 @@ keywords = ["ifaddrs", "interface", "network-interface", "mtu", "getifaddrs"]
 categories = ["network-programming"]
 
 [[bench]]
-path = "benches/bench.rs"
-name = "bench"
+path = "benches/interfaces.rs"
+name = "interfaces"
+harness = false
+
+[[bench]]
+path = "benches/local_ip_address.rs"
+name = "local_ip_address"
+harness = false
+
+[[bench]]
+path = "benches/gateway.rs"
+name = "gateway"
 harness = false
 
 [features]

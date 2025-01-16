@@ -1,23 +1,20 @@
-use core::{
-  slice,
-  sync::atomic::{AtomicU32, Ordering},
-};
+use core::slice;
 
 use libc::{
   bind, close, getsockname, nlmsghdr, recvfrom, sendto, sockaddr_nl, socket, socklen_t, AF_INET,
-  AF_INET6, AF_NETLINK, ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6, EINVAL, IFA_ADDRESS,
-  IFA_LOCAL, IFA_MULTICAST, IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU, NETLINK_ROUTE, NLMSG_DONE,
-  NLMSG_ERROR, RTM_NEWLINK, SOCK_CLOEXEC, SOCK_RAW,
+  AF_INET6, AF_NETLINK, AF_UNSPEC, ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6, EINVAL,
+  IFA_ADDRESS, IFA_LOCAL, IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU, NETLINK_ROUTE, NLMSG_DONE,
+  NLMSG_ERROR, RTA_GATEWAY, RTA_OIF, RTA_PRIORITY, RTF_GATEWAY, RTF_UP, RTM_GETADDR, RTM_GETLINK,
+  RTM_GETROUTE, RTM_NEWADDR, RTM_NEWLINK, RTM_NEWROUTE, RTN_UNICAST, RT_TABLE_MAIN, SOCK_CLOEXEC,
+  SOCK_RAW,
 };
-use libc::{RTM_GETADDR, RTM_GETLINK, RTM_NEWADDR};
+
 use smallvec_wrapper::{OneOrMore, SmallVec};
-use std::io;
-use std::mem;
-use std::{ffi::CStr, net::IpAddr};
+use std::{ffi::CStr, io, mem, net::IpAddr};
 
-use super::{Flags, IfNet, Ifv4Net, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
+use crate::local_ip_filter;
 
-static SEQ_ID: AtomicU32 = AtomicU32::new(1);
+use super::{super::Address, Flags, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
 
 const NLMSG_HDRLEN: usize = mem::size_of::<nlmsghdr>();
 const NLMSG_ALIGNTO: usize = 4;
@@ -55,11 +52,7 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
     }
 
     // Create and send netlink request
-    let req = NetlinkRouteRequest::new(
-      RTM_GETLINK,
-      SEQ_ID.fetch_add(1, Ordering::AcqRel),
-      family as u8,
-    );
+    let req = NetlinkRouteRequest::new(RTM_GETLINK, 1, family as u8, ifi);
     if sendto(
       sock,
       req.as_bytes().as_ptr() as _,
@@ -229,7 +222,7 @@ where
     }
 
     // Create and send netlink request
-    let req = NetlinkRouteRequest::new(RTM_GETADDR, 1, family as u8);
+    let req = NetlinkRouteRequest::new(RTM_GETADDR, 1, family as u8, ifi);
     if sendto(
       sock,
       req.as_bytes().as_ptr() as _,
@@ -378,6 +371,380 @@ where
   }
 }
 
+pub(super) fn netlink_gateway<A, F>(family: i32, mut f: F) -> io::Result<SmallVec<A>>
+where
+  A: Address,
+  F: FnMut(&IpAddr) -> bool,
+{
+  unsafe {
+    // Create socket
+    let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if sock < 0 {
+      return Err(io::Error::last_os_error());
+    }
+
+    let _guard = SocketGuard(sock);
+
+    // Prepare and bind socket address
+    let mut sa: sockaddr_nl = std::mem::zeroed();
+    sa.nl_family = AF_NETLINK as u16;
+
+    if bind(
+      sock,
+      &sa as *const sockaddr_nl as *const _,
+      std::mem::size_of::<sockaddr_nl>() as socklen_t,
+    ) < 0
+    {
+      return Err(io::Error::last_os_error());
+    }
+
+    // Create and send netlink request for routes
+    let req = NetlinkRouteRequest::new(RTM_GETROUTE, 1, family as u8, 0); // family 0 to get both IPv4 and IPv6
+
+    if sendto(
+      sock,
+      req.as_bytes().as_ptr() as _,
+      NetlinkRouteRequest::SIZE,
+      0,
+      &sa as *const sockaddr_nl as *const _,
+      std::mem::size_of::<sockaddr_nl>() as socklen_t,
+    ) < 0
+    {
+      return Err(io::Error::last_os_error());
+    }
+
+    // Get socket name
+    let mut lsa: sockaddr_nl = std::mem::zeroed();
+    let mut lsa_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
+    if getsockname(sock, &mut lsa as *mut sockaddr_nl as *mut _, &mut lsa_len) < 0 {
+      return Err(io::Error::last_os_error());
+    }
+
+    // Receive and process messages
+    let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+    let mut rb = vec![0u8; page_size];
+    let mut gateways = SmallVec::new();
+
+    'outer: loop {
+      let mut addr: sockaddr_nl = std::mem::zeroed();
+      let mut addr_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
+
+      let nr = recvfrom(
+        sock,
+        rb.as_mut_ptr() as *mut _,
+        rb.len(),
+        0,
+        &mut addr as *mut sockaddr_nl as *mut _,
+        &mut addr_len,
+      );
+
+      if nr < 0 {
+        return Err(io::Error::last_os_error());
+      }
+
+      if nr < NLMSG_HDRLEN as isize {
+        return Err(io::Error::from_raw_os_error(EINVAL));
+      }
+
+      let mut received = &rb[..nr as usize];
+
+      while received.len() >= NLMSG_HDRLEN {
+        let h = decode_nlmsghdr(received);
+        let hlen = h.nlmsg_len as usize;
+        let l = nlm_align_of(hlen);
+
+        if hlen < NLMSG_HDRLEN || l > received.len() {
+          return Err(io::Error::from_raw_os_error(EINVAL));
+        }
+
+        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.nl_pid {
+          return Err(io::Error::from_raw_os_error(EINVAL));
+        }
+
+        match h.nlmsg_type as i32 {
+          NLMSG_DONE => break 'outer,
+          NLMSG_ERROR => return Err(io::Error::from_raw_os_error(EINVAL)),
+          val if val == RTM_NEWROUTE as i32 => {
+            let rtm = &received[NLMSG_HDRLEN..];
+            let rtm_header = RtmMessageHeader::parse(rtm)?;
+
+            let mut has_gateway = false;
+
+            // Check various conditions that could indicate a gateway
+            let old_kernel_gw = (rtm_header.rtm_flags & (RTF_UP as u32 | RTF_GATEWAY as u32))
+              == (RTF_UP as u32 | RTF_GATEWAY as u32);
+            let new_kernel_gw = rtm_header.rtm_dst_len == 0
+              && rtm_header.rtm_table == RT_TABLE_MAIN
+              && rtm_header.rtm_type == RTN_UNICAST;
+
+            if old_kernel_gw || new_kernel_gw {
+              has_gateway = true;
+            }
+
+            if !has_gateway {
+              received = &received[l..];
+              continue;
+            }
+
+            let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
+            let mut tmp_addrs = SmallVec::new();
+            let mut current_ifi = 0;
+            while rtattr_buf.len() >= RtAttr::SIZE {
+              let attr = RtAttr {
+                len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
+                ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
+              };
+
+              let attrlen = attr.len as usize;
+              if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
+                break;
+              }
+
+              let alen = rta_align_of(attrlen);
+              let data = &rtattr_buf[RtAttr::SIZE..attrlen];
+
+              match attr.ty {
+                RTA_GATEWAY => match (family, rtm_header.rtm_family as i32) {
+                  (AF_INET, AF_INET) | (AF_UNSPEC, AF_INET) if data.len() >= 4 => {
+                    let addr = IpAddr::V4(std::net::Ipv4Addr::from(
+                      u32::from_ne_bytes(data[..4].try_into().unwrap()).swap_bytes(),
+                    ));
+
+                    if f(&addr) {
+                      tmp_addrs.push(addr);
+                    }
+                  }
+                  (AF_INET6, AF_INET6) | (AF_UNSPEC, AF_INET6) if data.len() >= 16 => {
+                    let addr = IpAddr::V6(std::net::Ipv6Addr::from(u128::from_be_bytes(
+                      data[..16].try_into().unwrap(),
+                    )));
+
+                    if f(&addr) {
+                      tmp_addrs.push(addr);
+                    }
+                  }
+                  _ => {}
+                },
+                RTA_OIF => {
+                  if data.len() >= 4 {
+                    let idx = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                    current_ifi = idx;
+                  }
+                }
+                _ => {}
+              }
+
+              rtattr_buf = &rtattr_buf[alen..];
+            }
+
+            gateways.extend(
+              tmp_addrs
+                .into_iter()
+                .filter_map(|addr| A::try_from(current_ifi, addr)),
+            );
+          }
+          _ => {}
+        }
+
+        received = &received[l..];
+      }
+    }
+
+    Ok(gateways)
+  }
+}
+
+pub fn netlink_best_local_ip_addrs<N>(family: i32) -> io::Result<SmallVec<N>>
+where
+  N: Net,
+{
+  unsafe {
+    let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if sock < 0 {
+      return Err(io::Error::last_os_error());
+    }
+    let _guard = SocketGuard(sock);
+
+    // Bind socket
+    let mut sa: sockaddr_nl = std::mem::zeroed();
+    sa.nl_family = AF_NETLINK as u16;
+
+    if bind(
+      sock,
+      &sa as *const sockaddr_nl as *const _,
+      std::mem::size_of::<sockaddr_nl>() as socklen_t,
+    ) < 0
+    {
+      return Err(io::Error::last_os_error());
+    }
+
+    let req = NetlinkRouteRequest::new(RTM_GETROUTE, 1, family as u8, 0);
+
+    if sendto(
+      sock,
+      req.as_bytes().as_ptr() as _,
+      NetlinkRouteRequest::SIZE,
+      0,
+      &sa as *const sockaddr_nl as *const _,
+      std::mem::size_of::<sockaddr_nl>() as socklen_t,
+    ) < 0
+    {
+      return Err(io::Error::last_os_error());
+    }
+
+    let mut lsa: sockaddr_nl = std::mem::zeroed();
+    let mut lsa_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
+    if getsockname(sock, &mut lsa as *mut sockaddr_nl as *mut _, &mut lsa_len) < 0 {
+      return Err(io::Error::last_os_error());
+    }
+
+    let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
+    let mut rb = vec![0u8; page_size];
+    let mut best_ifindex = None;
+    let mut best_metric = u32::MAX;
+
+    'outer: loop {
+      let mut addr: sockaddr_nl = std::mem::zeroed();
+      let mut addr_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
+
+      let nr = recvfrom(
+        sock,
+        rb.as_mut_ptr() as *mut _,
+        rb.len(),
+        0,
+        &mut addr as *mut sockaddr_nl as *mut _,
+        &mut addr_len,
+      );
+
+      if nr < 0 {
+        return Err(io::Error::last_os_error());
+      }
+
+      let mut received = &rb[..nr as usize];
+
+      while received.len() >= NLMSG_HDRLEN {
+        let h = decode_nlmsghdr(received);
+        let hlen = h.nlmsg_len as usize;
+        let l = nlm_align_of(hlen);
+
+        match h.nlmsg_type as i32 {
+          NLMSG_DONE => break 'outer,
+          NLMSG_ERROR => return Err(io::Error::from_raw_os_error(EINVAL)),
+          val if val == RTM_NEWROUTE as i32 => {
+            let rtm = &received[NLMSG_HDRLEN..];
+            let rtm_header = RtmMessageHeader::parse(rtm)?;
+
+            // Use the same gateway detection logic as netlink_gateway
+            let mut has_gateway = false;
+            let old_kernel_gw = (rtm_header.rtm_flags & (RTF_UP as u32 | RTF_GATEWAY as u32))
+              == (RTF_UP as u32 | RTF_GATEWAY as u32);
+            let new_kernel_gw =
+              rtm_header.rtm_dst_len == 0 && rtm_header.rtm_table == RT_TABLE_MAIN;
+
+            if old_kernel_gw || new_kernel_gw {
+              has_gateway = true;
+            }
+
+            if !has_gateway {
+              received = &received[l..];
+              continue;
+            }
+
+            let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
+            let mut current_metric = None;
+            let mut current_oif = None;
+
+            while rtattr_buf.len() >= RtAttr::SIZE {
+              let attr = RtAttr {
+                len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
+                ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
+              };
+
+              let attrlen = attr.len as usize;
+              let alen = rta_align_of(attrlen);
+              let data = &rtattr_buf[RtAttr::SIZE..attrlen];
+
+              match attr.ty {
+                RTA_PRIORITY if data.len() >= 4 => {
+                  current_metric = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+                }
+                RTA_OIF if data.len() >= 4 => {
+                  current_oif = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+                }
+                _ => {
+                  println!("ty {}", attr.ty);
+                }
+              }
+
+              rtattr_buf = &rtattr_buf[alen..];
+            }
+
+            // Update best interface if this route has better metric
+            if let (Some(metric), Some(oif)) = (current_metric, current_oif) {
+              if metric < best_metric {
+                best_metric = metric;
+                best_ifindex = Some(oif);
+              }
+            } else if let Some(oif) = current_oif {
+              // If no metric is provided, treat it as best metric
+              if best_metric == u32::MAX {
+                best_metric = 0;
+                best_ifindex = Some(oif);
+              }
+            }
+          }
+          _ => {}
+        }
+
+        received = &received[l..];
+      }
+    }
+
+    // Get addresses only from the best interface
+    match best_ifindex {
+      Some(idx) => netlink_addr(family, idx, local_ip_filter),
+      None => Ok(SmallVec::new()),
+    }
+  }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct RtmMessageHeader {
+  rtm_family: u8,
+  rtm_dst_len: u8,
+  rtm_src_len: u8,
+  rtm_tos: u8,
+  rtm_table: u8,
+  rtm_protocol: u8,
+  rtm_scope: u8,
+  rtm_type: u8,
+  rtm_flags: u32,
+}
+
+impl RtmMessageHeader {
+  const SIZE: usize = std::mem::size_of::<Self>();
+
+  #[inline]
+  fn parse(src: &[u8]) -> io::Result<Self> {
+    if src.len() < Self::SIZE {
+      return Err(io::Error::from_raw_os_error(EINVAL));
+    }
+
+    Ok(Self {
+      rtm_family: src[0],
+      rtm_dst_len: src[1],
+      rtm_src_len: src[2],
+      rtm_tos: src[3],
+      rtm_table: src[4],
+      rtm_protocol: src[5],
+      rtm_scope: src[6],
+      rtm_type: src[7],
+      rtm_flags: u32::from_ne_bytes(src[8..12].try_into().unwrap()),
+    })
+  }
+}
+
 // Round the length of a netlink message up to align it properly.
 #[inline]
 const fn nlm_align_of(msg_len: usize) -> usize {
@@ -407,7 +774,13 @@ impl NetlinkRouteRequest {
   const SIZE: usize = mem::size_of::<Self>();
 
   #[inline]
-  fn new(proto: u16, seq: u32, family: u8) -> Self {
+  fn new(proto: u16, seq: u32, family: u8, _ifi: u32) -> Self {
+    // TODO: do not dump when ifi is not 0
+    // let flags = if ifi == 0 {
+    //   (libc::NLM_F_DUMP | libc::NLM_F_REQUEST) as u16
+    // } else {
+    //   libc::NLM_F_REQUEST as u16
+    // };
     Self {
       header: nlmsghdr {
         nlmsg_len: Self::SIZE as u32,

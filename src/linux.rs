@@ -12,8 +12,17 @@ use super::{
   IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE,
 };
 
+pub(super) use gateway::*;
+pub(super) use local_addr::*;
+
 #[path = "linux/netlink.rs"]
 mod netlink;
+
+#[path = "linux/gateway.rs"]
+mod gateway;
+
+#[path = "linux/local_addr.rs"]
+mod local_addr;
 
 use netlink::{netlink_addr, netlink_interface};
 

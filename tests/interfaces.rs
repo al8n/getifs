@@ -1,7 +1,8 @@
 use std::net::IpAddr;
 
 use getifs::{
-  interface_addrs, interface_by_index, interface_by_name, interfaces, Flags, IfNet, Interface,
+  interface_addrs, interface_by_index, interface_by_name, interfaces, Flags, IfAddr, IfNet,
+  Interface,
 };
 
 use iprobe::{ipv4, ipv6};
@@ -102,7 +103,7 @@ fn check_unicast_stats(ifstats: &IfStats, uni_stats: &RouteStats) -> std::io::Re
   if ipv4() && ifstats.loopback + ifstats.other > 0 && uni_stats.ipv4 == 0 {
     return Err(std::io::Error::new(
       std::io::ErrorKind::InvalidData,
-      "num Ipv4 unicast routes = 0; want>0; summary:{ifstats:?}, {uni_stats:?}",
+      format!("num Ipv4 unicast routes = 0; want>0; summary:{ifstats:?}, {uni_stats:?}"),
     ));
   }
 
@@ -119,9 +120,9 @@ fn check_unicast_stats(ifstats: &IfStats, uni_stats: &RouteStats) -> std::io::Re
   Ok(())
 }
 
-fn validate_interface_multicast_addrs(ifmat: &[IpAddr]) -> std::io::Result<RouteStats> {
+fn validate_interface_multicast_addrs(ifmat: &[IfAddr]) -> std::io::Result<RouteStats> {
   let mut stats = RouteStats::default();
-  for ifa in ifmat {
+  for ifa in ifmat.iter().map(|ifa| ifa.addr()) {
     if ifa.is_unspecified() || !ifa.is_multicast() {
       return Err(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
