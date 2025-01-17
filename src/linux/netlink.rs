@@ -376,179 +376,6 @@ where
   }
 }
 
-pub(super) fn netlink_gateway<A, F>(family: i32, mut f: F) -> io::Result<SmallVec<A>>
-where
-  A: Address,
-  F: FnMut(&IpAddr) -> bool,
-{
-  unsafe {
-    // Create socket
-    let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
-    if sock < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    let _guard = SocketGuard(sock);
-
-    // Prepare and bind socket address
-    let mut sa: sockaddr_nl = std::mem::zeroed();
-    sa.nl_family = AF_NETLINK as u16;
-
-    if bind(
-      sock,
-      &sa as *const sockaddr_nl as *const _,
-      std::mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Create and send netlink request for routes
-    let req = NetlinkRouteRequest::new(RTM_GETROUTE, 1, family as u8, 0); // family 0 to get both IPv4 and IPv6
-
-    if sendto(
-      sock,
-      req.as_bytes().as_ptr() as _,
-      NetlinkRouteRequest::SIZE,
-      0,
-      &sa as *const sockaddr_nl as *const _,
-      std::mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Get socket name
-    let mut lsa: sockaddr_nl = std::mem::zeroed();
-    let mut lsa_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
-    if getsockname(sock, &mut lsa as *mut sockaddr_nl as *mut _, &mut lsa_len) < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Receive and process messages
-    let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
-    let mut rb = vec![0u8; page_size];
-    let mut gateways = SmallVec::new();
-
-    'outer: loop {
-      let mut addr: sockaddr_nl = std::mem::zeroed();
-      let mut addr_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
-
-      let nr = recvfrom(
-        sock,
-        rb.as_mut_ptr() as *mut _,
-        rb.len(),
-        0,
-        &mut addr as *mut sockaddr_nl as *mut _,
-        &mut addr_len,
-      );
-
-      if nr < 0 {
-        return Err(io::Error::last_os_error());
-      }
-
-      if nr < NLMSG_HDRLEN as isize {
-        return Err(io::Error::from_raw_os_error(EINVAL));
-      }
-
-      let mut received = &rb[..nr as usize];
-
-      while received.len() >= NLMSG_HDRLEN {
-        let h = decode_nlmsghdr(received);
-        let hlen = h.nlmsg_len as usize;
-        let l = nlm_align_of(hlen);
-
-        if hlen < NLMSG_HDRLEN || l > received.len() {
-          return Err(io::Error::from_raw_os_error(EINVAL));
-        }
-
-        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.nl_pid {
-          return Err(io::Error::from_raw_os_error(EINVAL));
-        }
-
-        match h.nlmsg_type as i32 {
-          NLMSG_DONE => break 'outer,
-          NLMSG_ERROR => return Err(io::Error::from_raw_os_error(EINVAL)),
-          val if val == RTM_NEWROUTE as i32 => {
-            let rtm = &received[NLMSG_HDRLEN..];
-            let rtm_header = RtmMessageHeader::parse(rtm)?;
-
-            // let mut has_gateway = false;
-            let up = rtm_header.rtm_flags & RTF_UP as u32 != 0;
-
-            if up {
-              received = &received[l..];
-              continue;
-            }
-
-            let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
-            let mut tmp_addrs = SmallVec::new();
-            let mut current_ifi = 0;
-            while rtattr_buf.len() >= RtAttr::SIZE {
-              let attr = RtAttr {
-                len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
-              };
-
-              let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-                break;
-              }
-
-              let alen = rta_align_of(attrlen);
-              let data = &rtattr_buf[RtAttr::SIZE..attrlen];
-
-              match attr.ty {
-                RTA_GATEWAY => match (family, rtm_header.rtm_family as i32) {
-                  (AF_INET, AF_INET) | (AF_UNSPEC, AF_INET) if data.len() >= 4 => {
-                    let addr = IpAddr::V4(std::net::Ipv4Addr::from(
-                      u32::from_ne_bytes(data[..4].try_into().unwrap()).swap_bytes(),
-                    ));
-
-                    if f(&addr) {
-                      tmp_addrs.push(addr);
-                    }
-                  }
-                  (AF_INET6, AF_INET6) | (AF_UNSPEC, AF_INET6) if data.len() >= 16 => {
-                    let addr = IpAddr::V6(std::net::Ipv6Addr::from(u128::from_be_bytes(
-                      data[..16].try_into().unwrap(),
-                    )));
-
-                    if f(&addr) {
-                      tmp_addrs.push(addr);
-                    }
-                  }
-                  _ => {}
-                },
-                RTA_OIF => {
-                  if data.len() >= 4 {
-                    let idx = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                    current_ifi = idx;
-                  }
-                }
-                _ => {}
-              }
-
-              rtattr_buf = &rtattr_buf[alen..];
-            }
-
-            gateways.extend(
-              tmp_addrs
-                .into_iter()
-                .filter_map(|addr| A::try_from(current_ifi, addr)),
-            );
-          }
-          _ => {}
-        }
-
-        received = &received[l..];
-      }
-    }
-
-    Ok(gateways)
-  }
-}
-
 pub fn netlink_best_local_ip_addrs<N>(family: i32) -> io::Result<SmallVec<N>>
 where
   N: Net,
@@ -802,13 +629,6 @@ where
           val if val == RTM_NEWROUTE as i32 => {
             let rtm = &received[NLMSG_HDRLEN..];
             let rtm_header = RtmMessageHeader::parse(rtm)?;
-            let up = rtm_header.rtm_flags & RTF_UP as u32 != 0;
-
-            // if up && rtm_filter(rtm_header.rtm_type) {
-            //   received = &received[l..];
-            //   continue;
-            // }
-            println!("{}", rtm_header.rtm_flags);
 
             // Ensure it's a address we want
             if let Some(rtn) = rtn {
@@ -1030,7 +850,8 @@ where
 
                       let octets = addr.octets();
                       if (octets[3] == 255 || octets == [255, 255, 255, 255])
-                        && !addr.is_loopback() && f(&IpAddr::V4(addr))
+                        && !addr.is_loopback()
+                        && f(&IpAddr::V4(addr))
                       {
                         if let Some(addr) = A::try_from(current_ifi, addr.into()) {
                           if !results.contains(&addr) {
@@ -1062,14 +883,6 @@ where
     }
 
     Ok(results)
-  }
-}
-
-#[test]
-fn t() {
-  let addrs = rt_multicast_addrs::<crate::IfAddr, _>(AF_UNSPEC, |_| true).unwrap();
-  for addr in addrs {
-    println!("{addr}");
   }
 }
 

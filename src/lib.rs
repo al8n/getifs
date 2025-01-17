@@ -20,8 +20,8 @@ pub use os::Flags;
 // pub use rt_broadcast::*;
 pub use rt_gateway::*;
 // pub use rt_host::*;
-// pub use rt_local::*;
-// pub use rt_multicast::*;
+pub use rt_local::*;
+pub use rt_multicast::*;
 // pub use rt_net::*;
 pub use smol_str::SmolStr;
 
@@ -41,8 +41,8 @@ mod name_to_idx;
 // mod rt_broadcast;
 mod rt_gateway;
 // mod rt_host;
-// mod rt_local;
-// mod rt_multicast;
+mod rt_local;
+mod rt_multicast;
 // mod rt_net;
 mod utils;
 

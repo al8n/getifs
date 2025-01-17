@@ -12,19 +12,80 @@ use super::{
   IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE,
 };
 
-pub(super) use gateway::*;
 pub(super) use local_addr::*;
 
 #[path = "linux/netlink.rs"]
 mod netlink;
 
-#[path = "linux/gateway.rs"]
-mod gateway;
-
 #[path = "linux/local_addr.rs"]
 mod local_addr;
 
 use netlink::{netlink_addr, netlink_interface};
+
+macro_rules! rt_generic_mod {
+  ($($name:ident($rta:ident, $rtn:expr)), +$(,)?) => {
+    $(
+      paste::paste! {
+        pub(super) use [< rt_ $name >]::*;
+
+        mod [< rt_ $name >] {
+          use libc::{AF_INET, AF_INET6, AF_UNSPEC, $rta};
+          use smallvec_wrapper::SmallVec;
+          use std::{
+            io,
+            net::{IpAddr, Ipv4Addr, Ipv6Addr},
+          };
+
+          use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
+
+          use super::{
+            super::{IfAddr, Ifv4Addr, Ifv6Addr},
+            netlink::rt_generic_addrs,
+          };
+
+          pub(crate) fn [< rt_ $name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
+            rt_generic_addrs(AF_UNSPEC, $rta, $rtn, |_| true)
+          }
+
+          pub(crate) fn [< rt_ $name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
+            rt_generic_addrs(AF_INET, $rta, $rtn, |_| true)
+          }
+
+          pub(crate) fn [< rt_ $name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
+            rt_generic_addrs(AF_INET6, $rta, $rtn, |_| true)
+          }
+
+          pub(crate) fn [< rt_ $name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
+          where
+            F: FnMut(&IpAddr) -> bool,
+          {
+            rt_generic_addrs(AF_UNSPEC, $rta, $rtn, f)
+          }
+
+          pub(crate) fn [< rt_ $name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
+          where
+            F: FnMut(&Ipv4Addr) -> bool,
+          {
+            rt_generic_addrs(AF_INET, $rta, $rtn, ipv4_filter_to_ip_filter(f))
+          }
+
+          pub(crate) fn [< rt_ $name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
+          where
+            F: FnMut(&Ipv6Addr) -> bool,
+          {
+            rt_generic_addrs(AF_INET6, $rta, $rtn, ipv6_filter_to_ip_filter(f))
+          }
+        }
+      }
+    )*
+  };
+}
+
+rt_generic_mod!(
+  gateway(RTA_GATEWAY, None),
+  multicast(RTA_DST, Some(libc::RTN_MULTICAST)),
+  local(RTA_DST, Some(libc::RTN_LOCAL)),
+);
 
 impl Interface {
   #[inline]
