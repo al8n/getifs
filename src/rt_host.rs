@@ -7,86 +7,76 @@ use smallvec_wrapper::SmallVec;
 
 use super::{os, IfAddr, Ifv4Addr, Ifv6Addr};
 
-/// Returns all rt_host routes (both IPv4 and IPv6) configured on the system.
-/// Host routes are specific routes to individual IP addresses rather than networks.
-/// This includes:
-/// - Interface addresses
-/// - Temporary/privacy addresses
-/// - Multicast addresses
-/// - Link-local addresses
-/// - Cached remote addresses
+/// Returns all host routes (both IPv4 and IPv6) configured on the system.
 ///
 /// ## Example
 ///
 /// ```rust
-/// use getifs::rt_host_ip_addrs;
+/// use getifs::rt_host_addrs;
 ///
-/// let addrs = rt_host_ip_addrs()?;
+/// let addrs = rt_host_addrs().unwrap();
 /// for addr in addrs {
-///   println!("Host route: {} on interface {}", addr.addr, addr.ifindex);
+///   println!("{addr}");
 /// }
 /// ```
-pub fn rt_host_ip_addrs() -> io::Result<SmallVec<IfAddr>> {
-  os::rt_host_ip_addrs()
+pub fn rt_host_addrs() -> io::Result<SmallVec<IfAddr>> {
+  os::rt_host_addrs()
 }
 
-/// Returns all IPv4 rt_host routes configured on the system.
-/// This includes interface addresses, cached remote addresses, and special purpose addresses.
+/// Returns all IPv4 host routes configured on the system.
 ///
 /// ## Example
 ///
 /// ```rust
 /// use getifs::rt_host_ipv4_addrs;
 ///
-/// let addrs = rt_host_ipv4_addrs()?;
+/// let addrs = rt_host_ipv4_addrs().unwrap();
 /// for addr in addrs {
-///   println!("IPv4 rt_host route: {} on interface {}", addr.addr, addr.ifindex);
+///   println!("{addr}");
 /// }
 /// ```
 pub fn rt_host_ipv4_addrs() -> io::Result<SmallVec<Ifv4Addr>> {
   os::rt_host_ipv4_addrs()
 }
 
-/// Returns all IPv6 rt_host routes configured on the system.
-/// This includes interface addresses, temporary/privacy addresses, link-local addresses,
-/// and auto-configured addresses.
+/// Returns all IPv6 host routes configured on the system.
 ///
 /// ## Example
 ///
 /// ```rust
 /// use getifs::rt_host_ipv6_addrs;
 ///
-/// let addrs = rt_host_ipv6_addrs()?;
+/// let addrs = rt_host_ipv6_addrs().unwrap();
 /// for addr in addrs {
-///   println!("IPv6 rt_host route: {} on interface {}", addr.addr, addr.ifindex);
+///   println!("{addr}");
 /// }
 /// ```
 pub fn rt_host_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
   os::rt_host_ipv6_addrs()
 }
 
-/// Returns all rt_host routes (both IPv4 and IPv6) that match the provided filter.
+/// Returns all host routes (both IPv4 and IPv6) that match the provided filter.
 /// The filter function can be used to select specific types of addresses.
 ///
 /// ## Example
 ///
 /// ```rust
-/// use getifs::rt_host_ip_addrs_by_filter;
+/// use getifs::rt_host_addrs_by_filter;
 ///
 /// // Only get non-loopback addresses
-/// let addrs = rt_host_ip_addrs_by_filter(|addr| !addr.is_loopback())?;
+/// let addrs = rt_host_addrs_by_filter(|addr| !addr.is_loopback()).unwrap();
 /// for addr in addrs {
-///   println!("Filtered rt_host route: {}", addr);
+///   println!("{addr}");
 /// }
 /// ```
-pub fn rt_host_ip_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfAddr>>
+pub fn rt_host_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfAddr>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  os::rt_host_ip_addrs_by_filter(f)
+  os::rt_host_addrs_by_filter(f)
 }
 
-/// Returns IPv4 rt_host routes that match the provided filter.
+/// Returns IPv4 host routes that match the provided filter.
 /// The filter function can be used to select specific types of IPv4 addresses.
 ///
 /// ## Example
@@ -95,9 +85,9 @@ where
 /// use getifs::rt_host_ipv4_addrs_by_filter;
 ///
 /// // Only get private IPv4 addresses
-/// let addrs = rt_host_ipv4_addrs_by_filter(|addr| addr.is_private())?;
+/// let addrs = rt_host_ipv4_addrs_by_filter(|addr| addr.is_private()).unwrap();
 /// for addr in addrs {
-///   println!("Private IPv4 rt_host route: {}", addr);
+///   println!("{addr}");
 /// }
 /// ```
 pub fn rt_host_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
@@ -107,7 +97,7 @@ where
   os::rt_host_ipv4_addrs_by_filter(f)
 }
 
-/// Returns IPv6 rt_host routes that match the provided filter.
+/// Returns IPv6 host routes that match the provided filter.
 /// The filter function can be used to select specific types of IPv6 addresses.
 ///
 /// ## Example
@@ -116,9 +106,9 @@ where
 /// use getifs::rt_host_ipv6_addrs_by_filter;
 ///
 /// // Only get global unicast addresses
-/// let addrs = rt_host_ipv6_addrs_by_filter(|addr| !addr.is_unicast_link_local())?;
+/// let addrs = rt_host_ipv6_addrs_by_filter(|addr| !addr.is_unicast_link_local()).unwrap();
 /// for addr in addrs {
-///   println!("Global IPv6 rt_host route: {}", addr);
+///   println!("{addr}");
 /// }
 /// ```
 pub fn rt_host_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>

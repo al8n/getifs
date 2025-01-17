@@ -10,11 +10,11 @@ use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
 
 use super::{
   super::{Address, IfAddr, Ifv4Addr, Ifv6Addr},
-  fetch, invalid_message, message_too_short,
+  fetch, invalid_message, message_too_short, roundup,
 };
 
 /// Returns all broadcast addresses configured on the system.
-pub(crate) fn rt_broadcast_ip_addrs() -> io::Result<SmallVec<IfAddr>> {
+pub(crate) fn rt_broadcast_addrs() -> io::Result<SmallVec<IfAddr>> {
   rt_broadcast_addrs_in(AF_UNSPEC, |_| true)
 }
 
@@ -28,7 +28,7 @@ pub(crate) fn rt_broadcast_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
   rt_broadcast_addrs_in(AF_INET6, |_| true)
 }
 
-pub(crate) fn rt_broadcast_ip_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfAddr>>
+pub(crate) fn rt_broadcast_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfAddr>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
@@ -54,7 +54,7 @@ where
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
 {
-  let buf = fetch(family, NET_RT_FLAGS, RTF_BROADCAST | RTF_UP)?;
+  let buf = fetch(family, NET_RT_FLAGS, RTF_BROADCAST)?;
   let mut results = SmallVec::new();
   unsafe {
     let mut src = buf.as_slice();
@@ -79,6 +79,12 @@ where
       }
 
       let rtm = &*(src.as_ptr() as *const libc::rt_msghdr);
+
+      // Only consider UP routes
+      if (rtm.rtm_flags & (RTF_UP | RTF_BROADCAST)) == 0 {
+        src = &src[l..];
+        continue;
+      }
 
       let base_ptr = src.as_ptr().add(std::mem::size_of::<libc::rt_msghdr>());
       let mut addr_ptr = base_ptr;
@@ -113,7 +119,8 @@ where
           } else {
             sa.sa_len as usize
           };
-          addr_ptr = addr_ptr.add((sa_len + 7) & !7);
+
+          addr_ptr = addr_ptr.add(roundup(sa_len));
         }
         i += 1;
         addrs >>= 1;
@@ -126,10 +133,3 @@ where
   Ok(results)
 }
 
-#[test]
-fn test_rt_broadcast_ip_addrs() {
-  let addrs = rt_broadcast_ip_addrs().unwrap();
-  for addr in addrs {
-    println!("Broadcast: {addr}");
-  }
-}

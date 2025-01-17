@@ -5,7 +5,7 @@ use std::{
 
 use hardware_address::xtoi2;
 use libc::{AF_INET, AF_INET6, AF_UNSPEC};
-use smallvec_wrapper::{OneOrMore, SmallVec};
+use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 
 use super::{
@@ -78,7 +78,7 @@ bitflags::bitflags! {
   }
 }
 
-pub(super) fn interface_table(index: u32) -> io::Result<OneOrMore<Interface>> {
+pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   netlink_interface(AF_UNSPEC, index)
 }
 

@@ -6,10 +6,12 @@ use std::{
 use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_DUMP, RTA_DST, RTF_UP};
 use smallvec_wrapper::SmallVec;
 
+use crate::is_ipv6_unspecified;
+
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
   fetch, interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, invalid_message,
-  message_too_short, IfNet, Ifv4Net, Ifv6Net, Net,
+  message_too_short, roundup, IfNet, Ifv4Net, Ifv6Net, Net,
 };
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
@@ -70,7 +72,7 @@ fn bast_local_ip_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
             }
             (AF_INET6, AF_INET6, RTA_DST) | (AF_UNSPEC, AF_INET6, RTA_DST) => {
               let sa_in6 = &*(addr_ptr as *const libc::sockaddr_in6);
-              if sa_in6.sin6_addr.s6_addr.iter().all(|&x| x == 0) {
+              if is_ipv6_unspecified(sa_in6.sin6_addr.s6_addr) {
                 is_default = true;
               }
             }
@@ -82,7 +84,7 @@ fn bast_local_ip_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
           } else {
             sa.sa_len as usize
           };
-          addr_ptr = addr_ptr.add((sa_len + 7) & !7);
+          addr_ptr = addr_ptr.add(roundup(sa_len));
         }
         i += 1;
         addrs >>= 1;

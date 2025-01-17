@@ -26,9 +26,9 @@ use super::{os, IfAddr, Ifv4Addr, Ifv6Addr};
 /// ## Example
 ///
 /// ```rust
-/// use getifs::route_net_addrs;
+/// use getifs::rt_net_addrs;
 ///
-/// let routes = route_net_addrs().unwrap();
+/// let routes = rt_net_addrs().unwrap();
 /// for route in routes {
 ///   println!("{route}");
 /// }
@@ -77,10 +77,11 @@ pub fn rt_net_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
 /// ## Example
 ///
 /// ```rust
-/// use getifs::rt_net_ip_addrs_by_filter;
+/// use getifs::rt_net_addrs_by_filter;
+/// use std::net::IpAddr;
 ///
 /// // Only get private network routes
-/// let routes = rt_net_ip_addrs_by_filter(|addr| match addr {
+/// let routes = rt_net_addrs_by_filter(|addr| match addr {
 ///   IpAddr::V4(ip) => ip.is_private(),
 ///   IpAddr::V6(ip) => ip.to_string().starts_with("fd"),
 /// }).unwrap();
@@ -89,7 +90,7 @@ pub fn rt_net_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
 ///   println!("Private network route: {}", route);
 /// }
 /// ```
-pub fn rt_net_ip_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfAddr>>
+pub fn rt_net_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfAddr>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
@@ -103,6 +104,7 @@ where
 ///
 /// ```rust
 /// use getifs::rt_net_ipv4_addrs_by_filter;
+/// use std::net::Ipv4Addr;
 ///
 /// // Only get Class C private networks (192.168.0.0/16)
 /// let routes = rt_net_ipv4_addrs_by_filter(|addr| {
@@ -127,6 +129,7 @@ where
 ///
 /// ```rust
 /// use getifs::rt_net_ipv6_addrs_by_filter;
+/// use std::net::Ipv6Addr;
 ///
 /// // Only get Unique Local Address networks (fd00::/8)
 /// let routes = rt_net_ipv6_addrs_by_filter(|addr| {

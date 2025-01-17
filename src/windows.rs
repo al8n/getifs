@@ -3,7 +3,7 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use smallvec_wrapper::{OneOrMore, SmallVec};
+use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 use windows_sys::{
   core::*,
@@ -89,9 +89,9 @@ impl Information {
   }
 }
 
-pub(super) fn interface_table(idx: u32) -> io::Result<OneOrMore<Interface>> {
+pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
   let info = Information::fetch()?;
-  let mut interfaces = OneOrMore::new();
+  let mut interfaces = TinyVec::new();
 
   for adapter in info.adapters.iter() {
     let mut index = 0;

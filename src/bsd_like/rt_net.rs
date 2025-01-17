@@ -3,15 +3,19 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_DUMP, RTA_DST, RTF_HOST, RTF_IFSCOPE, RTF_UP};
+use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_DUMP, RTA_DST, RTF_BROADCAST, RTF_HOST, RTF_UP};
 use smallvec_wrapper::SmallVec;
 
-use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
+use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, is_ipv6_unspecified};
 
 use super::{
   super::{Address, IfAddr, Ifv4Addr, Ifv6Addr},
-  fetch, invalid_message, message_too_short,
+  fetch, invalid_message, message_too_short, roundup,
 };
+
+only_cfg_apple!(
+  use libc::RTF_IFSCOPE;
+);
 
 pub(crate) fn rt_net_addrs() -> io::Result<SmallVec<IfAddr>> {
   rt_net_addrs_in(AF_UNSPEC, |_| true)
@@ -74,11 +78,7 @@ where
 
       let rtm = &*(src.as_ptr() as *const libc::rt_msghdr);
 
-      // Only consider UP routes but not host routes and not interface routes
-      if (rtm.rtm_flags & RTF_UP) == 0
-        || (rtm.rtm_flags & RTF_HOST) != 0
-        || (rtm.rtm_flags & RTF_IFSCOPE) != 0
-      {
+      if is_valid_flag(rtm.rtm_flags) {
         src = &src[l..];
         continue;
       }
@@ -108,7 +108,7 @@ where
             }
             (AF_INET6, AF_INET6, RTA_DST) | (AF_UNSPEC, AF_INET6, RTA_DST) => {
               let sa_in6 = &*(addr_ptr as *const libc::sockaddr_in6);
-              if !sa_in6.sin6_addr.s6_addr.iter().all(|&x| x == 0) {
+              if !is_ipv6_unspecified(sa_in6.sin6_addr.s6_addr) {
                 let addr = Ipv6Addr::from(sa_in6.sin6_addr.s6_addr).into();
                 if is_network_route(&addr, rtm) {
                   if let Some(addr) =
@@ -129,7 +129,7 @@ where
           } else {
             sa.sa_len as usize
           };
-          addr_ptr = addr_ptr.add((sa_len + 7) & !7);
+          addr_ptr = addr_ptr.add(roundup(sa_len));
         }
         i += 1;
         addrs >>= 1;
@@ -167,3 +167,20 @@ fn is_network_route(addr: &IpAddr, rtm: &libc::rt_msghdr) -> bool {
     }
   }
 }
+
+only_cfg_apple!(
+  fn is_valid_flag(f: i32) -> bool {
+    (f & RTF_UP) == 0
+      || (f & RTF_HOST) != 0
+      || (f & RTF_IFSCOPE) != 0
+      || (f & RTF_BROADCAST) != 0
+  }
+);
+
+only_cfg_not_apple!(
+  fn is_valid_flag(f: i32) -> bool {
+    (f & RTF_UP) == 0
+      || (f & RTF_HOST) != 0
+      || (f & RTF_BROADCAST) != 0
+  }
+);

@@ -9,7 +9,7 @@ use libc::{
   SOCK_RAW,
 };
 
-use smallvec_wrapper::{OneOrMore, SmallVec};
+use smallvec_wrapper::{SmallVec, TinyVec};
 use std::{ffi::CStr, io, mem, net::IpAddr};
 
 use crate::local_ip_filter;
@@ -28,7 +28,7 @@ impl Drop for SocketGuard {
   }
 }
 
-pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<Interface>> {
+pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<TinyVec<Interface>> {
   unsafe {
     // Create socket
     let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
@@ -76,7 +76,7 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<OneOrMore<I
     let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
     let mut rb = vec![0u8; page_size];
 
-    let mut interfaces = OneOrMore::new();
+    let mut interfaces = TinyVec::new();
 
     'outer: loop {
       let mut addr: sockaddr_nl = mem::zeroed();
@@ -671,9 +671,7 @@ where
                 RTA_OIF if data.len() >= 4 => {
                   current_oif = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
                 }
-                _ => {
-                  println!("ty {}", attr.ty);
-                }
+                _ => {}
               }
 
               rtattr_buf = &rtattr_buf[alen..];
