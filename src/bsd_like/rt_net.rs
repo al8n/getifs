@@ -170,17 +170,12 @@ fn is_network_route(addr: &IpAddr, rtm: &libc::rt_msghdr) -> bool {
 
 only_cfg_apple!(
   fn is_valid_flag(f: i32) -> bool {
-    (f & RTF_UP) == 0
-      || (f & RTF_HOST) != 0
-      || (f & RTF_IFSCOPE) != 0
-      || (f & RTF_BROADCAST) != 0
+    (f & RTF_UP) == 0 || (f & RTF_HOST) != 0 || (f & RTF_IFSCOPE) != 0 || (f & RTF_BROADCAST) != 0
   }
 );
 
 only_cfg_not_apple!(
   fn is_valid_flag(f: i32) -> bool {
-    (f & RTF_UP) == 0
-      || (f & RTF_HOST) != 0
-      || (f & RTF_BROADCAST) != 0
+    (f & RTF_UP) == 0 || (f & RTF_HOST) != 0 || (f & RTF_BROADCAST) != 0
   }
 );

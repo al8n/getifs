@@ -53,7 +53,6 @@ macro_rules! only_cfg_not_apple {
   }
 }
 
-
 #[allow(unused_macros)]
 macro_rules! cfg_bsd_multicast {
   ($($item:item)*) => {

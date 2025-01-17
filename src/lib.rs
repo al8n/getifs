@@ -17,12 +17,12 @@ pub use ipnet;
 pub use local_ip_addrs::*;
 pub use name_to_idx::ifname_to_index;
 pub use os::Flags;
-pub use rt_broadcast::*;
+// pub use rt_broadcast::*;
 pub use rt_gateway::*;
-pub use rt_host::*;
-pub use rt_local::*;
-pub use rt_multicast::*;
-pub use rt_net::*;
+// pub use rt_host::*;
+// pub use rt_local::*;
+// pub use rt_multicast::*;
+// pub use rt_net::*;
 pub use smol_str::SmolStr;
 
 cfg_apple!(
@@ -38,12 +38,12 @@ mod ifnet;
 mod interfaces;
 mod local_ip_addrs;
 mod name_to_idx;
-mod rt_broadcast;
+// mod rt_broadcast;
 mod rt_gateway;
-mod rt_host;
-mod rt_local;
-mod rt_multicast;
-mod rt_net;
+// mod rt_host;
+// mod rt_local;
+// mod rt_multicast;
+// mod rt_net;
 mod utils;
 
 #[cfg(target_os = "linux")]
@@ -279,4 +279,12 @@ fn local_ip_filter(addr: &IpAddr) -> bool {
 #[inline]
 fn is_ipv6_unspecified(addr: [u8; 16]) -> bool {
   u128::from_be_bytes(addr) == u128::from_be_bytes(Ipv6Addr::UNSPECIFIED.octets())
+}
+
+#[test]
+fn t() {
+  let gws = rt_gateway_addrs().unwrap();
+  for addr in gws {
+    println!("{addr}");
+  }
 }

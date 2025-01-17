@@ -22,53 +22,53 @@ macro_rules! rt_generic_mod {
     $(
       paste::paste! {
         pub(super) use [< rt_ $name >]::*;
-  
+
         mod [<rt_ $name>] {
           use std::{
             io,
             net::{IpAddr, Ipv4Addr, Ipv6Addr},
           };
-          
+
           use libc::{AF_INET, AF_INET6, AF_UNSPEC, $rta, $rtf};
           use smallvec_wrapper::SmallVec;
-          
+
           use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
-          
+
           use super::super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
-          
+
           pub(crate) fn [< rt_ $name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
             [< rt_ $name _addrs_in >](AF_UNSPEC, |_| true)
           }
-          
+
           pub(crate) fn [< rt_ $name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
             [< rt_ $name _addrs_in >](AF_INET, |_| true)
           }
-          
+
           pub(crate) fn [< rt_ $name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
             [< rt_ $name _addrs_in >](AF_INET6, |_| true)
           }
-          
+
           pub(crate) fn [< rt_ $name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
           where
             F: FnMut(&IpAddr) -> bool,
           {
             [< rt_ $name _addrs_in >](AF_UNSPEC, f)
           }
-          
+
           pub(crate) fn [< rt_ $name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
           where
             F: FnMut(&Ipv4Addr) -> bool,
           {
             [< rt_ $name _addrs_in >](AF_INET, ipv4_filter_to_ip_filter(f))
           }
-          
+
           pub(crate) fn [< rt_ $name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
           where
             F: FnMut(&Ipv6Addr) -> bool,
           {
             [< rt_ $name _addrs_in >](AF_INET6, ipv6_filter_to_ip_filter(f))
           }
-   
+
           fn [< rt_ $name _addrs_in >]<A, F>(family: i32, f: F) -> io::Result<SmallVec<A>>
           where
             A: Address + Eq,
@@ -101,12 +101,12 @@ pub(super) use rt_net::*;
 
 #[path = "bsd_like/local_addr.rs"]
 mod local_addr;
-#[path = "bsd_like/rt_net.rs"]
-mod rt_net;
 #[path = "bsd_like/rt_broadcast.rs"]
 mod rt_broadcast;
 #[path = "bsd_like/rt_generic.rs"]
 mod rt_generic;
+#[path = "bsd_like/rt_net.rs"]
+mod rt_net;
 
 #[cfg(any(
   target_os = "macos",
@@ -117,17 +117,11 @@ mod rt_generic;
 ))]
 const KERNAL_ALIGN: usize = 4;
 
-#[cfg(target_os = "dragonfly")]
-const KERNAL_ALIGN: usize = core::mem::size_of::<usize>();
-
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd",))]
 const KERNAL_ALIGN: usize = core::mem::size_of::<usize>();
 
 #[cfg(target_os = "netbsd")]
 const KERNAL_ALIGN: usize = 8;
-
-#[cfg(target_os = "openbsd")]
-const KERNAL_ALIGN: usize = core::mem::size_of::<usize>();
 
 fn invalid_address() -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, "invalid address")

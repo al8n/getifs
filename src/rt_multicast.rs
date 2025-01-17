@@ -8,7 +8,7 @@ use smallvec_wrapper::SmallVec;
 use super::{os, IfAddr, Ifv4Addr, Ifv6Addr};
 
 /// Returns all multicast routes (both IPv4 and IPv6) configured on the system.
-/// 
+///
 /// ## Example
 ///
 /// ```rust

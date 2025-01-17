@@ -8,12 +8,14 @@ use smallvec_wrapper::SmallVec;
 
 use crate::is_ipv6_unspecified;
 
-use super::{
-  super::Address,
-  fetch, invalid_message, message_too_short, roundup,
-};
+use super::{super::Address, fetch, invalid_message, message_too_short, roundup};
 
-pub(super) fn rt_generic_addrs_in<A, F>(family: i32, rtf: i32, rta: i32, mut f: F) -> io::Result<SmallVec<A>>
+pub(super) fn rt_generic_addrs_in<A, F>(
+  family: i32,
+  rtf: i32,
+  rta: i32,
+  mut f: F,
+) -> io::Result<SmallVec<A>>
 where
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
