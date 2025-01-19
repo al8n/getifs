@@ -44,17 +44,17 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
     Ndis::NET_LUID_LH,
   };
 
-  let mut luid = NET_LUID_LH::default();
+  let mut luid: *mut NET_LUID_LH = std::ptr::null_mut();
 
   // Convert index to LUID
-  let result = unsafe { ConvertInterfaceIndexToLuid(idx, &mut luid) };
+  let result = unsafe { ConvertInterfaceIndexToLuid(idx, luid) };
   if result != 0 {
     return Err(io::Error::last_os_error());
   }
 
   // Get alias (friendly name)
   let mut name_buf = [0u16; 256]; // IF_MAX_STRING_SIZE + 1
-  let result = unsafe { ConvertInterfaceLuidToAlias(&luid, name_buf.as_mut_ptr(), name_buf.len()) };
+  let result = unsafe { ConvertInterfaceLuidToAlias(luid, name_buf.as_mut_ptr(), name_buf.len()) };
   if result != 0 {
     return Err(io::Error::last_os_error());
   }

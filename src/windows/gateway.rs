@@ -93,7 +93,7 @@ where
 
         // Check if route is up and has a gateway
         if route.Route.State == IF_OPER_STATUS_OPERATIONAL as u32 {
-          if let Some(gateway) = sockaddr_to_ipaddr(&route.Route.NextHop) {
+          if let Some(gateway) = sockaddr_to_ipaddr(family, (&route.NextHop) as _) {
             // Skip default gateway (0.0.0.0)
             if let IpAddr::V4(addr) = gateway {
               if addr.octets() == [0, 0, 0, 0] {
@@ -103,7 +103,7 @@ where
 
             // Apply filter and add to results if it passes
             if let Some(addr) =
-              A::try_from_with_filter(route.Route.InterfaceIndex, gateway, |addr| f(addr))
+              A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
             {
               if !results.contains(&addr) {
                 results.push(addr);
@@ -122,7 +122,7 @@ where
 
         // Check if route is up and has a gateway
         if route.Route.State == IF_OPER_STATUS_OPERATIONAL as u32 {
-          if let Some(gateway) = sockaddr_to_ipaddr(&route.Route.NextHop) {
+          if let Some(gateway) = sockaddr_to_ipaddr(family, (&route.NextHop) as _) {
             // Skip default gateway (::)
             if let IpAddr::V6(addr) = gateway {
               if addr.octets() == [0; 16] {
@@ -132,7 +132,7 @@ where
 
             // Apply filter and add to results if it passes
             if let Some(addr) =
-              A::try_from_with_filter(route.Route.InterfaceIndex, gateway, |addr| f(addr))
+              A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
             {
               if !results.contains(&addr) {
                 results.push(addr);
