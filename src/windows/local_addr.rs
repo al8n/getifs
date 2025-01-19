@@ -7,8 +7,8 @@ use smallvec_wrapper::SmallVec;
 
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
-  interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, IfNet, Ifv4Net, Ifv6Net,
-  Information, Net, sockaddr_to_ipaddr,
+  interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, sockaddr_to_ipaddr,
+  IfNet, Ifv4Net, Ifv6Net, Information, Net,
 };
 
 use windows_sys::Win32::NetworkManagement::IpHelper::*;

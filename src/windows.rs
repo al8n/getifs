@@ -18,9 +18,13 @@ use super::{
 };
 
 pub(super) use local_addr::*;
+pub(super) use gateway::*;
 
 #[path = "windows/local_addr.rs"]
 mod local_addr;
+
+#[path = "windows/gateway.rs"]
+mod gateway;
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.

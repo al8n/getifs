@@ -53,8 +53,7 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
 
   // Get alias (friendly name)
   let mut name_buf = [0u16; 256]; // IF_MAX_STRING_SIZE + 1
-  let result =
-    unsafe { ConvertInterfaceLuidToAlias(&luid, name_buf.as_mut_ptr(), name_buf.len()) };
+  let result = unsafe { ConvertInterfaceLuidToAlias(&luid, name_buf.as_mut_ptr(), name_buf.len()) };
   if result != 0 {
     return Err(io::Error::last_os_error());
   }
