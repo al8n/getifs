@@ -42,17 +42,17 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
     let wide_name =
       U16CString::from_str(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let luid: *mut NET_LUID_LH = std::ptr::null_mut();
+    let mut luid = unsafe { NET_LUID_LH { Value: 0 } };
 
     // Convert friendly name to LUID
-    let result = unsafe { ConvertInterfaceAliasToLuid(wide_name.as_ptr(), luid) };
+    let result = unsafe { ConvertInterfaceAliasToLuid(wide_name.as_ptr(), &mut luid) };
     if result != 0 {
       return Err(io::Error::last_os_error());
     }
 
     // Convert LUID to index
     let mut idx = 0u32;
-    let result = unsafe { ConvertInterfaceLuidToIndex(luid, &mut idx) };
+    let result = unsafe { ConvertInterfaceLuidToIndex(&luid, &mut idx) };
     if result != 0 {
       return Err(io::Error::last_os_error());
     }

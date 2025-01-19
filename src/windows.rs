@@ -4,7 +4,6 @@ use std::{
 };
 
 use smallvec_wrapper::{SmallVec, TinyVec};
-use smol_str::SmolStr;
 use windows_sys::{
   core::*,
   Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
@@ -255,7 +254,7 @@ pub(super) fn interface_multicast_ipv4_addresses<F>(
   mut f: F,
 ) -> io::Result<SmallVec<Ifv4Addr>>
 where
-  F: FnMut(&std::net::Ipv4Addr) -> bool,
+  F: FnMut(&Ipv4Addr) -> bool,
 {
   interface_multiaddr_table(AF_INET, idx, |addr| match addr {
     IpAddr::V4(ip) => f(ip),
