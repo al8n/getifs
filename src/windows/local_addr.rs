@@ -8,7 +8,7 @@ use smallvec_wrapper::SmallVec;
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
   interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, IfNet, Ifv4Net, Ifv6Net,
-  Information, Net,
+  Information, Net, sockaddr_to_ipaddr,
 };
 
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
@@ -73,15 +73,15 @@ fn best_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
 }
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
-  bast_local_addrs_in(AF_INET)
+  best_local_addrs_in(AF_INET)
 }
 
 pub(crate) fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
-  bast_local_addrs_in(AF_INET6)
+  best_local_addrs_in(AF_INET6)
 }
 
 pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
-  bast_local_addrs_in(AF_UNSPEC)
+  best_local_addrs_in(AF_UNSPEC)
 }
 
 pub(crate) fn local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {

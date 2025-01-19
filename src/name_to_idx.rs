@@ -65,7 +65,7 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
     let name_cstr =
       CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-    let res = unsafe { if_nametoindex(name_cstr.as_ptr()) };
+    let res = unsafe { if_nametoindex(name_cstr.as_ptr() as _) };
     if res == 0 {
       Err(io::Error::last_os_error())
     } else {

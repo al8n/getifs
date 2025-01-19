@@ -203,7 +203,7 @@ where
   interface_addr_table(AF_UNSPEC, idx, f)
 }
 
-pub(super) fn interface_addr_table<T, F>(family: i32, ifi: u32, mut f: F) -> io::Result<SmallVec<T>>
+pub(super) fn interface_addr_table<T, F>(family: u16, ifi: u32, mut f: F) -> io::Result<SmallVec<T>>
 where
   T: Net,
   F: FnMut(&IpAddr) -> bool,
@@ -280,7 +280,7 @@ where
 }
 
 pub(super) fn interface_multiaddr_table<T, F>(
-  family: i32,
+  family: u16,
   ifi: u32,
   mut f: F,
 ) -> io::Result<SmallVec<T>>
@@ -316,7 +316,7 @@ where
   Ok(addresses)
 }
 
-fn sockaddr_to_ipaddr(family: i32, sockaddr: *const SOCKADDR) -> Option<IpAddr> {
+fn sockaddr_to_ipaddr(family: u16, sockaddr: *const SOCKADDR) -> Option<IpAddr> {
   if sockaddr.is_null() {
     return None;
   }

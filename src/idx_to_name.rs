@@ -54,20 +54,20 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
   // Get alias (friendly name)
   let mut name_buf = [0u16; 256]; // IF_MAX_STRING_SIZE + 1
   let result =
-    unsafe { ConvertInterfaceLuidToAlias(&luid, name_buf.as_mut_ptr(), name_buf.len() as u32) };
+    unsafe { ConvertInterfaceLuidToAlias(&luid, name_buf.as_mut_ptr(), name_buf.len()) };
   if result != 0 {
     return Err(io::Error::last_os_error());
   }
 
   // Convert to string
-  match crate::utils::friendly_name(name_buf.as_ptr()) {
+  match crate::utils::friendly_name(name_buf.as_mut_ptr()) {
     Some(name) => Ok(name),
     None => {
       let mut name_buf = [0u8; 256];
       let hname = unsafe {
         windows_sys::Win32::NetworkManagement::IpHelper::if_indextoname(idx, name_buf.as_mut_ptr())
       };
-      unsafe { CStr::from_ptr(hname as _).to_string_lossy().into() }
+      unsafe { Ok(CStr::from_ptr(hname as _).to_string_lossy().into()) }
     }
   }
 }
