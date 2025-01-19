@@ -204,7 +204,11 @@ pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
 /// println!("{:?}", interface);
 /// ```
 pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
+  #[cfg(not(windows))]
   let idx = ifname_to_index(name)?;
+
+  #[cfg(windows)]
+  let idx = 0;
   os::interface_table(idx).map(|v| v.into_iter().find(|ifi| ifi.name == name))
 }
 
