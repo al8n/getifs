@@ -1,8 +1,8 @@
 use std::net::IpAddr;
 
 use getifs::{
-  interface_addrs, interface_by_index, interface_by_name, interfaces, Flags, IfAddr, IfNet,
-  Interface,
+  gateway_addrs, interface_addrs, interface_by_index, interface_by_name, interfaces, local_addrs,
+  Flags, IfAddr, IfNet, Interface,
 };
 
 use iprobe::{ipv4, ipv6};
@@ -224,6 +224,22 @@ fn if_unicast_addrs() {
   }
 
   check_unicast_stats(&if_stats, &uni_stats).unwrap();
+}
+
+#[test]
+fn gw_addrs() {
+  let addrs = gateway_addrs().unwrap();
+  for addr in addrs {
+    println!("Gateway {}", addr);
+  }
+}
+
+#[test]
+fn lc_addrs() {
+  let addrs = local_addrs().unwrap();
+  for addr in addrs {
+    println!("Local {}", addr);
+  }
 }
 
 #[test]

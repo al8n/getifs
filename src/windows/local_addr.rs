@@ -41,10 +41,10 @@ fn best_local_addrs_in<T: Net>(family: u16) -> io::Result<SmallVec<T>> {
           if GetIpForwardTable(table, &mut num_entries, 0) == NO_ERROR {
             let table_ref = &*table;
             // Look for a default route (0.0.0.0) on this interface
-            (0..table_ref.dwNumEntries).any(|i| {
-              let route = &table_ref.table[i as usize];
-              route.dwForwardDest == 0 && route.dwForwardIfIndex == index
-            })
+            table_ref
+              .table
+              .iter()
+              .any(|route| route.dwForwardDest == 0 && route.dwForwardIfIndex == index)
           } else {
             false
           }
