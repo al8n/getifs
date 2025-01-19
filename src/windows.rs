@@ -17,8 +17,8 @@ use super::{
   MAC_ADDRESS_SIZE,
 };
 
-pub(super) use local_addr::*;
 pub(super) use gateway::*;
+pub(super) use local_addr::*;
 
 #[path = "windows/local_addr.rs"]
 mod local_addr;
