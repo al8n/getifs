@@ -40,9 +40,14 @@ fn best_local_addrs_in<T: Net>(family: u16) -> io::Result<SmallVec<T>> {
           table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
           if GetIpForwardTable(table, &mut num_entries, 0) == NO_ERROR {
             let table_ref = &*table;
+            let rows = unsafe {
+              std::ptr::slice_from_raw_parts(
+                &table_ref.Table as *const _ as *const MIB_IPFORWARDTABLE,
+                table_ref.NumEntries as usize,
+              )
+            };
             // Look for a default route (0.0.0.0) on this interface
-            table_ref
-              .table
+            rows
               .iter()
               .any(|route| route.dwForwardDest == 0 && route.dwForwardIfIndex == index)
           } else {

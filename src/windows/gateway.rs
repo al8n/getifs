@@ -88,7 +88,13 @@ where
     // Process IPv4 routes
     if !table_v4.is_null() {
       let table = &*table_v4;
-      for route in table.Table.iter() {
+      let rows = unsafe {
+        std::ptr::slice_from_raw_parts(
+          &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
+          table.NumEntries as usize,
+        )
+      };
+      for route in rows.iter() {
         // Check if route is up and has a gateway
         if route.ValidLifetime > 0 && route.Loopback == 0 {
           if let Some(gateway) =
@@ -117,7 +123,13 @@ where
     // Process IPv6 routes
     if !table_v6.is_null() {
       let table = &*table_v6;
-      for route in table.Table.iter() {
+      let rows = unsafe {
+        std::ptr::slice_from_raw_parts(
+          &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
+          table.NumEntries as usize,
+        )
+      };
+      for route in rows.iter() {
         // Check if route is up and has a gateway
         if route.ValidLifetime > 0 && route.Loopback == 0 {
           if let Some(gateway) =
