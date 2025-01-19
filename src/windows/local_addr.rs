@@ -8,9 +8,10 @@ use smallvec_wrapper::SmallVec;
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
   interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, sockaddr_to_ipaddr,
-  IfNet, IfOperStatusUp, Ifv4Net, Ifv6Net, Information, Net, ERROR_INSUFFICIENT_BUFFER, NO_ERROR,
+  IfNet, IfOperStatusUp, Ifv4Net, Ifv6Net, Information, Net, NO_ERROR,
 };
 
+use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
 use windows_sys::Win32::Networking::WinSock::*;
 
@@ -60,7 +61,7 @@ fn best_local_addrs_in<T: Net>(family: u16) -> io::Result<SmallVec<T>> {
           let addr = unsafe { &*unicast_address };
 
           if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
-            if let Some(ip) = T::try_from_with_filter(index, ip, addr.OnLinkPrefixLength, &mut f) {
+            if let Some(ip) = T::try_from(index, ip, addr.OnLinkPrefixLength) {
               addresses.push(ip);
             }
           }

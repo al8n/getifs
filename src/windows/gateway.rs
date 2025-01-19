@@ -41,7 +41,7 @@ where
   gateway_addrs_in(AF_INET6, ipv6_filter_to_ip_filter(f))
 }
 
-pub(crate) fn gateway_addrs_in<A, F>(family: i32, mut f: F) -> io::Result<SmallVec<A>>
+pub(crate) fn gateway_addrs_in<A, F>(family: u16, mut f: F) -> io::Result<SmallVec<A>>
 where
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
@@ -63,7 +63,7 @@ where
     if family == AF_INET6 || family == AF_UNSPEC {
       if GetIpForwardTable2(AF_INET6 as u16, &mut table_v6) != NO_ERROR {
         if !table_v4.is_null() {
-          FreeMibTable(table_v4);
+          FreeMibTable(table_v4 as _);
         }
         return Err(io::Error::last_os_error());
       }

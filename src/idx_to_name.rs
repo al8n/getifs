@@ -39,8 +39,9 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
 /// Returns the name of the interface by the given index.
 #[cfg(windows)]
 fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
-  use windows_sys::Win32::NetworkManagement::IpHelper::{
-    ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias, NET_LUID_LH,
+  use windows_sys::Win32::NetworkManagement::{
+    IpHelper::{ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias},
+    Ndis::NET_LUID_LH,
   };
 
   let mut luid = NET_LUID_LH::default();
