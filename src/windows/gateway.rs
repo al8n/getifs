@@ -89,7 +89,7 @@ where
     if !table_v4.is_null() {
       let table = &*table_v4;
       let rows = unsafe {
-        std::ptr::slice_from_raw_parts(
+        core::slice::from_raw_parts(
           &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
           table.NumEntries as usize,
         )
@@ -124,7 +124,7 @@ where
     if !table_v6.is_null() {
       let table = &*table_v6;
       let rows = unsafe {
-        std::ptr::slice_from_raw_parts(
+        core::slice::from_raw_parts(
           &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
           table.NumEntries as usize,
         )
