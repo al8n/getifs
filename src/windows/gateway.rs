@@ -88,9 +88,7 @@ where
     // Process IPv4 routes
     if !table_v4.is_null() {
       let table = &*table_v4;
-      for i in 0..table.NumEntries {
-        let route = &table.Table[i as usize];
-
+      for route in table.Table.iter() {
         // Check if route is up and has a gateway
         if route.ValidLifetime > 0 && route.Loopback == 0 {
           if let Some(gateway) =
@@ -119,9 +117,7 @@ where
     // Process IPv6 routes
     if !table_v6.is_null() {
       let table = &*table_v6;
-      for i in 0..table.NumEntries {
-        let route = &table.Table[i as usize];
-
+      for route in table.Table.iter() {
         // Check if route is up and has a gateway
         if route.ValidLifetime > 0 && route.Loopback == 0 {
           if let Some(gateway) =
