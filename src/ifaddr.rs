@@ -126,3 +126,44 @@ impl IfAddr {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn ifv4addr() {
+    let addr = Ifv4Addr::new(1, Ipv4Addr::new(127, 0, 0, 1));
+    assert_eq!(addr.index(), 1);
+    assert_eq!(addr.addr(), Ipv4Addr::new(127, 0, 0, 1));
+    assert!(addr.name().is_ok());
+    let _ = addr.is_private();
+  }
+
+  #[test]
+  fn ifv6addr() {
+    let addr = Ifv6Addr::new(1, Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
+    assert_eq!(addr.index(), 1);
+    assert_eq!(addr.addr(), Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
+    assert!(addr.name().is_ok());
+    let _ = addr.is_loopback();
+  }
+
+  #[test]
+  fn ifaddr() {
+    let addr = IfAddr::new(1, IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    assert_eq!(addr.index(), 1);
+    assert_eq!(addr.addr(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    assert!(addr.name().is_ok());
+    println!("{}", addr);
+
+    let addr = IfAddr::new(1, IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)));
+    assert_eq!(addr.index(), 1);
+    assert_eq!(
+      addr.addr(),
+      IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1))
+    );
+    assert!(addr.name().is_ok());
+    println!("{}", addr);
+  }
+}

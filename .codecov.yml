@@ -7,6 +7,7 @@ ignore:
   - tests
   - src/bsd_like # Ignore becasue cargo-tarpaulin does not support BSD-like OSes
   - src/bsd_like.rs # Ignore becasue cargo-tarpaulin does not support BSD-like OSes
+  - examples/
 
 coverage:
   status:

@@ -193,6 +193,15 @@ impl IfNet {
     }
   }
 
+  /// Returns the net of the interface.
+  #[inline]
+  pub const fn net(&self) -> IpNet {
+    match self {
+      Self::V4(addr) => IpNet::V4(*addr.net()),
+      Self::V6(addr) => IpNet::V6(*addr.net()),
+    }
+  }
+
   /// Returns the prefix length of the interface address.
   #[inline]
   pub const fn prefix_len(&self) -> u8 {
@@ -209,5 +218,79 @@ impl IfNet {
       Self::V4(addr) => addr.addr.max_prefix_len(),
       Self::V6(addr) => addr.addr.max_prefix_len(),
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn test_ifv4_net() {
+    let addr = Ipv4Addr::new(192, 168, 1, 1);
+    let net = Ifv4Net::with_prefix_len_assert(1, addr, 24);
+    assert_eq!(net.index(), 1);
+    assert_eq!(net.addr(), addr);
+    assert_eq!(net.prefix_len(), 24);
+    assert_eq!(net.max_prefix_len(), 32);
+    assert!(net.name().is_ok());
+    net.hostmask();
+  }
+
+  #[test]
+  fn test_ifv6_net() {
+    let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    let net = Ifv6Net::with_prefix_len_assert(1, addr, 64);
+    assert_eq!(net.index(), 1);
+    assert_eq!(net.addr(), addr);
+    assert_eq!(net.prefix_len(), 64);
+    assert_eq!(net.max_prefix_len(), 128);
+    assert!(net.name().is_ok());
+    net.hostmask();
+  }
+
+  #[test]
+  fn test_if_net() {
+    let ipnet = IpNet::V4(Ipv4Net::new_assert(Ipv4Addr::new(192, 168, 1, 1), 24));
+    let from_ipnet = IfNet::from_net(1, ipnet);
+
+    let addr = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
+    let net = IfNet::with_prefix_len(1, addr, 24).unwrap();
+    let net1 = IfNet::with_prefix_len_assert(1, addr, 24);
+    assert_eq!(net, net1);
+    assert_eq!(net, from_ipnet);
+    assert_eq!(net.index(), 1);
+    assert_eq!(net.addr(), addr);
+    assert_eq!(net.prefix_len(), 24);
+    assert_eq!(net.max_prefix_len(), 32);
+    assert!(net.name().is_ok());
+    assert_eq!(
+      net.net(),
+      IpNet::V4(Ipv4Net::new_assert(Ipv4Addr::new(192, 168, 1, 1), 24))
+    );
+
+    let ipnet = IpNet::V6(Ipv6Net::new_assert(
+      Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+      64,
+    ));
+    let from_ipnet = IfNet::from_net(1, ipnet);
+
+    let addr = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    let net = IfNet::with_prefix_len(1, addr, 64).unwrap();
+    let net1 = IfNet::with_prefix_len_assert(1, addr, 64);
+    assert_eq!(net, net1);
+    assert_eq!(net, from_ipnet);
+    assert_eq!(net.index(), 1);
+    assert_eq!(net.addr(), addr);
+    assert_eq!(net.prefix_len(), 64);
+    assert_eq!(net.max_prefix_len(), 128);
+    assert!(net.name().is_ok());
+    assert_eq!(
+      net.net(),
+      IpNet::V6(Ipv6Net::new_assert(
+        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+        64
+      ))
+    );
   }
 }

@@ -63,6 +63,19 @@ impl Interface {
   /// Returns a list of unicast interface addrs for a specific
   /// interface. The filter is used to
   /// determine which multicast addresses to include.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use getifs::interfaces;
+  ///
+  /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+  /// let addrs = interface.addrs_by_filter(|addr| { addr.is_loopback() }).unwrap();
+  ///
+  /// for addr in addrs {
+  ///   println!("Addr: {}", addr);
+  /// }
+  /// ```
   #[inline]
   pub fn addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<Ifv4Net>>
   where
@@ -73,6 +86,20 @@ impl Interface {
 
   /// Returns a list of unicast, IPv4 interface addrs for a specific
   /// interface.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use getifs::interfaces;
+  ///
+  /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+  ///
+  /// let addrs = interface.ipv4_addrs().unwrap();
+  ///
+  /// for addr in addrs {
+  ///   println!("IPv4 Addr: {}", addr);
+  /// }
+  /// ```
   #[inline]
   pub fn ipv4_addrs(&self) -> io::Result<SmallVec<Ifv4Net>> {
     os::interface_ipv4_addresses(self.index, |_| true)
@@ -81,6 +108,22 @@ impl Interface {
   /// Returns a list of unicast, IPv4 interface addrs for a specific
   /// interface. The filter is used to
   /// determine which multicast addresses to include.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use getifs::interfaces;
+  ///
+  /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+  ///
+  /// let addrs = interface.ipv4_addrs_by_filter(|addr| {
+  ///   !addr.is_loopback()
+  /// }).unwrap();
+  ///
+  /// for addr in addrs {
+  ///   println!("IPv4 Addr: {}", addr);
+  /// }
+  /// ```
   #[inline]
   pub fn ipv4_addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<Ifv4Net>>
   where
@@ -91,6 +134,20 @@ impl Interface {
 
   /// Returns a list of unicast, IPv6 interface addrs for a specific
   /// interface.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use getifs::interfaces;
+  ///
+  /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+  ///
+  /// let addrs = interface.ipv6_addrs().unwrap();
+  ///
+  /// for addr in addrs {
+  ///   println!("IPv6 Addr: {}", addr);
+  /// }
+  /// ```
   #[inline]
   pub fn ipv6_addrs(&self) -> io::Result<SmallVec<Ifv6Net>> {
     os::interface_ipv6_addresses(self.index, |_| true)
@@ -99,6 +156,22 @@ impl Interface {
   /// Returns a list of unicast, IPv6 interface addrs for a specific
   /// interface. The filter is used to
   /// determine which multicast addresses to include.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use getifs::interfaces;
+  ///
+  /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+  ///
+  /// let addrs = interface.ipv6_addrs_by_filter(|addr| {
+  ///   !addr.is_loopback()
+  /// }).unwrap();
+  ///
+  /// for addr in addrs {
+  ///   println!("IPv6 Addr: {}", addr);
+  /// }
+  /// ```
   #[inline]
   pub fn ipv6_addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<Ifv6Net>>
   where
@@ -110,6 +183,20 @@ impl Interface {
   cfg_multicast!(
     /// Returns a list of multicast, joined group addrs
     /// for a specific interface.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use getifs::interfaces;
+    ///
+    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    ///
+    /// let addrs = interface.multicast_addrs().unwrap();
+    ///
+    /// for addr in addrs {
+    ///   println!("Multicast Addr: {}", addr);
+    /// }
+    /// ```
     pub fn multicast_addrs(&self) -> io::Result<SmallVec<IfAddr>> {
       os::interface_multicast_addresses(self.index, |_| true)
     }
@@ -117,6 +204,22 @@ impl Interface {
     /// Returns a list of multicast, joined group addrs
     /// for a specific interface. The filter is used to
     /// determine which multicast addresses to include.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use getifs::interfaces;
+    ///
+    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    ///
+    /// let addrs = interface.multicast_addrs_by_filter(|addr| {
+    ///   !addr.is_loopback()
+    /// }).unwrap();
+    ///
+    /// for addr in addrs {
+    ///   println!("Multicast Addr: {}", addr);
+    /// }
+    /// ```
     pub fn multicast_addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<IfAddr>>
     where
       F: FnMut(&IpAddr) -> bool,
@@ -126,6 +229,20 @@ impl Interface {
 
     /// Returns a list of multicast, joined group IPv4 addrs
     /// for a specific interface.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use getifs::interfaces;
+    ///
+    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    ///
+    /// let addrs = interface.ipv4_multicast_addrs().unwrap();
+    ///
+    /// for addr in addrs {
+    ///   println!("Multicast IPv4 Addr: {}", addr);
+    /// }
+    /// ```
     pub fn ipv4_multicast_addrs(&self) -> io::Result<SmallVec<Ifv4Addr>> {
       os::interface_multicast_ipv4_addresses(self.index, |_| true)
     }
@@ -133,6 +250,22 @@ impl Interface {
     /// Returns a list of multicast, joined group IPv4 addrs
     /// for a specific interface. The filter is used to
     /// determine which multicast addresses to include.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use getifs::interfaces;
+    ///
+    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    ///
+    /// let addrs = interface.ipv4_multicast_addrs_by_filter(|addr| {
+    ///   !addr.is_loopback()
+    /// }).unwrap();
+    ///
+    /// for addr in addrs {
+    ///   println!("Multicast IPv4 Addr: {}", addr);
+    /// }
+    /// ```
     pub fn ipv4_multicast_addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<Ifv4Addr>>
     where
       F: FnMut(&Ipv4Addr) -> bool,
@@ -142,6 +275,20 @@ impl Interface {
 
     /// Returns a list of multicast, joined group IPv6 addrs
     /// for a specific interface.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use getifs::interfaces;
+    ///
+    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    ///
+    /// let addrs = interface.ipv6_multicast_addrs().unwrap();
+    ///
+    /// for addr in addrs {
+    ///   println!("Multicast IPv6 Addr: {}", addr);
+    /// }
+    /// ```
     pub fn ipv6_multicast_addrs(&self) -> io::Result<SmallVec<Ifv6Addr>> {
       os::interface_multicast_ipv6_addresses(self.index, |_| true)
     }
@@ -149,6 +296,22 @@ impl Interface {
     /// Returns a list of multicast, joined group IPv6 addrs
     /// for a specific interface. The filter is used to
     /// determine which multicast addresses to include.
+    ///
+    /// ## Example
+    ///
+    /// ```rust
+    /// use getifs::interfaces;
+    ///
+    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    ///
+    /// let addrs = interface.ipv6_multicast_addrs_by_filter(|addr| {
+    ///   !addr.is_loopback()
+    /// }).unwrap();
+    ///
+    /// for addr in addrs {
+    ///   println!("Multicast IPv6 Addr: {}", addr);
+    /// }
+    /// ```
     pub fn ipv6_multicast_addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<Ifv6Addr>>
     where
       F: FnMut(&Ipv6Addr) -> bool,
@@ -373,6 +536,16 @@ cfg_multicast!(
   ///
   /// The returned list does not identify the associated interface; use
   /// [`interfaces`] and [`Interface::multicast_addrs_by_filter`] for more detail.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use getifs::interface_multicast_addrs_by_filter;
+  ///
+  /// let addrs = interface_multicast_addrs_by_filter(|addr| {
+  ///  !addr.is_loopback()
+  /// }).unwrap();
+  /// ```
   pub fn interface_multicast_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfAddr>>
   where
     F: FnMut(&IpAddr) -> bool,
@@ -407,6 +580,16 @@ cfg_multicast!(
   ///
   /// The returned list does not identify the associated interface; use
   /// [`interfaces`] and [`Interface::ipv4_multicast_addrs_by_filter`] for more detail.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use getifs::interface_multicast_ipv4_addrs_by_filter;
+  ///
+  /// let addrs = interface_multicast_ipv4_addrs_by_filter(|addr| {
+  ///   !addr.is_loopback()
+  /// }).unwrap();
+  /// ```
   pub fn interface_multicast_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
   where
     F: FnMut(&Ipv4Addr) -> bool,
@@ -441,6 +624,16 @@ cfg_multicast!(
   ///
   /// The returned list does not identify the associated interface; use
   /// [`interfaces`] and [`Interface::ipv6_multicast_addrs_by_filter`] for more detail.
+  ///
+  /// ## Example
+  ///
+  /// ```rust
+  /// use getifs::interface_multicast_ipv6_addrs_by_filter;
+  ///
+  /// let addrs = interface_multicast_ipv6_addrs_by_filter(|addr| {
+  ///   !addr.is_loopback()
+  /// }).unwrap();
+  /// ```
   pub fn interface_multicast_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
   where
     F: FnMut(&Ipv6Addr) -> bool,
