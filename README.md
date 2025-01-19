@@ -28,18 +28,31 @@ Cross-platform network tools, a bunch of network tools for fetching interfaces, 
 getifs = "0.2"
 ```
 
+## Examples
+
+- Fetching all interfaces: [examples/interfaces.rs](./examples/interfaces.rs)
+- Fetching all interface addresses (excluding multicast addrs): [examples/addrs.rs](./examples/addrs.rs)
+- Fetching all interface multicast addresses: [exampels/multicast_addrs.rs](./examples/multicast_addrs.rs)
+- Fetching gateway addresses: [examples/gateway.rs](./examples/gateway.rs)
+- Fetching local ip addresses: [examples/local_ip_addrs.rs](./examples/local_ip_addrs.rs)
+- Fetching ip addresses by RFC: [examples/filter_by_rfc.rs](./examples/filter_by_rfc.rs)
+
 ## Details
 
 OS | Approach
 --- | ---
 Linux | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
-BSD-based | `sysctl`
+BSD-like | `sysctl`
 Windows | `GetAdaptersAddresses`
 
 ## Why a new network interfaces crate?
 
 Because all of current network interfaces crates do not support fetching `MTU`, and almost all of them are using `libc::getifaddrs`. This crate
 tries to avoid unneeded allocation and use more underlying method to achieve the same functionalities.
+
+## Roadmap
+
+- [ ] Support fetching routing tables (0.3.0)
 
 ## Pedigree
 

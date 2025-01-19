@@ -271,6 +271,80 @@ pub fn interface_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
   os::interface_ipv6_addresses(0, |_| true)
 }
 
+/// Returns a list of the system's unicast interface
+/// addrs.
+///
+/// The returned list does not identify the associated interface; use
+/// [`interfaces`] and [`Interface::addrs`] for more detail.
+///
+/// ## Example
+///
+/// ```rust
+/// use getifs::interface_addrs_by_filter;
+///
+/// let addrs = interface_addrs_by_filter(|addr| addr.is_loopback()).unwrap();
+///
+/// for addr in addrs {
+///   println!("Addr: {:?}", addr);
+/// }
+/// ```
+pub fn interface_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfNet>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  os::interface_addresses(0, f)
+}
+
+/// Returns a list of the system's unicast, IPv4 interface
+/// addrs.
+///
+/// The returned list does not identify the associated interface; use
+/// [`interfaces`] and [`Interface::ipv4_addrs`] for more detail.
+///
+/// ## Example
+///
+/// ```rust
+/// use getifs::interface_ipv4_addrs_by_filter;
+///
+/// let addrs = interface_ipv4_addrs_by_filter(|addr| addr.is_loopback()).unwrap();
+///
+/// for addr in addrs {
+///   println!("IPv4 Addr: {:?}", addr);
+/// }
+/// ```
+pub fn interface_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Net>>
+where
+  F: FnMut(&Ipv4Addr) -> bool,
+{
+  os::interface_ipv4_addresses(0, ipv4_filter_to_ip_filter(f))
+}
+
+/// Returns a list of the system's unicast, IPv6 interface
+/// addrs.
+///
+/// Provides a filter to determine which addresses to include.
+///
+/// The returned list does not identify the associated interface; use
+/// [`interfaces`] and [`Interface::ipv6_addrs_by_filter`] for more detail.
+///
+/// ## Example
+///
+/// ```rust
+/// use getifs::interface_ipv6_addrs_by_filter;
+///
+/// let addrs = interface_ipv6_addrs_by_filter(|addr| addr.is_loopback()).unwrap();
+///
+/// for addr in addrs {
+///   println!("IPv6 Addr: {:?}", addr);
+/// }
+/// ```
+pub fn interface_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Net>>
+where
+  F: FnMut(&Ipv6Addr) -> bool,
+{
+  os::interface_ipv6_addresses(0, ipv6_filter_to_ip_filter(f))
+}
+
 cfg_multicast!(
   /// Returns a list of the system's multicast interface
   /// addrs.
@@ -315,15 +389,15 @@ cfg_multicast!(
   /// ## Example
   ///
   /// ```rust
-  /// use getifs::interface_ipv4_multicast_addrs;
+  /// use getifs::interface_multicast_ipv4_addrs;
   ///
-  /// let addrs = interface_ipv4_multicast_addrs().unwrap();
+  /// let addrs = interface_multicast_ipv4_addrs().unwrap();
   ///
   /// for addr in addrs {
   ///  println!("Multicast IPv4 Addr: {:?}", addr);
   /// }
   /// ```
-  pub fn interface_ipv4_multicast_addrs() -> io::Result<SmallVec<Ifv4Addr>> {
+  pub fn interface_multicast_ipv4_addrs() -> io::Result<SmallVec<Ifv4Addr>> {
     os::interface_multicast_ipv4_addresses(0, |_| true)
   }
 
@@ -333,7 +407,7 @@ cfg_multicast!(
   ///
   /// The returned list does not identify the associated interface; use
   /// [`interfaces`] and [`Interface::ipv4_multicast_addrs_by_filter`] for more detail.
-  pub fn interface_ipv4_multicast_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
+  pub fn interface_multicast_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
   where
     F: FnMut(&Ipv4Addr) -> bool,
   {
@@ -349,15 +423,15 @@ cfg_multicast!(
   /// ## Example
   ///
   /// ```rust
-  /// use getifs::interface_ipv6_multicast_addrs;
+  /// use getifs::interface_multicast_ipv6_addrs;
   ///
-  /// let addrs = interface_ipv6_multicast_addrs().unwrap();
+  /// let addrs = interface_multicast_ipv6_addrs().unwrap();
   ///
   /// for addr in addrs {
   ///   println!("Multicast IPv6 Addr: {:?}", addr);
   /// }
   /// ```
-  pub fn interface_ipv6_multicast_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
+  pub fn interface_multicast_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
     os::interface_multicast_ipv6_addresses(0, |_| true)
   }
 
@@ -367,7 +441,7 @@ cfg_multicast!(
   ///
   /// The returned list does not identify the associated interface; use
   /// [`interfaces`] and [`Interface::ipv6_multicast_addrs_by_filter`] for more detail.
-  pub fn interface_ipv6_multicast_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
+  pub fn interface_multicast_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
   where
     F: FnMut(&Ipv6Addr) -> bool,
   {
