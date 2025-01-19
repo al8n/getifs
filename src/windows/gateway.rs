@@ -92,8 +92,10 @@ where
         let route = &table.Table[i as usize];
 
         // Check if route is up and has a gateway
-        if route.Route.State == IF_OPER_STATUS_OPERATIONAL as u32 {
-          if let Some(gateway) = sockaddr_to_ipaddr(family, (&route.NextHop) as _) {
+        if route.ValidLifetime > 0 && route.Loopback == 0 {
+          if let Some(gateway) =
+            sockaddr_to_ipaddr(family, &route.NextHop as *const _ as *const SOCKADDR)
+          {
             // Skip default gateway (0.0.0.0)
             if let IpAddr::V4(addr) = gateway {
               if addr.octets() == [0, 0, 0, 0] {
@@ -121,8 +123,10 @@ where
         let route = &table.Table[i as usize];
 
         // Check if route is up and has a gateway
-        if route.Route.State == IF_OPER_STATUS_OPERATIONAL as u32 {
-          if let Some(gateway) = sockaddr_to_ipaddr(family, (&route.NextHop) as _) {
+        if route.ValidLifetime > 0 && route.Loopback == 0 {
+          if let Some(gateway) =
+            sockaddr_to_ipaddr(family, &route.NextHop as *const _ as *const SOCKADDR)
+          {
             // Skip default gateway (::)
             if let IpAddr::V6(addr) = gateway {
               if addr.octets() == [0; 16] {

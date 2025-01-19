@@ -42,7 +42,7 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
     let wide_name =
       U16CString::from_str(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let mut luid: *mut NET_LUID_LH = std::ptr::null_mut();
+    let luid: *mut NET_LUID_LH = std::ptr::null_mut();
 
     // Convert friendly name to LUID
     let result = unsafe { ConvertInterfaceAliasToLuid(wide_name.as_ptr(), luid) };
