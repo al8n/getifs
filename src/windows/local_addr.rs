@@ -42,7 +42,7 @@ fn best_local_addrs_in<T: Net>(family: u16) -> io::Result<SmallVec<T>> {
             let table_ref = &*table;
             let rows = unsafe {
               core::slice::from_raw_parts(
-                &table_ref.table as *const _ as *const MIB_IPFORWARDTABLE,
+                &table_ref.table as *const _ as *const MIB_IPFORWARDROW,
                 table_ref.dwNumEntries as usize,
               )
             };
