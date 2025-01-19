@@ -18,24 +18,18 @@ use super::{super::Address, Flags, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
 const NLMSG_HDRLEN: usize = mem::size_of::<nlmsghdr>();
 const NLMSG_ALIGNTO: usize = 4;
 
-// Ensure socket is closed when we're done
-struct SocketGuard(i32);
-
-impl Drop for SocketGuard {
-  fn drop(&mut self) {
-    unsafe { close(self.0) };
-  }
+struct Handle {
+  fd: i32,
+  sa: sockaddr_nl,
 }
 
-pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<TinyVec<Interface>> {
-  unsafe {
+impl Handle {
+  unsafe fn new() -> io::Result<Self> {
     // Create socket
     let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
     if sock < 0 {
       return Err(io::Error::last_os_error());
     }
-
-    let _guard = SocketGuard(sock);
 
     // Prepare and bind socket address
     let mut sa: sockaddr_nl = mem::zeroed();
@@ -50,26 +44,81 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<TinyVec<Int
       return Err(io::Error::last_os_error());
     }
 
-    // Create and send netlink request
-    let req = NetlinkRouteRequest::new(RTM_GETLINK, 1, family as u8, ifi);
+    Ok(Self { fd: sock, sa })
+  }
+
+  unsafe fn send(&self, req: &NetlinkRouteRequest) -> io::Result<()> {
     if sendto(
-      sock,
+      self.fd,
       req.as_bytes().as_ptr() as _,
       NetlinkRouteRequest::SIZE,
       0,
-      &sa as *const sockaddr_nl as *const _,
+      &self.sa as *const sockaddr_nl as *const _,
       mem::size_of::<sockaddr_nl>() as socklen_t,
     ) < 0
     {
       return Err(io::Error::last_os_error());
     }
 
-    // Get socket name
+    Ok(())
+  }
+
+  unsafe fn sock(&self) -> io::Result<sockaddr_nl> {
     let mut lsa: sockaddr_nl = mem::zeroed();
     let mut lsa_len = mem::size_of::<sockaddr_nl>() as socklen_t;
-    if getsockname(sock, &mut lsa as *mut sockaddr_nl as *mut _, &mut lsa_len) < 0 {
+    if getsockname(
+      self.fd,
+      &mut lsa as *mut sockaddr_nl as *mut _,
+      &mut lsa_len,
+    ) < 0
+    {
       return Err(io::Error::last_os_error());
     }
+
+    Ok(lsa)
+  }
+
+  unsafe fn recv(&self, dst: &mut [u8]) -> io::Result<usize> {
+    let mut addr: sockaddr_nl = mem::zeroed();
+    let mut addr_len = mem::size_of::<sockaddr_nl>() as socklen_t;
+
+    let nr = recvfrom(
+      self.fd,
+      dst.as_mut_ptr() as *mut _,
+      dst.len(),
+      0,
+      &mut addr as *mut sockaddr_nl as *mut _,
+      &mut addr_len,
+    );
+
+    if nr < 0 {
+      return Err(io::Error::last_os_error());
+    }
+
+    if nr < NLMSG_HDRLEN as isize {
+      return Err(io::Error::from_raw_os_error(EINVAL));
+    }
+
+    Ok(nr as usize)
+  }
+}
+
+impl Drop for Handle {
+  fn drop(&mut self) {
+    unsafe { close(self.fd) };
+  }
+}
+
+pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<TinyVec<Interface>> {
+  unsafe {
+    let handle = Handle::new()?;
+
+    // Create and send netlink request
+    let req = NetlinkRouteRequest::new(RTM_GETLINK, 1, family as u8, ifi);
+    handle.send(&req)?;
+
+    // Get socket name
+    let lsa = handle.sock()?;
 
     // Receive and process messages
     let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
@@ -78,27 +127,9 @@ pub(super) fn netlink_interface(family: i32, ifi: u32) -> io::Result<TinyVec<Int
     let mut interfaces = TinyVec::new();
 
     'outer: loop {
-      let mut addr: sockaddr_nl = mem::zeroed();
-      let mut addr_len = mem::size_of::<sockaddr_nl>() as socklen_t;
+      let nr = handle.recv(&mut rb)?;
 
-      let nr = recvfrom(
-        sock,
-        rb.as_mut_ptr() as *mut _,
-        rb.len(),
-        0,
-        &mut addr as *mut sockaddr_nl as *mut _,
-        &mut addr_len,
-      );
-
-      if nr < 0 {
-        return Err(io::Error::last_os_error());
-      }
-
-      if nr < NLMSG_HDRLEN as isize {
-        return Err(io::Error::from_raw_os_error(EINVAL));
-      }
-
-      let mut received = &rb[..nr as usize];
+      let mut received = &rb[..nr];
 
       while received.len() >= NLMSG_HDRLEN {
         let h = decode_nlmsghdr(received);
@@ -198,48 +229,14 @@ where
   F: FnMut(&IpAddr) -> bool,
 {
   unsafe {
-    // Create socket
-    let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
-    if sock < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Ensure socket is closed when we're done
-    let _guard = SocketGuard(sock);
-
-    // Prepare and bind socket address
-    let mut sa: sockaddr_nl = mem::zeroed();
-    sa.nl_family = AF_NETLINK as u16;
-
-    if bind(
-      sock,
-      &sa as *const sockaddr_nl as *const _,
-      mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
+    let handle = Handle::new()?;
 
     // Create and send netlink request
     let req = NetlinkRouteRequest::new(RTM_GETADDR, 1, family as u8, ifi);
-    if sendto(
-      sock,
-      req.as_bytes().as_ptr() as _,
-      NetlinkRouteRequest::SIZE,
-      0,
-      &sa as *const sockaddr_nl as *const _,
-      mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
+    handle.send(&req)?;
 
     // Get socket name
-    let mut lsa: sockaddr_nl = mem::zeroed();
-    let mut lsa_len = mem::size_of::<sockaddr_nl>() as socklen_t;
-    if getsockname(sock, &mut lsa as *mut sockaddr_nl as *mut _, &mut lsa_len) < 0 {
-      return Err(io::Error::last_os_error());
-    }
+    let lsa = handle.sock()?;
 
     // Receive and process messages
     let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
@@ -248,27 +245,8 @@ where
     let mut addrs = SmallVec::new();
 
     'outer: loop {
-      let mut addr: sockaddr_nl = mem::zeroed();
-      let mut addr_len = mem::size_of::<sockaddr_nl>() as socklen_t;
-
-      let nr = recvfrom(
-        sock,
-        rb.as_mut_ptr() as *mut _,
-        rb.len(),
-        0,
-        &mut addr as *mut sockaddr_nl as *mut _,
-        &mut addr_len,
-      );
-
-      if nr < 0 {
-        return Err(io::Error::last_os_error());
-      }
-
-      if nr < NLMSG_HDRLEN as isize {
-        return Err(io::Error::from_raw_os_error(EINVAL));
-      }
-
-      let mut received = &rb[..nr as usize];
+      let nr = handle.recv(&mut rb)?;
+      let mut received = &rb[..nr];
 
       // means auto choose interface for addr fetching
       while received.len() >= NLMSG_HDRLEN {
@@ -375,44 +353,10 @@ where
   N: Net,
 {
   unsafe {
-    let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
-    if sock < 0 {
-      return Err(io::Error::last_os_error());
-    }
-    let _guard = SocketGuard(sock);
-
-    // Bind socket
-    let mut sa: sockaddr_nl = std::mem::zeroed();
-    sa.nl_family = AF_NETLINK as u16;
-
-    if bind(
-      sock,
-      &sa as *const sockaddr_nl as *const _,
-      std::mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
+    let handle = Handle::new()?;
 
     let req = NetlinkRouteRequest::new(RTM_GETROUTE, 1, family as u8, 0);
-
-    if sendto(
-      sock,
-      req.as_bytes().as_ptr() as _,
-      NetlinkRouteRequest::SIZE,
-      0,
-      &sa as *const sockaddr_nl as *const _,
-      std::mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-
-    let mut lsa: sockaddr_nl = std::mem::zeroed();
-    let mut lsa_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
-    if getsockname(sock, &mut lsa as *mut sockaddr_nl as *mut _, &mut lsa_len) < 0 {
-      return Err(io::Error::last_os_error());
-    }
+    handle.send(&req)?;
 
     let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
     let mut rb = vec![0u8; page_size];
@@ -420,23 +364,9 @@ where
     let mut best_metric = u32::MAX;
 
     'outer: loop {
-      let mut addr: sockaddr_nl = std::mem::zeroed();
-      let mut addr_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
+      let nr = handle.recv(&mut rb)?;
 
-      let nr = recvfrom(
-        sock,
-        rb.as_mut_ptr() as *mut _,
-        rb.len(),
-        0,
-        &mut addr as *mut sockaddr_nl as *mut _,
-        &mut addr_len,
-      );
-
-      if nr < 0 {
-        return Err(io::Error::last_os_error());
-      }
-
-      let mut received = &rb[..nr as usize];
+      let mut received = &rb[..nr];
 
       while received.len() >= NLMSG_HDRLEN {
         let h = decode_nlmsghdr(received);
@@ -533,48 +463,14 @@ where
   F: FnMut(&IpAddr) -> bool,
 {
   unsafe {
-    // Create socket
-    let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
-    if sock < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    let _guard = SocketGuard(sock);
-
-    // Prepare and bind socket address
-    let mut sa: sockaddr_nl = std::mem::zeroed();
-    sa.nl_family = AF_NETLINK as u16;
-
-    if bind(
-      sock,
-      &sa as *const sockaddr_nl as *const _,
-      std::mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
+    let handle = Handle::new()?;
 
     // Create and send netlink request for routes
     let req = NetlinkRouteRequest::new(RTM_GETROUTE, 1, family as u8, 0);
-
-    if sendto(
-      sock,
-      req.as_bytes().as_ptr() as _,
-      NetlinkRouteRequest::SIZE,
-      0,
-      &sa as *const sockaddr_nl as *const _,
-      std::mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
+    handle.send(&req)?;
 
     // Get socket name
-    let mut lsa: sockaddr_nl = std::mem::zeroed();
-    let mut lsa_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
-    if getsockname(sock, &mut lsa as *mut sockaddr_nl as *mut _, &mut lsa_len) < 0 {
-      return Err(io::Error::last_os_error());
-    }
+    let lsa = handle.sock()?;
 
     // Receive and process messages
     let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
@@ -582,27 +478,9 @@ where
     let mut gateways = SmallVec::new();
 
     'outer: loop {
-      let mut addr: sockaddr_nl = std::mem::zeroed();
-      let mut addr_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
+      let nr = handle.recv(&mut rb)?;
 
-      let nr = recvfrom(
-        sock,
-        rb.as_mut_ptr() as *mut _,
-        rb.len(),
-        0,
-        &mut addr as *mut sockaddr_nl as *mut _,
-        &mut addr_len,
-      );
-
-      if nr < 0 {
-        return Err(io::Error::last_os_error());
-      }
-
-      if nr < NLMSG_HDRLEN as isize {
-        return Err(io::Error::from_raw_os_error(EINVAL));
-      }
-
-      let mut received = &rb[..nr as usize];
+      let mut received = &rb[..nr];
 
       while received.len() >= NLMSG_HDRLEN {
         let h = decode_nlmsghdr(received);
