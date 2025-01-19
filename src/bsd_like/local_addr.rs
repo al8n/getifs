@@ -15,18 +15,18 @@ use super::{
 };
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
-  bast_local_ip_addrs_in(AF_INET)
+  bast_local_addrs_in(AF_INET)
 }
 
 pub(crate) fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
-  bast_local_ip_addrs_in(AF_INET6)
+  bast_local_addrs_in(AF_INET6)
 }
 
-pub(crate) fn best_local_ip_addrs() -> io::Result<SmallVec<IfNet>> {
-  bast_local_ip_addrs_in(AF_UNSPEC)
+pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
+  bast_local_addrs_in(AF_UNSPEC)
 }
 
-fn bast_local_ip_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
+fn bast_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
   // First get the default route to find the interface index
   let routes = fetch(family, NET_RT_DUMP, 0)?;
   let mut best_ifindex = None;
@@ -115,7 +115,7 @@ pub(crate) fn local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
   interface_ipv6_addresses(0, local_ip_filter)
 }
 
-pub(crate) fn local_ip_addrs() -> io::Result<SmallVec<IfNet>> {
+pub(crate) fn local_addrs() -> io::Result<SmallVec<IfNet>> {
   interface_addresses(0, local_ip_filter)
 }
 
@@ -135,7 +135,7 @@ where
   interface_ipv6_addresses(0, move |addr| f(addr) && local_ip_filter(addr))
 }
 
-pub(crate) fn local_ip_addrs_by_filter<F>(mut f: F) -> io::Result<SmallVec<IfNet>>
+pub(crate) fn local_addrs_by_filter<F>(mut f: F) -> io::Result<SmallVec<IfNet>>
 where
   F: FnMut(&IpAddr) -> bool,
 {

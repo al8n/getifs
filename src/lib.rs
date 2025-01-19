@@ -8,42 +8,34 @@ mod macros;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+pub use gateway::*;
 pub use hardware_address::{MacAddr, ParseMacAddrError};
 pub use idx_to_name::ifindex_to_name;
 pub use ifaddr::*;
 pub use ifnet::*;
 pub use interfaces::*;
 pub use ipnet;
-pub use local_ip_addrs::*;
+/// Known RFCs for IP addresses
+#[doc(inline)]
+pub use iprfc as rfc;
+pub use local_addrs::*;
 pub use name_to_idx::ifname_to_index;
 pub use os::Flags;
-// pub use rt_broadcast::*;
-pub use rt_gateway::*;
-// pub use rt_host::*;
-pub use rt_local::*;
-pub use rt_multicast::*;
-// pub use rt_net::*;
+pub use private_ip_addrs::*;
+pub use public_ip_addrs::*;
 pub use smol_str::SmolStr;
-
-cfg_apple!(
-  pub use rt_global::*;
-  mod rt_global;
-);
 
 // #[cfg(feature = "serde")]
 // mod serde_impl;
+mod gateway;
 mod idx_to_name;
 mod ifaddr;
 mod ifnet;
 mod interfaces;
-mod local_ip_addrs;
+mod local_addrs;
 mod name_to_idx;
-// mod rt_broadcast;
-mod rt_gateway;
-// mod rt_host;
-mod rt_local;
-mod rt_multicast;
-// mod rt_net;
+mod private_ip_addrs;
+mod public_ip_addrs;
 mod utils;
 
 #[cfg(target_os = "linux")]
@@ -276,15 +268,8 @@ fn local_ip_filter(addr: &IpAddr) -> bool {
   }
 }
 
+#[allow(dead_code)]
 #[inline]
 fn is_ipv6_unspecified(addr: [u8; 16]) -> bool {
   u128::from_be_bytes(addr) == u128::from_be_bytes(Ipv6Addr::UNSPECIFIED.octets())
-}
-
-#[test]
-fn t() {
-  let gws = rt_gateway_addrs().unwrap();
-  for addr in gws {
-    println!("{addr}");
-  }
 }

@@ -48,20 +48,20 @@ pub fn local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// Returns all IP addresses (both IPv4 and IPv6) from interfaces that have valid routes (excluding loopback).
 /// This ensures we only return addresses that can be used for communication.
 ///
-/// See also [`best_local_ip_addrs`] and [`local_ip_addrs_by_filter`].
+/// See also [`best_local_addrs`] and [`local_addrs_by_filter`].
 ///
 /// ## Example
 ///
 /// ```rust
-/// use getifs::local_ip_addrs;
+/// use getifs::local_addrs;
 ///
-/// let all_addrs = local_ip_addrs().unwrap();
+/// let all_addrs = local_addrs().unwrap();
 /// for addr in all_addrs {
 ///   println!("{addr}");
 /// }
 /// ```
-pub fn local_ip_addrs() -> io::Result<SmallVec<IfNet>> {
-  os::local_ip_addrs()
+pub fn local_addrs() -> io::Result<SmallVec<IfNet>> {
+  os::local_addrs()
 }
 
 /// Returns all IPv4 addresses from interfaces that have valid routes.
@@ -113,19 +113,19 @@ where
 /// ## Example
 ///
 /// ```rust
-/// use getifs::local_ip_addrs_by_filter;
+/// use getifs::local_addrs_by_filter;
 ///
 ///
-/// let addrs = local_ip_addrs_by_filter(|addr| !addr.is_loopback()).unwrap();
+/// let addrs = local_addrs_by_filter(|addr| !addr.is_loopback()).unwrap();
 /// for addr in addrs {
 ///   println!("{addr}");
 /// }
 /// ```
-pub fn local_ip_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfNet>>
+pub fn local_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfNet>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  os::local_ip_addrs_by_filter(f)
+  os::local_addrs_by_filter(f)
 }
 
 /// Returns the IPv4 addresses from the interface with the best default route.
@@ -170,19 +170,19 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// Returns both IPv4 and IPv6 addresses from the interfaces with the best default routes.
 /// The "best" interfaces are determined by the routing metrics of default routes.
 ///
-/// See also [`local_ip_addrs`].
+/// See also [`local_addrs`].
 ///
 /// ## Example
 ///
 /// ```rust
-/// use getifs::best_local_ip_addrs;
+/// use getifs::best_local_addrs;
 ///
-/// let all_addrs = best_local_ip_addrs().unwrap();
+/// let all_addrs = best_local_addrs().unwrap();
 /// // Will only contain addresses from interfaces with best default routes
 /// for addr in all_addrs {
 ///   println!("{addr}");
 /// }
 /// ```
-pub fn best_local_ip_addrs() -> io::Result<SmallVec<IfNet>> {
-  os::best_local_ip_addrs()
+pub fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
+  os::best_local_addrs()
 }

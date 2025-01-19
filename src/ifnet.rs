@@ -2,10 +2,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::{IpNet, Ipv4Net, Ipv6Net, PrefixLenError};
 
-macro_rules! if_addr {
+macro_rules! if_net {
   ($kind:literal) => {
     paste::paste! {
-      #[doc = "An interface IP" $kind " address."]
+      #[doc = "An interface IP" $kind " network."]
       #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
       pub struct [<If $kind Net>] {
         index: u32,
@@ -95,10 +95,10 @@ macro_rules! if_addr {
   };
 }
 
-if_addr!("v4");
-if_addr!("v6");
+if_net!("v4");
+if_net!("v6");
 
-/// An interface address.
+/// An interface network.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum IfNet {
   /// An IPv4 interface address.

@@ -3,19 +3,13 @@ use core::slice;
 use libc::{
   bind, close, getsockname, nlmsghdr, recvfrom, sendto, sockaddr_nl, socket, socklen_t, AF_INET,
   AF_INET6, AF_NETLINK, AF_UNSPEC, ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6, EINVAL,
-  IFA_ADDRESS, IFA_BROADCAST, IFA_LOCAL, IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU, NETLINK_ROUTE,
-  NLMSG_DONE, NLMSG_ERROR, RTA_DST, RTA_GATEWAY, RTA_OIF, RTA_PRIORITY, RTF_BROADCAST, RTF_GATEWAY,
-  RTF_LOCAL, RTF_UP, RTM_GETADDR, RTM_GETLINK, RTM_GETROUTE, RTM_NEWADDR, RTM_NEWLINK,
-  RTM_NEWROUTE, RTN_BROADCAST, RTN_LOCAL, RTN_MULTICAST, RTN_UNICAST, RT_TABLE_MAIN, SOCK_CLOEXEC,
-  SOCK_RAW,
+  IFA_ADDRESS, IFA_LOCAL, IFLA_ADDRESS, IFLA_IFNAME, IFLA_MTU, NETLINK_ROUTE, NLMSG_DONE,
+  NLMSG_ERROR, RTA_OIF, RTA_PRIORITY, RTF_GATEWAY, RTF_UP, RTM_GETADDR, RTM_GETLINK, RTM_GETROUTE,
+  RTM_NEWADDR, RTM_NEWLINK, RTM_NEWROUTE, RT_TABLE_MAIN, SOCK_CLOEXEC, SOCK_RAW,
 };
 
 use smallvec_wrapper::{SmallVec, TinyVec};
-use std::{
-  ffi::CStr,
-  io, mem,
-  net::{IpAddr, Ipv4Addr},
-};
+use std::{ffi::CStr, io, mem, net::IpAddr};
 
 use crate::local_ip_filter;
 
@@ -376,7 +370,7 @@ where
   }
 }
 
-pub fn netlink_best_local_ip_addrs<N>(family: i32) -> io::Result<SmallVec<N>>
+pub fn netlink_best_local_addrs<N>(family: i32) -> io::Result<SmallVec<N>>
 where
   N: Net,
 {
@@ -561,7 +555,7 @@ where
     }
 
     // Create and send netlink request for routes
-    let req = NetlinkRouteRequest::new(RTM_GETROUTE, 1, family as u8, 0); // family 0 to get both IPv4 and IPv6
+    let req = NetlinkRouteRequest::new(RTM_GETROUTE, 1, family as u8, 0);
 
     if sendto(
       sock,
@@ -706,186 +700,6 @@ where
   }
 }
 
-pub(super) fn rt_local_addrs<A, F>(family: i32, f: F) -> io::Result<SmallVec<A>>
-where
-  A: Address + Eq,
-  F: FnMut(&IpAddr) -> bool,
-{
-  rt_generic_addrs(family, RTA_DST, Some(RTN_LOCAL), f)
-}
-
-pub(super) fn rt_gateway_addrs<A, F>(family: i32, f: F) -> io::Result<SmallVec<A>>
-where
-  A: Address + Eq,
-  F: FnMut(&IpAddr) -> bool,
-{
-  rt_generic_addrs(family, RTA_GATEWAY, None, f)
-}
-
-pub(super) fn rt_multicast_addrs<A, F>(family: i32, f: F) -> io::Result<SmallVec<A>>
-where
-  A: Address + Eq,
-  F: FnMut(&IpAddr) -> bool,
-{
-  rt_generic_addrs(family, RTA_DST, Some(RTN_MULTICAST), f)
-}
-
-pub(super) fn rt_broadcast_addrs<A, F>(family: i32, mut f: F) -> io::Result<SmallVec<A>>
-where
-  A: Address + Eq,
-  F: FnMut(&IpAddr) -> bool,
-{
-  unsafe {
-    // Create socket
-    let sock = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
-    if sock < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    let _guard = SocketGuard(sock);
-
-    // Prepare and bind socket address
-    let mut sa: sockaddr_nl = std::mem::zeroed();
-    sa.nl_family = AF_NETLINK as u16;
-
-    if bind(
-      sock,
-      &sa as *const sockaddr_nl as *const _,
-      std::mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Create netlink request for routes
-    let req = NetlinkRouteRequest::new(RTM_GETROUTE, 1, family as u8, 0);
-
-    if sendto(
-      sock,
-      req.as_bytes().as_ptr() as _,
-      NetlinkRouteRequest::SIZE,
-      0,
-      &sa as *const sockaddr_nl as *const _,
-      std::mem::size_of::<sockaddr_nl>() as socklen_t,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Get socket name
-    let mut lsa: sockaddr_nl = std::mem::zeroed();
-    let mut lsa_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
-    if getsockname(sock, &mut lsa as *mut sockaddr_nl as *mut _, &mut lsa_len) < 0 {
-      return Err(io::Error::last_os_error());
-    }
-
-    let page_size = libc::sysconf(libc::_SC_PAGESIZE) as usize;
-    let mut rb = vec![0u8; page_size];
-    let mut results = SmallVec::new();
-
-    'outer: loop {
-      let mut addr: sockaddr_nl = std::mem::zeroed();
-      let mut addr_len = std::mem::size_of::<sockaddr_nl>() as socklen_t;
-
-      let nr = recvfrom(
-        sock,
-        rb.as_mut_ptr() as *mut _,
-        rb.len(),
-        0,
-        &mut addr as *mut sockaddr_nl as *mut _,
-        &mut addr_len,
-      );
-
-      if nr < 0 {
-        return Err(io::Error::last_os_error());
-      }
-
-      let mut received = &rb[..nr as usize];
-
-      let mut current_ifi = 0;
-      while received.len() >= NLMSG_HDRLEN {
-        let h = decode_nlmsghdr(received);
-        let hlen = h.nlmsg_len as usize;
-        let l = nlm_align_of(hlen);
-
-        if hlen < NLMSG_HDRLEN || l > received.len() {
-          return Err(io::Error::from_raw_os_error(EINVAL));
-        }
-
-        match h.nlmsg_type as i32 {
-          NLMSG_DONE => break 'outer,
-          NLMSG_ERROR => return Err(io::Error::from_raw_os_error(EINVAL)),
-          val if val == RTM_NEWROUTE as i32 => {
-            let rtm = &received[NLMSG_HDRLEN..];
-            let rtm_header = RtmMessageHeader::parse(rtm)?;
-
-            if rtm_header.rtm_type != RTN_BROADCAST {
-              received = &received[l..];
-              continue;
-            }
-
-            let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
-
-            while rtattr_buf.len() >= RtAttr::SIZE {
-              let attr = RtAttr {
-                len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
-              };
-
-              let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-                break;
-              }
-
-              let alen = rta_align_of(attrlen);
-              let data = &rtattr_buf[RtAttr::SIZE..attrlen];
-
-              match attr.ty {
-                RTA_DST => {
-                  match (family, rtm_header.rtm_family as i32) {
-                    (AF_INET, AF_INET) | (AF_UNSPEC, AF_INET) if data.len() >= 4 => {
-                      let addr = Ipv4Addr::from(
-                        u32::from_ne_bytes(data[..4].try_into().unwrap()).swap_bytes(),
-                      );
-
-                      let octets = addr.octets();
-                      if (octets[3] == 255 || octets == [255, 255, 255, 255])
-                        && !addr.is_loopback()
-                        && f(&IpAddr::V4(addr))
-                      {
-                        if let Some(addr) = A::try_from(current_ifi, addr.into()) {
-                          if !results.contains(&addr) {
-                            results.push(addr);
-                          }
-                        }
-                      }
-                    }
-                    // IPv6 doesn't use broadcast, so we skip it
-                    _ => {}
-                  }
-                }
-                RTA_OIF => {
-                  if data.len() >= 4 {
-                    current_ifi = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                  }
-                }
-                _ => {}
-              }
-
-              rtattr_buf = &rtattr_buf[alen..];
-            }
-          }
-          _ => {}
-        }
-
-        received = &received[l..];
-      }
-    }
-
-    Ok(results)
-  }
-}
-
 #[repr(C)]
 #[derive(Debug)]
 struct RtmMessageHeader {
@@ -953,7 +767,7 @@ impl NetlinkRouteRequest {
 
   #[inline]
   fn new(proto: u16, seq: u32, family: u8, _ifi: u32) -> Self {
-    // TODO: do not dump when ifi is not 0
+    // TODO(al8n): do not dump when ifi is not 0
     // let flags = if ifi == 0 {
     //   (libc::NLM_F_DUMP | libc::NLM_F_REQUEST) as u16
     // } else {

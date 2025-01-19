@@ -111,7 +111,7 @@ impl Interface {
     /// Returns a list of multicast, joined group addrs
     /// for a specific interface.
     pub fn multicast_addrs(&self) -> io::Result<SmallVec<IfAddr>> {
-      os::interface_multicast_ip_addresses(self.index, |_| true)
+      os::interface_multicast_addresses(self.index, |_| true)
     }
 
     /// Returns a list of multicast, joined group addrs
@@ -121,7 +121,7 @@ impl Interface {
     where
       F: FnMut(&IpAddr) -> bool,
     {
-      os::interface_multicast_ip_addresses(self.index, f)
+      os::interface_multicast_addresses(self.index, f)
     }
 
     /// Returns a list of multicast, joined group IPv4 addrs
@@ -180,12 +180,12 @@ pub fn interfaces() -> io::Result<TinyVec<Interface>> {
 /// ## Example
 ///
 /// ```rust
-/// use getifs::{interface_by_index, ifname_to_index};
+/// use getifs::{interface_by_index, local_addrs};
 ///
-/// let lo0 = ifname_to_index("lo0").unwrap();
-/// let interface = interface_by_index(lo0).unwrap();
+/// let local_addr = local_addrs().unwrap().into_iter().next().unwrap();
+/// let interface = interface_by_index(local_addr.index()).unwrap();
 ///
-/// println!("lo0: {:?}", interface);
+/// println!("{:?}", interface);
 /// ```
 pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
   os::interface_table(index).map(|v| v.into_iter().find(|ifi| ifi.index == index))
@@ -196,10 +196,12 @@ pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
 /// ## Example
 ///
 /// ```rust
-/// use getifs::interface_by_name;
+/// use getifs::{interface_by_name, ifindex_to_name, local_addrs};
 ///
-/// let interface = interface_by_name("lo0").unwrap();
-/// println!("lo0: {:?}", interface);
+/// let local_addr = local_addrs().unwrap().into_iter().next().unwrap();
+/// let name = ifindex_to_name(local_addr.index()).unwrap();
+/// let interface = interface_by_name(&name).unwrap();
+/// println!("{:?}", interface);
 /// ```
 pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
   let idx = ifname_to_index(name)?;
@@ -288,7 +290,7 @@ cfg_multicast!(
   /// }
   /// ```
   pub fn interface_multicast_addrs() -> io::Result<SmallVec<IfAddr>> {
-    os::interface_multicast_ip_addresses(0, |_| true)
+    os::interface_multicast_addresses(0, |_| true)
   }
 
   /// Returns a list of the system's multicast interface
@@ -301,7 +303,7 @@ cfg_multicast!(
   where
     F: FnMut(&IpAddr) -> bool,
   {
-    os::interface_multicast_ip_addresses(0, f)
+    os::interface_multicast_addresses(0, f)
   }
 
   /// Returns a list of the system's multicast, IPv4 interface

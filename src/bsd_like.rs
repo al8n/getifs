@@ -36,40 +36,40 @@ macro_rules! rt_generic_mod {
 
           use super::super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
-          pub(crate) fn [< rt_ $name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
-            [< rt_ $name _addrs_in >](AF_UNSPEC, |_| true)
+          pub(crate) fn [<$name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
+            [< $name _addrs_in >](AF_UNSPEC, |_| true)
           }
 
-          pub(crate) fn [< rt_ $name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
-            [< rt_ $name _addrs_in >](AF_INET, |_| true)
+          pub(crate) fn [<$name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
+            [< $name _addrs_in >](AF_INET, |_| true)
           }
 
-          pub(crate) fn [< rt_ $name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
-            [< rt_ $name _addrs_in >](AF_INET6, |_| true)
+          pub(crate) fn [<$name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
+            [< $name _addrs_in >](AF_INET6, |_| true)
           }
 
-          pub(crate) fn [< rt_ $name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
+          pub(crate) fn [<$name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
           where
             F: FnMut(&IpAddr) -> bool,
           {
-            [< rt_ $name _addrs_in >](AF_UNSPEC, f)
+            [< $name _addrs_in >](AF_UNSPEC, f)
           }
 
-          pub(crate) fn [< rt_ $name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
+          pub(crate) fn [<$name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
           where
             F: FnMut(&Ipv4Addr) -> bool,
           {
-            [< rt_ $name _addrs_in >](AF_INET, ipv4_filter_to_ip_filter(f))
+            [< $name _addrs_in >](AF_INET, ipv4_filter_to_ip_filter(f))
           }
 
-          pub(crate) fn [< rt_ $name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
+          pub(crate) fn [<$name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
           where
             F: FnMut(&Ipv6Addr) -> bool,
           {
-            [< rt_ $name _addrs_in >](AF_INET6, ipv6_filter_to_ip_filter(f))
+            [< $name _addrs_in >](AF_INET6, ipv6_filter_to_ip_filter(f))
           }
 
-          fn [< rt_ $name _addrs_in >]<A, F>(family: i32, f: F) -> io::Result<SmallVec<A>>
+          fn [<$name _addrs_in >]<A, F>(family: i32, f: F) -> io::Result<SmallVec<A>>
           where
             A: Address + Eq,
             F: FnMut(&IpAddr) -> bool,
@@ -82,31 +82,14 @@ macro_rules! rt_generic_mod {
   };
 }
 
-rt_generic_mod!(
-  local(RTF_LOCAL, RTA_DST),
-  multicast(RTF_MULTICAST, RTA_DST),
-  gateway(RTF_GATEWAY, RTA_GATEWAY),
-  host(RTF_HOST, RTA_DST),
-);
-
-cfg_apple!(
-  rt_generic_mod!(
-    global(RTF_GLOBAL, RTA_DST),
-  );
-);
+rt_generic_mod!(gateway(RTF_GATEWAY, RTA_GATEWAY),);
 
 pub(super) use local_addr::*;
-pub(super) use rt_broadcast::*;
-pub(super) use rt_net::*;
 
 #[path = "bsd_like/local_addr.rs"]
 mod local_addr;
-#[path = "bsd_like/rt_broadcast.rs"]
-mod rt_broadcast;
 #[path = "bsd_like/rt_generic.rs"]
 mod rt_generic;
-#[path = "bsd_like/rt_net.rs"]
-mod rt_net;
 
 #[cfg(any(
   target_os = "macos",
@@ -593,7 +576,7 @@ cfg_bsd_multicast!(
     })
   }
 
-  pub(super) fn interface_multicast_ip_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfAddr>>
+  pub(super) fn interface_multicast_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfAddr>>
   where
     F: FnMut(&IpAddr) -> bool,
   {

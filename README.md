@@ -1,9 +1,9 @@
 <div align="center">
-<h1>Get Interfaces</h1>
+<h1>GetIfs</h1>
 </div>
 <div align="center">
 
-Get network interfaces information (including MTU) in a fast way (say bye to `libc::getifaddrs`).
+Cross-platform network tools, a bunch of network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
 
 [<img alt="github" src="https://img.shields.io/badge/github-al8n/getifs-8da0cb?style=for-the-badge&logo=Github" height="22">][Github-url]
 <img alt="LoC" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fal8n%2F327b2a8aef9003246e45c6e47fe63937%2Fraw%2Fgetifs" height="22">
@@ -17,11 +17,15 @@ Get network interfaces information (including MTU) in a fast way (say bye to `li
 
 </div>
 
+## Introduction
+
+Cross-platform network tools, a bunch of network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
+
 ## Installation
 
 ```toml
 [dependencies]
-getifs = "0.1"
+getifs = "0.2"
 ```
 
 ## Details
@@ -29,7 +33,7 @@ getifs = "0.1"
 OS | Approach
 --- | ---
 Linux | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
-BSD-based | Uses of `sysctl` to retrieve network interfaces
+BSD-based | `sysctl`
 Windows | `GetAdaptersAddresses`
 
 ## Why a new network interfaces crate?
@@ -39,7 +43,7 @@ tries to avoid unneeded allocation and use more underlying method to achieve the
 
 ## Pedigree
 
-- The code in this crate is inspired by Golang's `interface.go`.
+- The code in this crate is inspired by Golang's `interface.go` and [HashiCorp's go-sockaddr](https://github.com/hashicorp/go-sockaddr).
 
 #### License
 

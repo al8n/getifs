@@ -43,33 +43,33 @@ macro_rules! rt_generic_mod {
             netlink::rt_generic_addrs,
           };
 
-          pub(crate) fn [< rt_ $name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
+          pub(crate) fn [< $name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
             rt_generic_addrs(AF_UNSPEC, $rta, $rtn, |_| true)
           }
 
-          pub(crate) fn [< rt_ $name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
+          pub(crate) fn [< $name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
             rt_generic_addrs(AF_INET, $rta, $rtn, |_| true)
           }
 
-          pub(crate) fn [< rt_ $name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
+          pub(crate) fn [< $name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
             rt_generic_addrs(AF_INET6, $rta, $rtn, |_| true)
           }
 
-          pub(crate) fn [< rt_ $name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
+          pub(crate) fn [< $name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
           where
             F: FnMut(&IpAddr) -> bool,
           {
             rt_generic_addrs(AF_UNSPEC, $rta, $rtn, f)
           }
 
-          pub(crate) fn [< rt_ $name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
+          pub(crate) fn [< $name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
           where
             F: FnMut(&Ipv4Addr) -> bool,
           {
             rt_generic_addrs(AF_INET, $rta, $rtn, ipv4_filter_to_ip_filter(f))
           }
 
-          pub(crate) fn [< rt_ $name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
+          pub(crate) fn [< $name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
           where
             F: FnMut(&Ipv6Addr) -> bool,
           {
@@ -81,11 +81,7 @@ macro_rules! rt_generic_mod {
   };
 }
 
-rt_generic_mod!(
-  gateway(RTA_GATEWAY, None),
-  multicast(RTA_DST, Some(libc::RTN_MULTICAST)),
-  local(RTA_DST, Some(libc::RTN_LOCAL)),
-);
+rt_generic_mod!(gateway(RTA_GATEWAY, None),);
 
 impl Interface {
   #[inline]
@@ -187,10 +183,7 @@ where
   parse_proc_net_igmp6(IGMP6_PATH, ifi, f)
 }
 
-pub(super) fn interface_multicast_ip_addresses<F>(
-  ifi: u32,
-  mut f: F,
-) -> io::Result<SmallVec<IfAddr>>
+pub(super) fn interface_multicast_addresses<F>(ifi: u32, mut f: F) -> io::Result<SmallVec<IfAddr>>
 where
   F: FnMut(&IpAddr) -> bool,
 {

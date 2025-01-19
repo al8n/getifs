@@ -12,7 +12,15 @@ use windows_sys::{
   Win32::Networking::WinSock::*,
 };
 
-use super::{IfNet, Interface, MacAddr, MAC_ADDRESS_SIZE};
+use super::{
+  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net,
+  MAC_ADDRESS_SIZE,
+};
+
+pub(super) use local_addr::*;
+
+#[path = "windows/local_addr.rs"]
+mod local_addr;
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.
@@ -154,35 +162,12 @@ pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
         None
       };
 
-      let mut addrs = SmallVec::new();
-      unsafe {
-        let mut unicast = adapter.FirstUnicastAddress;
-        while let Some(addr) = unicast.as_ref() {
-          if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            let ip = IfNet::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
-            addrs.push(ip);
-          }
-          unicast = addr.Next;
-        }
-
-        let mut anycast = adapter.FirstAnycastAddress;
-        while let Some(addr) = anycast.as_ref() {
-          if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            let prefix = if ip.is_ipv4() { 32 } else { 128 };
-            let ip = IfNet::with_prefix_len_assert(index, ip, prefix);
-            addrs.push(ip);
-          }
-          anycast = addr.Next;
-        }
-      }
-
       let interface = Interface {
         index,
         name,
         flags,
         mtu,
         mac_addr: hardware_addr,
-        addrs,
       };
 
       let ifindex = interface.index;
@@ -197,7 +182,32 @@ pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
   Ok(interfaces)
 }
 
-pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IfNet>> {
+pub(super) fn interface_ipv4_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<Ifv4Net>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_addr_table(AF_INET, idx, f)
+}
+
+pub(super) fn interface_ipv6_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<Ifv6Net>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_addr_table(AF_INET6, idx, f)
+}
+
+pub(super) fn interface_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfNet>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_addr_table(AF_UNSPEC, idx, f)
+}
+
+pub(super) fn interface_addr_table<T, F>(family: i32, ifi: u32, mut f: F) -> io::Result<SmallVec<T>>
+where
+  T: Net,
+  F: FnMut(&IpAddr) -> bool,
+{
   let info = Information::fetch()?;
   let mut addresses = SmallVec::new();
 
@@ -212,21 +222,23 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IfNet>> {
       unsafe {
         let mut unicast = adapter.FirstUnicastAddress;
         while let Some(addr) = unicast.as_ref() {
-          if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            let ip = IfNet::with_prefix_len_assert(index, ip, addr.OnLinkPrefixLength);
-            addresses.push(ip);
+          if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
+            if let Some(ip) = T::try_from_with_filter(index, ip, addr.OnLinkPrefixLength, &mut f) {
+              addresses.push(ip);
+            }
           }
           unicast = addr.Next;
         }
 
-        let mut anycast = adapter.FirstAnycastAddress;
-        while let Some(addr) = anycast.as_ref() {
-          if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            let ip = IfNet::new(index, ip);
-            addresses.push(ip);
-          }
-          anycast = addr.Next;
-        }
+        // TODO(al8n): Should we include anycast addresses?
+        // let mut anycast = adapter.FirstAnycastAddress;
+        // while let Some(addr) = anycast.as_ref() {
+        //   if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+        //     let ip = IfNet::new(index, ip);
+        //     addresses.push(ip);
+        //   }
+        //   anycast = addr.Next;
+        // }
       }
     }
   }
@@ -234,7 +246,48 @@ pub(super) fn interface_addr_table(ifi: u32) -> io::Result<SmallVec<IfNet>> {
   Ok(addresses)
 }
 
-pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<SmallVec<IpAddr>> {
+pub(super) fn interface_multicast_ipv4_addresses<F>(
+  idx: u32,
+  mut f: F,
+) -> io::Result<SmallVec<Ifv4Addr>>
+where
+  F: FnMut(&std::net::Ipv4Addr) -> bool,
+{
+  interface_multiaddr_table(AF_INET, idx, |addr| match addr {
+    IpAddr::V4(ip) => f(ip),
+    _ => false,
+  })
+}
+
+pub(super) fn interface_multicast_ipv6_addresses<F>(
+  idx: u32,
+  mut f: F,
+) -> io::Result<SmallVec<Ifv6Addr>>
+where
+  F: FnMut(&Ipv6Addr) -> bool,
+{
+  interface_multiaddr_table(AF_INET6, idx, |addr| match addr {
+    IpAddr::V6(ip) => f(ip),
+    _ => false,
+  })
+}
+
+pub(super) fn interface_multicast_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfAddr>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_multiaddr_table(AF_UNSPEC, idx, f)
+}
+
+pub(super) fn interface_multiaddr_table<T, F>(
+  family: i32,
+  ifi: u32,
+  mut f: F,
+) -> io::Result<SmallVec<T>>
+where
+  T: Address,
+  F: FnMut(&IpAddr) -> bool,
+{
   let info = Information::fetch()?;
   let mut addresses = SmallVec::new();
 
@@ -245,13 +298,14 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
       index = adapter.Ipv6IfIndex;
     }
 
-    let ifi = ifi.map_or(0, |i| i.index);
     if ifi == 0 || ifi == index {
       let mut multicast = adapter.FirstMulticastAddress;
       unsafe {
         while let Some(addr) = multicast.as_ref() {
-          if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-            addresses.push(ip);
+          if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
+            if let Some(ip) = T::try_from_with_filter(index, ip, &mut f) {
+              addresses.push(ip);
+            }
           }
           multicast = addr.Next;
         }
@@ -262,14 +316,14 @@ pub(super) fn interface_multiaddr_table(ifi: Option<&Interface>) -> io::Result<S
   Ok(addresses)
 }
 
-fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
+fn sockaddr_to_ipaddr(family: i32, sockaddr: *const SOCKADDR) -> Option<IpAddr> {
   if sockaddr.is_null() {
     return None;
   }
 
   unsafe {
-    match (*sockaddr).sa_family {
-      AF_INET => {
+    match (family, (*sockaddr).sa_family) {
+      (AF_INET, AF_INET) | (AF_UNSPEC, AF_INET) => {
         let addr = sockaddr as *const SOCKADDR_IN;
         if addr.is_null() {
           return None;
@@ -277,7 +331,7 @@ fn sockaddr_to_ipaddr(sockaddr: *const SOCKADDR) -> Option<IpAddr> {
         let bytes = (*addr).sin_addr.S_un.S_addr.to_ne_bytes();
         Some(IpAddr::V4(bytes.into()))
       }
-      AF_INET6 => {
+      (AF_INET6, AF_INET6) | (AF_UNSPEC, AF_INET6) => {
         let addr = sockaddr as *const SOCKADDR_IN6;
         if addr.is_null() {
           return None;
