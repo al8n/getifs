@@ -8,7 +8,7 @@ use smallvec_wrapper::SmallVec;
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
   interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, sockaddr_to_ipaddr,
-  IfNet, Ifv4Net, Ifv6Net, Information, Net, NO_ERROR,
+  IfNet, IfOperStatusUp, Ifv4Net, Ifv6Net, Information, Net, ERROR_INSUFFICIENT_BUFFER, NO_ERROR,
 };
 
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
@@ -16,10 +16,6 @@ use windows_sys::Win32::Networking::WinSock::*;
 
 fn best_local_addrs_in<T: Net>(family: u16) -> io::Result<SmallVec<T>> {
   let info = Information::fetch()?;
-
-  if result != ERROR_SUCCESS as u32 {
-    return Err(io::Error::last_os_error());
-  }
 
   let mut addresses = SmallVec::new();
 

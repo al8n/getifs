@@ -34,14 +34,14 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
 fn ifname_to_index_in(name: &str) -> io::Result<u32> {
   use widestring::U16CString;
   use windows_sys::Win32::NetworkManagement::IpHelper::{
-    if_nametoindex, ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex, NET_LUID,
+    if_nametoindex, ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex, NET_LUID_LH,
   };
 
   fn try_friendly_name(name: &str) -> io::Result<u32> {
     let wide_name =
       U16CString::from_str(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
-    let mut luid = NET_LUID::default();
+    let mut luid = NET_LUID_LH::default();
 
     // Convert friendly name to LUID
     let result = unsafe { ConvertInterfaceAliasToLuid(wide_name.as_ptr(), &mut luid) };

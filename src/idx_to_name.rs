@@ -40,10 +40,10 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
 #[cfg(windows)]
 fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
   use windows_sys::Win32::NetworkManagement::IpHelper::{
-    ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias, NET_LUID,
+    ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias, NET_LUID_LH,
   };
 
-  let mut luid = NET_LUID::default();
+  let mut luid = NET_LUID_LH::default();
 
   // Convert index to LUID
   let result = unsafe { ConvertInterfaceIndexToLuid(idx, &mut luid) };

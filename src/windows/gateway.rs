@@ -4,7 +4,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
 use windows_sys::Win32::Networking::WinSock::*;
 
-use super::{sockaddr_to_ipaddr, IfAddr, Ifv4Addr, Ifv6Addr};
+use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
+
+use super::{sockaddr_to_ipaddr, Address, IfAddr, Ifv4Addr, Ifv6Addr, NO_ERROR};
 
 pub(crate) fn gateway_addrs() -> io::Result<SmallVec<IfAddr>> {
   gateway_addrs_in(AF_UNSPEC, |_| true)
@@ -90,7 +92,7 @@ where
         let route = &table.Table[i as usize];
 
         // Check if route is up and has a gateway
-        if route.Route.State == MIB_IF_OPER_STATUS_OPERATIONAL as u32 {
+        if route.Route.State == IF_OPER_STATUS_OPERATIONAL as u32 {
           if let Some(gateway) = sockaddr_to_ipaddr(&route.Route.NextHop) {
             // Skip default gateway (0.0.0.0)
             if let IpAddr::V4(addr) = gateway {
@@ -119,7 +121,7 @@ where
         let route = &table.Table[i as usize];
 
         // Check if route is up and has a gateway
-        if route.Route.State == MIB_IF_OPER_STATUS_OPERATIONAL as u32 {
+        if route.Route.State == IF_OPER_STATUS_OPERATIONAL as u32 {
           if let Some(gateway) = sockaddr_to_ipaddr(&route.Route.NextHop) {
             // Skip default gateway (::)
             if let IpAddr::V6(addr) = gateway {
