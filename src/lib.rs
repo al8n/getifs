@@ -46,11 +46,7 @@ mod utils;
 mod os;
 
 #[cfg(any(
-  target_os = "macos",
-  target_os = "tvos",
-  target_os = "ios",
-  target_os = "watchos",
-  target_os = "visionos",
+  target_vendor = "apple",
   target_os = "dragonfly",
   target_os = "freebsd",
   target_os = "netbsd",

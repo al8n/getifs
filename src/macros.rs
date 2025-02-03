@@ -2,20 +2,8 @@
 macro_rules! cfg_apple {
   ($($item:item)*) => {
     $(
-      #[cfg(any(
-        target_os = "macos",
-        target_os = "tvos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
-      ))]
-      #[cfg_attr(docsrs, doc(cfg(any(
-        target_os = "macos",
-        target_os = "tvos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
-      ))))]
+      #[cfg(target_vendor = "apple")]
+      #[cfg_attr(docsrs, doc(cfg(target_vendor = "apple")))]
       $item
     )*
   }
@@ -25,13 +13,7 @@ macro_rules! cfg_apple {
 macro_rules! only_cfg_apple {
   ($($item:item)*) => {
     $(
-      #[cfg(any(
-        target_os = "macos",
-        target_os = "tvos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
-      ))]
+      #[cfg(target_vendor = "apple")]
       $item
     )*
   }
@@ -41,13 +23,7 @@ macro_rules! only_cfg_apple {
 macro_rules! only_cfg_not_apple {
   ($($item:item)*) => {
     $(
-      #[cfg(not(any(
-        target_os = "macos",
-        target_os = "tvos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
-      )))]
+      #[cfg(not(target_vendor = "apple"))]
       $item
     )*
   }
@@ -58,21 +34,13 @@ macro_rules! cfg_bsd_multicast {
   ($($item:item)*) => {
     $(
       #[cfg(any(
-        target_os = "macos",
-        target_os = "tvos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
+        target_vendor = "apple",
         target_os = "freebsd",
       ))]
       #[cfg_attr(
         docsrs,
         doc(cfg(any(
-          target_os = "macos",
-          target_os = "tvos",
-          target_os = "ios",
-          target_os = "watchos",
-          target_os = "visionos",
+          target_vendor = "apple",
           target_os = "freebsd",
         )))
       )]
@@ -85,11 +53,7 @@ macro_rules! cfg_multicast {
   ($($item:item)*) => {
     $(
       #[cfg(any(
-        target_os = "macos",
-        target_os = "tvos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
+        target_vendor = "apple",
         target_os = "freebsd",
         target_os = "linux",
         windows
@@ -97,11 +61,7 @@ macro_rules! cfg_multicast {
       #[cfg_attr(
         docsrs,
         doc(cfg(any(
-          target_os = "macos",
-          target_os = "tvos",
-          target_os = "ios",
-          target_os = "watchos",
-          target_os = "visionos",
+          target_vendor = "apple",
           target_os = "freebsd",
           target_os = "linux",
           windows

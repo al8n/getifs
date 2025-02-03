@@ -91,13 +91,7 @@ mod local_addr;
 #[path = "bsd_like/rt_generic.rs"]
 mod rt_generic;
 
-#[cfg(any(
-  target_os = "macos",
-  target_os = "tvos",
-  target_os = "ios",
-  target_os = "watchos",
-  target_os = "visionos",
-))]
+#[cfg(target_vendor = "apple")]
 const KERNAL_ALIGN: usize = 4;
 
 #[cfg(any(target_os = "dragonfly", target_os = "freebsd", target_os = "openbsd",))]
