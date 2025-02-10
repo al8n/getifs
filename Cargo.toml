@@ -1,6 +1,6 @@
 [package]
 name = "getifs"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 repository = "https://github.com/al8n/getifs"
 homepage = "https://github.com/al8n/getifs"
@@ -39,9 +39,8 @@ ipnet = "2"
 iprfc = "0.2"
 paste = "1"
 smol_str = "0.3"
-smallvec-wrapper = "0.2"
+smallvec-wrapper = "0.3"
 triomphe = "0.1"
-
 
 # serde = { version = "1", features = ["derive"], optional = true }
 

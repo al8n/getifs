@@ -22,6 +22,7 @@ pub use iprfc as rfc;
 #[doc(inline)]
 pub use iprobe as probe;
 pub use local_addrs::*;
+pub use mtu::*;
 pub use name_to_idx::ifname_to_index;
 pub use os::Flags;
 pub use private_ip_addrs::*;
@@ -36,6 +37,7 @@ mod ifaddr;
 mod ifnet;
 mod interfaces;
 mod local_addrs;
+mod mtu;
 mod name_to_idx;
 mod private_ip_addrs;
 mod public_ip_addrs;
