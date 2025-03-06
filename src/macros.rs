@@ -2,8 +2,8 @@
 macro_rules! cfg_apple {
   ($($item:item)*) => {
     $(
-      #[cfg(target_vendor = "apple")]
-      #[cfg_attr(docsrs, doc(cfg(target_vendor = "apple")))]
+      #[cfg(apple)]
+      #[cfg_attr(docsrs, doc(cfg(apple)))]
       $item
     )*
   }
@@ -13,7 +13,7 @@ macro_rules! cfg_apple {
 macro_rules! only_cfg_apple {
   ($($item:item)*) => {
     $(
-      #[cfg(target_vendor = "apple")]
+      #[cfg(apple)]
       $item
     )*
   }
@@ -23,7 +23,7 @@ macro_rules! only_cfg_apple {
 macro_rules! only_cfg_not_apple {
   ($($item:item)*) => {
     $(
-      #[cfg(not(target_vendor = "apple"))]
+      #[cfg(not(apple))]
       $item
     )*
   }
