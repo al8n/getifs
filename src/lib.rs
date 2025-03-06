@@ -43,17 +43,11 @@ mod private_ip_addrs;
 mod public_ip_addrs;
 mod utils;
 
-#[cfg(target_os = "linux")]
+#[cfg(linux_like)]
 #[path = "linux.rs"]
 mod os;
 
-#[cfg(any(
-  target_vendor = "apple",
-  target_os = "dragonfly",
-  target_os = "freebsd",
-  target_os = "netbsd",
-  target_os = "openbsd",
-))]
+#[cfg(bsd_like)]
 #[path = "bsd_like.rs"]
 mod os;
 

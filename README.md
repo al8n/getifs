@@ -25,7 +25,7 @@ A bunch of cross-platform network tools for fetching interfaces, multicast addre
 
 ```toml
 [dependencies]
-getifs = "0.2"
+getifs = "0.3"
 ```
 
 ## Examples
@@ -41,7 +41,7 @@ getifs = "0.2"
 
 OS | Approach
 --- | ---
-Linux | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
+Linux (no `libc`) | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
 BSD-like | `sysctl`
 Windows | `GetAdaptersAddresses`
 
@@ -56,7 +56,21 @@ Hence, `getifs` is here, which contain a bunch of cross-platform network tools f
 
 ## Roadmap
 
-- [ ] Support fetching routing tables (0.3.0)
+- [ ] Support fetching routing tables (0.4.0)
+
+## Benchmarks
+
+### Ubuntu 22.04 ARM64 (Parallel Desktop, 1 CPU, 8GB memory)
+
+<!-- ![Linux Benchmark Comparison](./benches/benchmark_interfaces_linux.svg) -->
+<img src="https://raw.githubusercontent.com/al8n/getifs/0.3.0/benches/benchmark_interfaces_linux.svg">
+
+### MacOS (Apple M1 Max, 32GB)
+
+<!-- ![MacOS Benchmark Comparison](./benches/benchmark_interfaces_macos.svg) -->
+
+<img src="https://raw.githubusercontent.com/al8n/getifs/0.3.0/benches/benchmark_interfaces_macos.svg">
+
 
 ## Sister crates
 

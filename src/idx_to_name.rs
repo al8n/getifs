@@ -1,5 +1,5 @@
 use smol_str::SmolStr;
-use std::{ffi::CStr, io};
+use std::io;
 
 /// Returns the name of the interface by the given index.
 ///
@@ -17,8 +17,10 @@ pub fn ifindex_to_name(idx: u32) -> io::Result<SmolStr> {
   ifindex_to_name_in(idx)
 }
 
-#[cfg(unix)]
+#[cfg(bsd_like)]
 fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
+  use std::ffi::CStr;
+
   let mut ifname = [0u8; libc::IF_NAMESIZE + 1];
   let res = unsafe { libc::if_indextoname(idx as _, ifname.as_mut_ptr() as *mut libc::c_char) };
 
@@ -34,6 +36,17 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
     .to_str()
     .map(SmolStr::new)
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(linux_like)]
+fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
+  use rustix::net::{netdevice::index_to_name, socket, AddressFamily, SocketType};
+
+  let socket_fd = socket(AddressFamily::INET, SocketType::DGRAM, None)?;
+
+  index_to_name(socket_fd, idx)
+    .map(Into::into)
+    .map_err(Into::into)
 }
 
 /// Returns the name of the interface by the given index.
