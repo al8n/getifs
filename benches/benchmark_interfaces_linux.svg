@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500">
+  <!-- Background -->
+  <rect width="800" height="500" fill="#f9f9f9"/>
+  
+  <!-- Title -->
+  <text x="400" y="40" font-family="Arial" font-size="24" text-anchor="middle" font-weight="bold">Performance Benchmark: getifs vs network_interface</text>
+  
+  <!-- Y-axis -->
+  <line x1="100" y1="400" x2="100" y2="80" stroke="#333" stroke-width="2"/>
+  
+  <!-- Y-axis label -->
+  <text x="40" y="240" font-family="Arial" font-size="16" text-anchor="middle" transform="rotate(-90, 40, 240)">Time (microseconds)</text>
+  
+  <!-- Y-axis scale markers (logarithmic scale) -->
+  <line x1="95" y1="400" x2="100" y2="400" stroke="#333" stroke-width="2"/>
+  <text x="85" y="405" font-family="Arial" font-size="12" text-anchor="end">10</text>
+  
+  <line x1="95" y1="352" x2="100" y2="352" stroke="#333" stroke-width="2"/>
+  <text x="85" y="357" font-family="Arial" font-size="12" text-anchor="end">100</text>
+  
+  <line x1="95" y1="304" x2="100" y2="304" stroke="#333" stroke-width="2"/>
+  <text x="85" y="309" font-family="Arial" font-size="12" text-anchor="end">1,000</text>
+  
+  <line x1="95" y1="256" x2="100" y2="256" stroke="#333" stroke-width="2"/>
+  <text x="85" y="261" font-family="Arial" font-size="12" text-anchor="end">10,000</text>
+  
+  <!-- X-axis -->
+  <line x1="100" y1="400" x2="750" y2="400" stroke="#333" stroke-width="2"/>
+  
+  <!-- Function Bars and Labels -->
+  <!-- interfaces -->
+  <rect x="130" y="388" width="40" height="12" fill="#4472C4"/>
+  <rect x="180" y="331" width="40" height="69" fill="#ED7D31"/>
+  <text x="175" y="420" font-family="Arial" font-size="12" text-anchor="middle">interfaces</text>
+  
+  <!-- interface_by_index/1 -->
+  <rect x="250" y="387" width="40" height="13" fill="#4472C4"/>
+  <rect x="300" y="333" width="40" height="67" fill="#ED7D31"/>
+  <text x="295" y="420" font-family="Arial" font-size="12" text-anchor="middle">interface_by_index/1</text>
+  
+  <!-- interface_by_name/lo -->
+  <rect x="370" y="387" width="40" height="13" fill="#4472C4"/>
+  <rect x="420" y="316" width="40" height="84" fill="#ED7D31"/>
+  <text x="415" y="420" font-family="Arial" font-size="12" text-anchor="middle">interface_by_name/lo</text>
+  
+  <!-- Removed interface_addrs -->
+  
+  <!-- Removed multicast bars -->
+  
+  <!-- Legend -->
+  <rect x="550" y="100" width="200" height="60" fill="white" stroke="#ccc"/>
+  <rect x="570" y="120" width="20" height="10" fill="#4472C4"/>
+  <text x="600" y="130" font-family="Arial" font-size="12">getifs</text>
+  <rect x="570" y="140" width="20" height="10" fill="#ED7D31"/>
+  <text x="600" y="150" font-family="Arial" font-size="12">network_interface</text>
+  
+  <!-- Note about scale -->
+  <text x="400" y="470" font-family="Arial" font-size="12" text-anchor="middle" font-style="italic">Note: Y-axis is logarithmic scale (μs)</text>
+  
+  <!-- Vertical grid lines (optional) -->
+  <line x1="175" y1="400" x2="175" y2="80" stroke="#ddd" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="295" y1="400" x2="295" y2="80" stroke="#ddd" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="415" y1="400" x2="415" y2="80" stroke="#ddd" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <!-- Horizontal grid lines -->
+  <line x1="100" y1="352" x2="750" y2="352" stroke="#ddd" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="100" y1="304" x2="750" y2="304" stroke="#ddd" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="100" y1="256" x2="750" y2="256" stroke="#ddd" stroke-width="1" stroke-dasharray="5,5"/>
+</svg>

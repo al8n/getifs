@@ -4,20 +4,10 @@ use std::{net::IpAddr, process::Command, thread, time::Duration};
 
 use crate::interfaces;
 
-#[cfg(any(
-  target_os = "macos",
-  target_os = "tvos",
-  target_os = "ios",
-  target_os = "watchos",
-  target_os = "visionos",
-  target_os = "dragonfly",
-  target_os = "freebsd",
-  target_os = "netbsd",
-  target_os = "openbsd",
-))]
+#[cfg(bsd_like)]
 mod bsd;
 
-#[cfg(target_os = "linux")]
+#[cfg(linux_like)]
 mod linux;
 
 struct TestInterface {
@@ -101,18 +91,12 @@ impl TestInterface {
 }
 
 #[test]
-#[cfg(all(
-  not(any(
-    target_os = "macos",
-    target_os = "tvos",
-    target_os = "ios",
-    target_os = "watchos",
-    target_os = "visionos",
-  )),
-  unix,
-))]
+#[cfg(all(not(apple), unix,))]
 fn point_to_point_interface() {
+  #[cfg(bsd_like)]
   let uid = unsafe { libc::getuid() };
+  #[cfg(linux_like)]
+  let uid = rustix::process::getuid().as_raw();
   if uid != 0 {
     return;
   }
@@ -175,7 +159,10 @@ fn test_interface_arrival_and_departure() {
     return;
   }
 
+  #[cfg(bsd_like)]
   let uid = unsafe { libc::getuid() };
+  #[cfg(linux_like)]
+  let uid = rustix::process::getuid().as_raw();
   if uid != 0 {
     return;
   }

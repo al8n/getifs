@@ -1,4 +1,4 @@
-use std::{ffi::CString, io};
+use std::io;
 
 /// Returns the index of the interface by the given name.
 ///
@@ -16,8 +16,10 @@ pub fn ifname_to_index(name: &str) -> io::Result<u32> {
   ifname_to_index_in(name)
 }
 
-#[cfg(unix)]
+#[cfg(bsd_like)]
 fn ifname_to_index_in(name: &str) -> io::Result<u32> {
+  use std::ffi::CString;
+
   // Convert to CString for C interface
   let name_cstr = CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
@@ -30,8 +32,19 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
   }
 }
 
+#[cfg(linux_like)]
+fn ifname_to_index_in(name: &str) -> io::Result<u32> {
+  use rustix::net::{netdevice::name_to_index, socket, AddressFamily, SocketType};
+
+  let socket_fd = socket(AddressFamily::INET, SocketType::DGRAM, None)?;
+
+  name_to_index(socket_fd, name).map_err(Into::into)
+}
+
 #[cfg(windows)]
 fn ifname_to_index_in(name: &str) -> io::Result<u32> {
+  use std::ffi::CString;
+
   use widestring::U16CString;
   use windows_sys::Win32::NetworkManagement::{
     IpHelper::{if_nametoindex, ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex},
