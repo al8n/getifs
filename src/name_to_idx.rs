@@ -43,6 +43,8 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
 
 #[cfg(windows)]
 fn ifname_to_index_in(name: &str) -> io::Result<u32> {
+  use std::ffi::CString;
+
   use widestring::U16CString;
   use windows_sys::Win32::NetworkManagement::{
     IpHelper::{if_nametoindex, ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex},
