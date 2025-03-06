@@ -49,11 +49,11 @@ libc = "0.2"
 
 [target.'cfg(all(any(target_os = "android", target_os = "linux")))'.dependencies]
 either = "1"
-rustix = { version = "1.0.0-prerelease.1", features = ["net", "param"] }
+rustix = { version = "1", features = ["net", "param"] }
 linux-raw-sys = { version = "0.9", features = ["if_arp", "net", "netlink"] }
 
 [target.'cfg(all(any(target_os = "android", target_os = "linux")))'.dev-dependencies]
-rustix = { version = "1.0.0-prerelease.1", features = ["net", "param", "process"] }
+rustix = { version = "1", features = ["net", "param", "process"] }
 
 
 [target.'cfg(windows)'.dependencies]
