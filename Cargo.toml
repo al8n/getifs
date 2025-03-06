@@ -1,13 +1,13 @@
 [package]
 name = "getifs"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 repository = "https://github.com/al8n/getifs"
 homepage = "https://github.com/al8n/getifs"
 documentation = "https://docs.rs/getifs"
 description = "A bunch of cross-platform network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc."
 license = "MIT OR Apache-2.0"
-rust-version = "1.57.0"
+rust-version = "1.63.0"
 keywords = ["local-ip-address", "interface", "network-interface", "mtu", "getifaddrs"]
 categories = ["network-programming"]
 
