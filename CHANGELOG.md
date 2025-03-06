@@ -1,5 +1,9 @@
 # RELEASED
 
+## 0.3.0 (March 7th, 2025)
+
+- Remove `libc` on Linux platform, implement netlink by using `rustix`
+
 ## 0.2.0 (January 19th, 2025)
 
 - Refactor `IfNet` and add `Ifv4Net`, `Ifv6Net`, `IfAddr`, `Ifv4Addr` and `Ifv6Addr`

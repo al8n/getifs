@@ -62,11 +62,11 @@ Hence, `getifs` is here, which contain a bunch of cross-platform network tools f
 
 ### Ubuntu 22.04 ARM64 (Parallel Desktop, 1 CPU, 8GB memory)
 
-<img src="https://raw.githubusercontent.com/al8n/getifs/0.3.0/benches/benchmark_interfaces_linux.svg">
+<img src="https://raw.githubusercontent.com/al8n/getifs/main/benches/benchmark_interfaces_linux.svg">
 
 ### MacOS (Apple M1 Max, 32GB)
 
-<img src="https://raw.githubusercontent.com/al8n/getifs/0.3.0/benches/benchmark_interfaces_macos.svg">
+<img src="https://raw.githubusercontent.com/al8n/getifs/main/benches/benchmark_interfaces_macos.svg">
 
 
 ## Sister crates
