@@ -1,5 +1,9 @@
 # RELEASED
 
+## 0.3.1 (March 16th, 2025)
+
+- Add `ifname_to_v6_iface`, `ifname_to_v4_iface`, and `ifname_to_iface`.
+
 ## 0.3.0 (March 7th, 2025)
 
 - Remove `libc` on Linux platform, implement netlink by using `rustix`
