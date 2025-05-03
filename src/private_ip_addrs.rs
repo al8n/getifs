@@ -73,7 +73,13 @@ pub fn private_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 ///
 /// [RFC 6890]: https://tools.ietf.org/html/rfc6890
 pub fn private_addrs() -> io::Result<SmallVec<IfNet>> {
-  os::interface_addresses(0, private_ip_filter)
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_addresses(None, private_ip_filter)
+    } else {
+      os::interface_addresses(0, private_ip_filter)
+    }
+  }
 }
 
 /// Returns all IPv4 addresses that are part of [RFC
@@ -98,9 +104,17 @@ pub fn private_ipv4_addrs_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ifv4Net>
 where
   F: FnMut(&Ipv4Addr) -> bool,
 {
-  os::interface_ipv4_addresses(0, |ip| {
-    private_ip_filter(ip) && ipv4_filter_to_ip_filter(&mut f)(ip)
-  })
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_ipv4_addresses(None, |ip| {
+        private_ip_filter(ip) && ipv4_filter_to_ip_filter(&mut f)(ip)
+      })
+    } else {
+      os::interface_ipv4_addresses(0, |ip| {
+        private_ip_filter(ip) && ipv4_filter_to_ip_filter(&mut f)(ip)
+      })
+    }
+  }
 }
 
 /// Returns all IPv6 addresses that are part of [RFC
@@ -125,9 +139,17 @@ pub fn private_ipv6_addrs_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ifv6Net>
 where
   F: FnMut(&Ipv6Addr) -> bool,
 {
-  os::interface_ipv6_addresses(0, |ip| {
-    private_ip_filter(ip) && ipv6_filter_to_ip_filter(&mut f)(ip)
-  })
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_ipv6_addresses(None, |ip| {
+        private_ip_filter(ip) && ipv6_filter_to_ip_filter(&mut f)(ip)
+      })
+    } else {
+      os::interface_ipv6_addresses(0, |ip| {
+        private_ip_filter(ip) && ipv6_filter_to_ip_filter(&mut f)(ip)
+      })
+    }
+  }
 }
 
 /// Returns all IP addresses that are part of [RFC
@@ -153,7 +175,13 @@ pub fn private_addrs_by_filter<F>(mut f: F) -> io::Result<SmallVec<IfNet>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  os::interface_addresses(0, |ip| private_ip_filter(ip) && f(ip))
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_addresses(None, |ip| private_ip_filter(ip) && f(ip))
+    } else {
+      os::interface_addresses(0, |ip| private_ip_filter(ip) && f(ip))
+    }
+  }
 }
 
 #[inline]
