@@ -58,7 +58,7 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
     Ndis::NET_LUID_LH,
   };
 
-  let mut luid = unsafe { NET_LUID_LH { Value: 0 } };
+  let mut luid = NET_LUID_LH { Value: 0 };
 
   // Convert index to LUID
   let result = unsafe { ConvertInterfaceIndexToLuid(idx, &mut luid) };
