@@ -32,6 +32,7 @@ default = []
 
 [dependencies]
 bitflags = "2"
+cfg-if = "1"
 either = "1"
 hardware-address = "0.1"
 iprobe = "0.1"

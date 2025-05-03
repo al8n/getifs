@@ -57,7 +57,13 @@ impl Interface {
   /// interface.
   #[inline]
   pub fn addrs(&self) -> io::Result<SmallVec<IfNet>> {
-    os::interface_addresses(self.index, |_| true)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_addresses(Some(self.index), |_| true)
+      } else {
+        os::interface_addresses(self.index, |_| true)
+      }
+    }
   }
 
   /// Returns a list of unicast interface addrs for a specific
@@ -77,11 +83,17 @@ impl Interface {
   /// }
   /// ```
   #[inline]
-  pub fn addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<Ifv4Net>>
+  pub fn addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<IfNet>>
   where
     F: FnMut(&IpAddr) -> bool,
   {
-    os::interface_ipv4_addresses(self.index, f)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_addresses(Some(self.index), f)
+      } else {
+        os::interface_addresses(self.index, f)
+      }
+    }
   }
 
   /// Returns a list of unicast, IPv4 interface addrs for a specific
@@ -102,7 +114,13 @@ impl Interface {
   /// ```
   #[inline]
   pub fn ipv4_addrs(&self) -> io::Result<SmallVec<Ifv4Net>> {
-    os::interface_ipv4_addresses(self.index, |_| true)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_ipv4_addresses(Some(self.index), |_| true)
+      } else {
+        os::interface_ipv4_addresses(self.index, |_| true)
+      }
+    }
   }
 
   /// Returns a list of unicast, IPv4 interface addrs for a specific
@@ -129,7 +147,13 @@ impl Interface {
   where
     F: FnMut(&Ipv4Addr) -> bool,
   {
-    os::interface_ipv4_addresses(self.index, ipv4_filter_to_ip_filter(f))
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_ipv4_addresses(Some(self.index), ipv4_filter_to_ip_filter(f))
+      } else {
+        os::interface_ipv4_addresses(self.index, ipv4_filter_to_ip_filter(f))
+      }
+    }
   }
 
   /// Returns a list of unicast, IPv6 interface addrs for a specific
@@ -150,7 +174,13 @@ impl Interface {
   /// ```
   #[inline]
   pub fn ipv6_addrs(&self) -> io::Result<SmallVec<Ifv6Net>> {
-    os::interface_ipv6_addresses(self.index, |_| true)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_ipv6_addresses(Some(self.index), |_| true)
+      } else {
+        os::interface_ipv6_addresses(self.index, |_| true)
+      }
+    }
   }
 
   /// Returns a list of unicast, IPv6 interface addrs for a specific
@@ -177,7 +207,13 @@ impl Interface {
   where
     F: FnMut(&Ipv6Addr) -> bool,
   {
-    os::interface_ipv6_addresses(self.index, ipv6_filter_to_ip_filter(f))
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_ipv6_addresses(Some(self.index), ipv6_filter_to_ip_filter(f))
+      } else {
+        os::interface_ipv6_addresses(self.index, ipv6_filter_to_ip_filter(f))
+      }
+    }
   }
 
   cfg_multicast!(
@@ -198,7 +234,13 @@ impl Interface {
     /// }
     /// ```
     pub fn multicast_addrs(&self) -> io::Result<SmallVec<IfAddr>> {
-      os::interface_multicast_addresses(self.index, |_| true)
+      cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+          os::interface_multicast_addresses(Some(self.index), |_| true)
+        } else {
+          os::interface_multicast_addresses(self.index, |_| true)
+        }
+      }
     }
 
     /// Returns a list of multicast, joined group addrs
@@ -224,7 +266,13 @@ impl Interface {
     where
       F: FnMut(&IpAddr) -> bool,
     {
-      os::interface_multicast_addresses(self.index, f)
+      cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+          os::interface_multicast_addresses(Some(self.index), f)
+        } else {
+          os::interface_multicast_addresses(self.index, f)
+        }
+      }
     }
 
     /// Returns a list of multicast, joined group IPv4 addrs
@@ -244,7 +292,13 @@ impl Interface {
     /// }
     /// ```
     pub fn ipv4_multicast_addrs(&self) -> io::Result<SmallVec<Ifv4Addr>> {
-      os::interface_multicast_ipv4_addresses(self.index, |_| true)
+      cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+          os::interface_multicast_ipv4_addresses(Some(self.index), |_| true)
+        } else {
+          os::interface_multicast_ipv4_addresses(self.index, |_| true)
+        }
+      }
     }
 
     /// Returns a list of multicast, joined group IPv4 addrs
@@ -270,7 +324,13 @@ impl Interface {
     where
       F: FnMut(&Ipv4Addr) -> bool,
     {
-      os::interface_multicast_ipv4_addresses(self.index, f)
+      cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+          os::interface_multicast_ipv4_addresses(Some(self.index), f)
+        } else {
+          os::interface_multicast_ipv4_addresses(self.index, f)
+        }
+      }
     }
 
     /// Returns a list of multicast, joined group IPv6 addrs
@@ -290,7 +350,13 @@ impl Interface {
     /// }
     /// ```
     pub fn ipv6_multicast_addrs(&self) -> io::Result<SmallVec<Ifv6Addr>> {
-      os::interface_multicast_ipv6_addresses(self.index, |_| true)
+      cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+          os::interface_multicast_ipv6_addresses(Some(self.index), |_| true)
+        } else {
+          os::interface_multicast_ipv6_addresses(self.index, |_| true)
+        }
+      }
     }
 
     /// Returns a list of multicast, joined group IPv6 addrs
@@ -316,7 +382,13 @@ impl Interface {
     where
       F: FnMut(&Ipv6Addr) -> bool,
     {
-      os::interface_multicast_ipv6_addresses(self.index, f)
+      cfg_if::cfg_if! {
+        if #[cfg(windows)] {
+          os::interface_multicast_ipv6_addresses(Some(self.index), f)
+        } else {
+          os::interface_multicast_ipv6_addresses(self.index, f)
+        }
+      }
     }
   );
 }
@@ -335,7 +407,13 @@ impl Interface {
 /// }
 /// ```
 pub fn interfaces() -> io::Result<TinyVec<Interface>> {
-  os::interface_table(0)
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_table(None)
+    } else {
+      os::interface_table(0)
+    }
+  }
 }
 
 /// Returns the interface specified by index.
@@ -351,7 +429,13 @@ pub fn interfaces() -> io::Result<TinyVec<Interface>> {
 /// println!("{:?}", interface);
 /// ```
 pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
-  os::interface_table(index).map(|v| v.into_iter().find(|ifi| ifi.index == index))
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_table(Some(index)).map(|v| v.into_iter().find(|ifi| ifi.index == index))
+    } else {
+      os::interface_table(index).map(|v| v.into_iter().find(|ifi| ifi.index == index))
+    }
+  }
 }
 
 /// Returns the interface specified by name.
@@ -368,7 +452,13 @@ pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
 /// ```
 pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
   let idx = ifname_to_index(name)?;
-  os::interface_table(idx).map(|v| v.into_iter().find(|ifi| ifi.name == name))
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_table(Some(idx)).map(|v| v.into_iter().find(|ifi| ifi.index == idx))
+    } else {
+      os::interface_table(idx).map(|v| v.into_iter().find(|ifi| ifi.name == name))
+    }
+  }
 }
 
 /// Returns a list of the system's unicast interface
@@ -389,7 +479,13 @@ pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
 /// }
 /// ```
 pub fn interface_addrs() -> io::Result<SmallVec<IfNet>> {
-  os::interface_addresses(0, |_| true)
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_addresses(None, |_| true)
+    } else {
+      os::interface_addresses(0, |_| true)
+    }
+  }
 }
 
 /// Returns a list of the system's unicast, IPv4 interface
@@ -410,7 +506,13 @@ pub fn interface_addrs() -> io::Result<SmallVec<IfNet>> {
 /// }
 /// ```
 pub fn interface_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
-  os::interface_ipv4_addresses(0, |_| true)
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_ipv4_addresses(None, |_| true)
+    } else {
+      os::interface_ipv4_addresses(0, |_| true)
+    }
+  }
 }
 
 /// Returns a list of the system's unicast, IPv6 interface
@@ -431,7 +533,13 @@ pub fn interface_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 /// }
 /// ```
 pub fn interface_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
-  os::interface_ipv6_addresses(0, |_| true)
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_ipv6_addresses(None, |_| true)
+    } else {
+      os::interface_ipv6_addresses(0, |_| true)
+    }
+  }
 }
 
 /// Returns a list of the system's unicast interface
@@ -455,7 +563,13 @@ pub fn interface_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfNet>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  os::interface_addresses(0, f)
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_addresses(None, f)
+    } else {
+      os::interface_addresses(0, f)
+    }
+  }
 }
 
 /// Returns a list of the system's unicast, IPv4 interface
@@ -479,7 +593,13 @@ pub fn interface_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Net>>
 where
   F: FnMut(&Ipv4Addr) -> bool,
 {
-  os::interface_ipv4_addresses(0, ipv4_filter_to_ip_filter(f))
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_ipv4_addresses(None, ipv4_filter_to_ip_filter(f))
+    } else {
+      os::interface_ipv4_addresses(0, ipv4_filter_to_ip_filter(f))
+    }
+  }
 }
 
 /// Returns a list of the system's unicast, IPv6 interface
@@ -505,7 +625,13 @@ pub fn interface_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Net>>
 where
   F: FnMut(&Ipv6Addr) -> bool,
 {
-  os::interface_ipv6_addresses(0, ipv6_filter_to_ip_filter(f))
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_ipv6_addresses(None, ipv6_filter_to_ip_filter(f))
+    } else {
+      os::interface_ipv6_addresses(0, ipv6_filter_to_ip_filter(f))
+    }
+  }
 }
 
 cfg_multicast!(
@@ -527,7 +653,13 @@ cfg_multicast!(
   /// }
   /// ```
   pub fn interface_multicast_addrs() -> io::Result<SmallVec<IfAddr>> {
-    os::interface_multicast_addresses(0, |_| true)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_multicast_addresses(None, |_| true)
+      } else {
+        os::interface_multicast_addresses(0, |_| true)
+      }
+    }
   }
 
   /// Returns a list of the system's multicast interface
@@ -550,7 +682,13 @@ cfg_multicast!(
   where
     F: FnMut(&IpAddr) -> bool,
   {
-    os::interface_multicast_addresses(0, f)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_multicast_addresses(None, f)
+      } else {
+        os::interface_multicast_addresses(0, f)
+      }
+    }
   }
 
   /// Returns a list of the system's multicast, IPv4 interface
@@ -571,7 +709,13 @@ cfg_multicast!(
   /// }
   /// ```
   pub fn interface_multicast_ipv4_addrs() -> io::Result<SmallVec<Ifv4Addr>> {
-    os::interface_multicast_ipv4_addresses(0, |_| true)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_multicast_ipv4_addresses(None, |_| true)
+      } else {
+        os::interface_multicast_ipv4_addresses(0, |_| true)
+      }
+    }
   }
 
   /// Returns a list of the system's multicast, IPv4 interface
@@ -594,7 +738,13 @@ cfg_multicast!(
   where
     F: FnMut(&Ipv4Addr) -> bool,
   {
-    os::interface_multicast_ipv4_addresses(0, f)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_multicast_ipv4_addresses(None, f)
+      } else {
+        os::interface_multicast_ipv4_addresses(0, f)
+      }
+    }
   }
 
   /// Returns a list of the system's multicast, IPv6 interface
@@ -615,7 +765,13 @@ cfg_multicast!(
   /// }
   /// ```
   pub fn interface_multicast_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
-    os::interface_multicast_ipv6_addresses(0, |_| true)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_multicast_ipv6_addresses(None, |_| true)
+      } else {
+        os::interface_multicast_ipv6_addresses(0, |_| true)
+      }
+    }
   }
 
   /// Returns a list of the system's multicast, IPv6 interface
@@ -638,6 +794,12 @@ cfg_multicast!(
   where
     F: FnMut(&Ipv6Addr) -> bool,
   {
-    os::interface_multicast_ipv6_addresses(0, f)
+    cfg_if::cfg_if! {
+      if #[cfg(windows)] {
+        os::interface_multicast_ipv6_addresses(None, f)
+      } else {
+        os::interface_multicast_ipv6_addresses(0, f)
+      }
+    }
   }
 );
