@@ -92,15 +92,15 @@ pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
 }
 
 pub(crate) fn local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
-  interface_ipv4_addresses(0, local_ip_filter)
+  interface_ipv4_addresses(None, local_ip_filter)
 }
 
 pub(crate) fn local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
-  interface_ipv6_addresses(0, local_ip_filter)
+  interface_ipv6_addresses(None, local_ip_filter)
 }
 
 pub(crate) fn local_addrs() -> io::Result<SmallVec<IfNet>> {
-  interface_addresses(0, local_ip_filter)
+  interface_addresses(None, local_ip_filter)
 }
 
 pub(crate) fn local_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Net>>
@@ -108,7 +108,7 @@ where
   F: FnMut(&Ipv4Addr) -> bool,
 {
   let mut f = ipv4_filter_to_ip_filter(f);
-  interface_ipv4_addresses(0, move |addr| f(addr) && local_ip_filter(addr))
+  interface_ipv4_addresses(None, move |addr| f(addr) && local_ip_filter(addr))
 }
 
 pub(crate) fn local_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Net>>
@@ -116,12 +116,12 @@ where
   F: FnMut(&Ipv6Addr) -> bool,
 {
   let mut f = ipv6_filter_to_ip_filter(f);
-  interface_ipv6_addresses(0, move |addr| f(addr) && local_ip_filter(addr))
+  interface_ipv6_addresses(None, move |addr| f(addr) && local_ip_filter(addr))
 }
 
 pub(crate) fn local_addrs_by_filter<F>(mut f: F) -> io::Result<SmallVec<IfNet>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  interface_addresses(0, |addr| f(addr) && local_ip_filter(addr))
+  interface_addresses(None, |addr| f(addr) && local_ip_filter(addr))
 }

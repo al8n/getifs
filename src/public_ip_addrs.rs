@@ -29,7 +29,13 @@ use super::{os, IfNet, Ifv4Net, Ifv6Net};
 ///
 /// [RFC 6890]: https://tools.ietf.org/html/rfc6890
 pub fn public_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
-  os::interface_ipv4_addresses(0, public_ip_filter)
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_ipv4_addresses(None, public_ip_filter)
+    } else {
+      os::interface_ipv4_addresses(0, public_ip_filter)
+    }
+  }
 }
 
 /// Returns all IPv6 addresses that are NOT part of [RFC
@@ -51,7 +57,13 @@ pub fn public_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 ///
 /// [RFC 6890]: https://tools.ietf.org/html/rfc6890
 pub fn public_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
-  os::interface_ipv6_addresses(0, public_ip_filter)
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_ipv6_addresses(None, public_ip_filter)
+    } else {
+      os::interface_ipv6_addresses(0, public_ip_filter)
+    }
+  }
 }
 
 /// Returns all IP addresses that are NOT part of [RFC
