@@ -45,6 +45,7 @@ bitflags::bitflags! {
 }
 
 struct Information {
+  #[allow(dead_code)]
   buffer: Vec<u8>,
   adapters: SmallVec<IP_ADAPTER_ADDRESSES_LH>,
 }
@@ -174,9 +175,7 @@ pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>
           mac_addr: hardware_addr,
         };
 
-        let ifindex = interface.index;
         interfaces.push(interface);
-
         break;
       }
     } else {
