@@ -176,7 +176,7 @@ pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
       let ifindex = interface.index;
       interfaces.push(interface);
 
-      if idx == ifindex {
+      if idx == ifindex && idx != 0 {
         break;
       }
     }
