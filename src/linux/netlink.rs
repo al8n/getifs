@@ -170,10 +170,14 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
                   4 if info_hdr.ty == ARPHRD_IPGRE as u16
                     || info_hdr.ty == ARPHRD_TUNNEL as u16 =>
                   {
-                    continue
+                    info_data = &info_data[alen..];
+                    continue;
                   }
                   // ipv6
-                  16 if info_hdr.ty == ARPHRD_TUNNEL6 as u16 || info_hdr.ty == 823 => continue, // 823 is any over GRE over IPv6 tunneling
+                  16 if info_hdr.ty == ARPHRD_TUNNEL6 as u16 || info_hdr.ty == 823 => {
+                    info_data = &info_data[alen..];
+                    continue;
+                  } // 823 is any over GRE over IPv6 tunneling
                   _ => {
                     let mut nonzero = false;
                     for b in vbuf {
