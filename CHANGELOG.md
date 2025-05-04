@@ -1,5 +1,13 @@
 # RELEASED
 
+## 0.3.3 (May 4th, 2025)
+
+- Fix [#8](https://github.com/al8n/getifs/issues/8)
+
+## 0.3.2 (May 3rd, 2025)
+
+- Fix [#6](https://github.com/al8n/getifs/issues/6)
+
 ## 0.3.1 (March 16th, 2025)
 
 - Add `ifname_to_v6_iface`, `ifname_to_v4_iface`, and `ifname_to_iface`.
