@@ -31,5 +31,5 @@ fn main() {
 }
 
 fn use_feature(feature: &str) {
-  println!("cargo:rustc-cfg={}", feature);
+  println!("cargo:rustc-cfg={feature}");
 }

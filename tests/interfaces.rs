@@ -200,7 +200,7 @@ fn if_addrs() {
   let stats = IfStats::stats(&ift);
   let ifat = interface_addrs().unwrap();
   for ifa in &ifat {
-    println!("{:?}", ifa);
+    println!("{ifa:?}");
   }
 
   let uni_stats = validate_interface_unicast_addrs(&ifat).unwrap();
@@ -230,7 +230,7 @@ fn if_unicast_addrs() {
 fn gw_addrs() {
   let addrs = gateway_addrs().unwrap();
   for addr in addrs {
-    println!("Gateway {}", addr);
+    println!("Gateway {addr}");
   }
 }
 
@@ -238,7 +238,7 @@ fn gw_addrs() {
 fn lc_addrs() {
   let addrs = local_addrs().unwrap();
   for addr in addrs {
-    println!("Local {}", addr);
+    println!("Local {addr}");
   }
 }
 

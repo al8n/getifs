@@ -54,19 +54,19 @@ where
     let mut table_v6 = std::ptr::null_mut();
 
     // Initialize the tables based on the requested address family
-    if family == AF_INET || family == AF_UNSPEC {
-      if GetIpForwardTable2(AF_INET as u16, &mut table_v4) != NO_ERROR {
-        return Err(io::Error::last_os_error());
-      }
+    if (family == AF_INET || family == AF_UNSPEC)
+      && GetIpForwardTable2(AF_INET as u16, &mut table_v4) != NO_ERROR
+    {
+      return Err(io::Error::last_os_error());
     }
 
-    if family == AF_INET6 || family == AF_UNSPEC {
-      if GetIpForwardTable2(AF_INET6 as u16, &mut table_v6) != NO_ERROR {
-        if !table_v4.is_null() {
-          FreeMibTable(table_v4 as _);
-        }
-        return Err(io::Error::last_os_error());
+    if (family == AF_INET6 || family == AF_UNSPEC)
+      && GetIpForwardTable2(AF_INET6 as u16, &mut table_v6) != NO_ERROR
+    {
+      if !table_v4.is_null() {
+        FreeMibTable(table_v4 as _);
       }
+      return Err(io::Error::last_os_error());
     }
 
     // Cleanup guard using defer pattern
@@ -96,7 +96,7 @@ where
       };
       for route in rows.iter() {
         // Check if route is up and has a gateway
-        if route.ValidLifetime > 0 && route.Loopback == 0 {
+        if route.ValidLifetime > 0 && !route.Loopback {
           if let Some(gateway) =
             sockaddr_to_ipaddr(family, &route.NextHop as *const _ as *const SOCKADDR)
           {
@@ -131,7 +131,7 @@ where
       };
       for route in rows.iter() {
         // Check if route is up and has a gateway
-        if route.ValidLifetime > 0 && route.Loopback == 0 {
+        if route.ValidLifetime > 0 && !route.Loopback {
           if let Some(gateway) =
             sockaddr_to_ipaddr(family, &route.NextHop as *const _ as *const SOCKADDR)
           {

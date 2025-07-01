@@ -5,7 +5,6 @@ use std::{
 
 use smallvec_wrapper::{SmallVec, TinyVec};
 use windows_sys::{
-  core::*,
   Win32::Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
   Win32::NetworkManagement::{IpHelper::*, Ndis::*},
   Win32::Networking::WinSock::*,
