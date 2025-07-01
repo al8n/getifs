@@ -11,7 +11,7 @@ impl TestInterface {
 
     #[cfg(not(target_os = "openbsd"))]
     {
-      self.name = format!("vlan{}", vid);
+      self.name = format!("vlan{vid}");
     }
 
     let ifconfig =
@@ -29,7 +29,7 @@ impl TestInterface {
   }
 
   pub fn set_point_to_point(&mut self, suffix: i32) -> io::Result<()> {
-    self.name = format!("gif{}", suffix);
+    self.name = format!("gif{suffix}");
 
     let ifconfig =
       which::which("ifconfig").map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;

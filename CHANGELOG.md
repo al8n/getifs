@@ -1,5 +1,9 @@
 # RELEASED
 
+## 0.3.4 (Jul 1st, 2025)
+
+- Bump up versions
+
 ## 0.3.3 (May 4th, 2025)
 
 - Fix [#8](https://github.com/al8n/getifs/issues/8)

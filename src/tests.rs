@@ -35,7 +35,7 @@ impl TestInterface {
       if !status.success() {
         return Err(std::io::Error::new(
           std::io::ErrorKind::Other,
-          format!("command failed: {:?}", cmd),
+          format!("command failed: {cmd:?}"),
         ));
       }
       match cmd.output() {
@@ -43,7 +43,7 @@ impl TestInterface {
           if !output.status.success() {
             return Err(std::io::Error::new(
               std::io::ErrorKind::Other,
-              format!("command failed: {:?}", cmd),
+              format!("command failed: {cmd:?}"),
             ));
           }
         }
@@ -65,7 +65,7 @@ impl TestInterface {
       if !status.success() {
         return Err(std::io::Error::new(
           std::io::ErrorKind::Other,
-          format!("command failed: {:?}", cmd),
+          format!("command failed: {cmd:?}"),
         ));
       }
       match cmd.output() {
@@ -73,7 +73,7 @@ impl TestInterface {
           if !output.status.success() {
             return Err(std::io::Error::new(
               std::io::ErrorKind::Other,
-              format!("command failed: {:?}", cmd),
+              format!("command failed: {cmd:?}"),
             ));
           }
         }
@@ -177,7 +177,7 @@ fn test_interface_arrival_and_departure() {
     let mut ti = TestInterface::new(local, remote);
 
     if let Err(e) = ti.set_broadcast(*vid) {
-      println!("test requires external command: {}", e);
+      println!("test requires external command: {e}");
       return;
     }
 
@@ -194,10 +194,10 @@ fn test_interface_arrival_and_departure() {
 
     if ift2.len() <= ift1.len() {
       for ifi in &ift1 {
-        println!("before: {:?}", ifi);
+        println!("before: {ifi:?}");
       }
       for ifi in &ift2 {
-        println!("after: {:?}", ifi);
+        println!("after: {ifi:?}");
       }
       ti.teardown().unwrap();
       panic!("got {}; want gt {}", ift2.len(), ift1.len());
@@ -213,7 +213,7 @@ fn test_interface_arrival_and_departure() {
         if let IpAddr::V4(addr_ip) = addr.addr() {
           if ip == IpAddr::V4(addr_ip) {
             ti.teardown().unwrap();
-            panic!("got {:?}", addr);
+            panic!("got {addr:?}");
           }
         }
       }
@@ -225,10 +225,10 @@ fn test_interface_arrival_and_departure() {
     let ift3 = interfaces().unwrap();
     if ift3.len() >= ift2.len() {
       for ifi in &ift2 {
-        println!("before: {:?}", ifi);
+        println!("before: {ifi:?}");
       }
       for ifi in &ift3 {
-        println!("after: {:?}", ifi);
+        println!("after: {ifi:?}");
       }
       panic!("got {}; want lt {}", ift3.len(), ift2.len());
     }

@@ -155,7 +155,7 @@ mod tests {
     assert_eq!(addr.index(), 1);
     assert_eq!(addr.addr(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
     assert!(addr.name().is_ok());
-    println!("{}", addr);
+    println!("{addr}");
 
     let addr = IfAddr::new(1, IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)));
     assert_eq!(addr.index(), 1);
@@ -164,6 +164,6 @@ mod tests {
       IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1))
     );
     assert!(addr.name().is_ok());
-    println!("{}", addr);
+    println!("{addr}");
   }
 }
