@@ -62,7 +62,7 @@ windows-sys = { version = "0.60", features = ["Win32_Networking_WinSock", "Win32
 widestring = "1"
 
 [dev-dependencies]
-criterion = "0.6"
+criterion = "0.7"
 network-interface = "2"
 local-ip-address = "0.6"
 which = "8"
