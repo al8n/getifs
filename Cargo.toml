@@ -58,7 +58,7 @@ rustix = { version = "1", features = ["net", "param", "process"] }
 
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = ["Win32_Networking_WinSock", "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
+windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32_NetworkManagement", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
 widestring = "1"
 
 [dev-dependencies]
