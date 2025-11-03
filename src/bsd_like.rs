@@ -208,7 +208,7 @@ fn parse(mut b: &[u8]) -> io::Result<(SmolStr, Option<MacAddr>)> {
   };
 
   let addr = if alen == MAC_ADDRESS_SIZE {
-    Some(MacAddr::new(data[..alen].try_into().unwrap()))
+    Some(MacAddr::from_raw(data[..alen].try_into().unwrap()))
   } else {
     None
   };

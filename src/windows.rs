@@ -161,7 +161,7 @@ pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>
           let max_addr_len = (adapter.PhysicalAddressLength as usize).min(MAC_ADDRESS_SIZE);
           let addr = &adapter.PhysicalAddress[..max_addr_len];
           buf[..max_addr_len].copy_from_slice(addr);
-          Some(MacAddr::new(buf))
+          Some(MacAddr::from_raw(buf))
         } else {
           None
         };
@@ -226,7 +226,7 @@ pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>
         let max_addr_len = (adapter.PhysicalAddressLength as usize).min(MAC_ADDRESS_SIZE);
         let addr = &adapter.PhysicalAddress[..max_addr_len];
         buf[..max_addr_len].copy_from_slice(addr);
-        Some(MacAddr::new(buf))
+        Some(MacAddr::from_raw(buf))
       } else {
         None
       };
