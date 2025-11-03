@@ -26,7 +26,7 @@ A high-performance, cross-platform Rust library providing comprehensive network 
 
 ```toml
 [dependencies]
-getifs = "0.3"
+getifs = "0.4"
 ```
 
 ## Features
@@ -103,7 +103,7 @@ Existing network interface crates have limitations:
 
 ## Roadmap
 
-- [ ] Support fetching routing tables (0.4.0)
+- [ ] Support fetching routing tables
 
 ## Benchmarks
 
