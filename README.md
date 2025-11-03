@@ -44,7 +44,7 @@ getifs = "0.3"
 use getifs::{interfaces, local_addrs, gateway_addrs};
 
 // Get all network interfaces
-let interfaces = interfaces()?;
+let interfaces = interfaces().unwrap();
 for interface in interfaces {
     println!("Interface: {} (index: {})", interface.name(), interface.index());
     println!("  MTU: {}", interface.mtu());
@@ -52,13 +52,13 @@ for interface in interfaces {
 }
 
 // Get local IP addresses
-let local_ips = local_addrs()?;
+let local_ips = local_addrs().unwrap();
 for ip in local_ips {
     println!("Local IP: {}", ip);
 }
 
 // Get gateway addresses
-let gateways = gateway_addrs()?;
+let gateways = gateway_addrs().unwrap();
 for gateway in gateways {
     println!("Gateway: {}", gateway);
 }
@@ -194,26 +194,10 @@ All benchmarks are run with [Criterion.rs](https://github.com/bheisler/criterion
 - **Optimized data structures**: Uses `SmallVec` and `SmolStr` to avoid heap allocations for common cases
 
 **Platform Performance Notes:**
+
 - **macOS**: Shows the largest speedups (16-73x) due to efficient sysctl implementation
 - **Linux**: Moderate speedups (2-3x) from direct netlink communication vs libc
 - **Windows**: Similar performance to alternatives due to `GetAdaptersAddresses` API overhead (~1ms baseline for all implementations)
-
-### Previous Benchmark Visualizations
-
-<details>
-<summary>Ubuntu 22.04 ARM64 (Parallel Desktop, 1 CPU, 8GB memory)</summary>
-
-<img src="https://raw.githubusercontent.com/al8n/getifs/main/benches/benchmark_interfaces_linux.svg">
-
-</details>
-
-<details>
-<summary>MacOS (Apple M1 Max, 32GB) - Legacy Visualization</summary>
-
-<img src="https://raw.githubusercontent.com/al8n/getifs/main/benches/benchmark_interfaces_macos.svg">
-
-</details>
-
 
 ## Sister crates
 
