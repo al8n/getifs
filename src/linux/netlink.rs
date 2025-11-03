@@ -190,7 +190,7 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
                       let mut data = [0; MAC_ADDRESS_SIZE];
                       let len = vbuf.len().min(MAC_ADDRESS_SIZE);
                       data[..len].copy_from_slice(&vbuf[..len]);
-                      interface.mac_addr = Some(MacAddr::new(data));
+                      interface.mac_addr = Some(MacAddr::from_raw(data));
                     }
                   }
                 },
