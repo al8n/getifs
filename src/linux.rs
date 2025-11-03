@@ -247,7 +247,7 @@ where
           let src = fields[0];
           let mut b = [0u8; 4];
           for i in (0..src.len()).step_by(2) {
-            b[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
+            b[i / 2] = xtoi2(&src.as_bytes()[i..i + 2], 0).unwrap_or(0);
           }
 
           b.reverse();
@@ -295,7 +295,7 @@ where
       let src = fields[2];
       let mut data = [0u8; 16];
       while i + 1 < src.len() {
-        data[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
+        data[i / 2] = xtoi2(&src.as_bytes()[i..i + 2], 0).unwrap_or(0);
         i += 2;
       }
 
