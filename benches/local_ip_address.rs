@@ -33,11 +33,15 @@ fn bench_local_ip_address_local_ipv6(c: &mut Criterion) {
 }
 
 criterion_group!(
-  benches,
+  getifs_benches,
   bench_getifs_local_ipv4,
   bench_getifs_local_ipv6,
+);
+
+criterion_group!(
+  comparison_benches,
   bench_local_ip_address_local_ipv4,
   bench_local_ip_address_local_ipv6,
 );
 
-criterion_main!(benches);
+criterion_main!(getifs_benches, comparison_benches);
