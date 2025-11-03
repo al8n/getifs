@@ -3,7 +3,7 @@ use getifs::SmolStr;
 use network_interface::NetworkInterfaceConfig;
 
 fn loopback_interface() -> Option<getifs::Interface> {
-  let ift = getifs::interfaces().unwrap();
+  let ift = getifs::interfaces().ok()?;
   ift
     .iter()
     .find(|ifi| {
@@ -110,15 +110,19 @@ fn bench_network_interface_interface_by_name(c: &mut Criterion) {
 }
 
 criterion_group!(
-  benches,
+  getifs_benches,
   bench_getifs_interfaces,
   bench_getifs_interface_by_index,
   bench_getifs_interface_by_name,
   bench_getifs_interface_addrs,
   bench_getifs_interfaces_and_multicast_addrs,
+);
+
+criterion_group!(
+  comparison_benches,
   bench_network_interface_interfaces,
   bench_network_interface_interface_by_index,
   bench_network_interface_interface_by_name,
 );
 
-criterion_main!(benches);
+criterion_main!(getifs_benches, comparison_benches);

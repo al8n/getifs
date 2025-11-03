@@ -1,0 +1,205 @@
+name: Benchmarks
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'benches/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/benchmark.yml'
+  pull_request:
+    paths:
+      - 'benches/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/benchmark.yml'
+  workflow_dispatch:
+  schedule:
+    # Run benchmarks monthly on the 1st at 00:00 UTC
+    - cron: '0 0 1 * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: benchmark
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+
+      - name: Cache cargo build and registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bench-
+
+      - name: Install Criterion
+        run: cargo install cargo-criterion || true
+
+      - name: Run benchmarks - interfaces
+        run: cargo bench --bench interfaces -- --output-format bencher | tee benchmark-interfaces-${{ matrix.os }}.txt
+        continue-on-error: true
+
+      - name: Run benchmarks - local_ip_address
+        run: cargo bench --bench local_ip_address -- --output-format bencher | tee benchmark-local-ip-${{ matrix.os }}.txt
+        continue-on-error: true
+
+      - name: Run benchmarks - gateway
+        run: cargo bench --bench gateway -- --output-format bencher | tee benchmark-gateway-${{ matrix.os }}.txt
+        continue-on-error: true
+
+      - name: Collect Criterion results
+        shell: bash
+        run: |
+          echo "## Benchmark Results for ${{ matrix.os }}" > benchmark-summary-${{ matrix.os }}.md
+          echo "" >> benchmark-summary-${{ matrix.os }}.md
+          echo "### System Information" >> benchmark-summary-${{ matrix.os }}.md
+          echo "- OS: ${{ matrix.os }}" >> benchmark-summary-${{ matrix.os }}.md
+          echo "- Runner: ${{ runner.name }}" >> benchmark-summary-${{ matrix.os }}.md
+          echo "- Architecture: ${{ runner.arch }}" >> benchmark-summary-${{ matrix.os }}.md
+          echo "- Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> benchmark-summary-${{ matrix.os }}.md
+          echo "" >> benchmark-summary-${{ matrix.os }}.md
+
+          # Process interfaces benchmarks
+          if [ -f "benchmark-interfaces-${{ matrix.os }}.txt" ]; then
+            echo "### Interface Operations" >> benchmark-summary-${{ matrix.os }}.md
+            echo "" >> benchmark-summary-${{ matrix.os }}.md
+            echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
+            grep "^test " benchmark-interfaces-${{ matrix.os }}.txt >> benchmark-summary-${{ matrix.os }}.md || echo "No results" >> benchmark-summary-${{ matrix.os }}.md
+            echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
+            echo "" >> benchmark-summary-${{ matrix.os }}.md
+          fi
+
+          # Process local IP benchmarks
+          if [ -f "benchmark-local-ip-${{ matrix.os }}.txt" ]; then
+            echo "### Local IP Operations" >> benchmark-summary-${{ matrix.os }}.md
+            echo "" >> benchmark-summary-${{ matrix.os }}.md
+            echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
+            grep "^test " benchmark-local-ip-${{ matrix.os }}.txt >> benchmark-summary-${{ matrix.os }}.md || echo "No results" >> benchmark-summary-${{ matrix.os }}.md
+            echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
+            echo "" >> benchmark-summary-${{ matrix.os }}.md
+          fi
+
+          # Process gateway benchmarks
+          if [ -f "benchmark-gateway-${{ matrix.os }}.txt" ]; then
+            echo "### Gateway Operations" >> benchmark-summary-${{ matrix.os }}.md
+            echo "" >> benchmark-summary-${{ matrix.os }}.md
+            echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
+            grep "^test " benchmark-gateway-${{ matrix.os }}.txt >> benchmark-summary-${{ matrix.os }}.md || echo "No results" >> benchmark-summary-${{ matrix.os }}.md
+            echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
+            echo "" >> benchmark-summary-${{ matrix.os }}.md
+          fi
+
+          cat benchmark-summary-${{ matrix.os }}.md
+
+      - name: Create benchmark archive
+        shell: bash
+        run: |
+          mkdir -p benchmark-results
+          mv benchmark-*.txt benchmark-results/ 2>/dev/null || true
+          mv benchmark-summary-${{ matrix.os }}.md benchmark-results/ 2>/dev/null || true
+
+          # Copy Criterion output if it exists
+          if [ -d "target/criterion" ]; then
+            cp -r target/criterion benchmark-results/criterion-${{ matrix.os }} || true
+          fi
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.os }}
+          path: benchmark-results/
+          retention-days: 90
+
+      - name: Upload Criterion detailed results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: criterion-detailed-${{ matrix.os }}
+          path: target/criterion/
+          retention-days: 90
+        continue-on-error: true
+
+  # Aggregate results from all platforms
+  aggregate-results:
+    name: Aggregate benchmark results
+    needs: benchmark
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all benchmark results
+        uses: actions/download-artifact@v4
+        with:
+          path: all-results
+
+      - name: Create combined summary
+        shell: bash
+        run: |
+          echo "# Benchmark Results Summary" > BENCHMARK_SUMMARY.md
+          echo "" >> BENCHMARK_SUMMARY.md
+          echo "Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> BENCHMARK_SUMMARY.md
+          echo "" >> BENCHMARK_SUMMARY.md
+
+          # Combine all platform results
+          for os_dir in all-results/benchmark-results-*/; do
+            if [ -d "$os_dir" ]; then
+              for summary in "$os_dir"benchmark-summary-*.md; do
+                if [ -f "$summary" ]; then
+                  echo "" >> BENCHMARK_SUMMARY.md
+                  cat "$summary" >> BENCHMARK_SUMMARY.md
+                  echo "" >> BENCHMARK_SUMMARY.md
+                  echo "---" >> BENCHMARK_SUMMARY.md
+                fi
+              done
+            fi
+          done
+
+          cat BENCHMARK_SUMMARY.md
+
+      - name: Upload combined results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-combined
+          path: |
+            BENCHMARK_SUMMARY.md
+            all-results/
+          retention-days: 90
+
+      - name: Comment PR with benchmark results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('BENCHMARK_SUMMARY.md', 'utf8');
+
+            const comment = `## Benchmark Results\n\n${summary}\n\n<details>\n<summary>View detailed results</summary>\n\nDetailed Criterion results have been uploaded as artifacts. Download them from the workflow run to view charts and detailed statistics.\n\n</details>`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+        continue-on-error: true

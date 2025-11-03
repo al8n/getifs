@@ -19,7 +19,7 @@ A bunch of cross-platform network tools for fetching interfaces, multicast addre
 
 ## Introduction
 
-A bunch of cross-platform network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
+A high-performance, cross-platform Rust library providing comprehensive network interface information without relying on libc's `getifaddrs`. Get interfaces, multicast addresses, local/private/public IP addresses, MTU, and gateway information with minimal overhead.
 
 ## Installation
 
@@ -28,11 +28,47 @@ A bunch of cross-platform network tools for fetching interfaces, multicast addre
 getifs = "0.3"
 ```
 
+## Features
+
+- **Zero libc dependency** on Linux (uses netlink directly)
+- **MTU information** - Get interface MTU values
+- **Multicast addresses** - Fetch multicast group memberships
+- **Gateway discovery** - Find IPv4 and IPv6 gateway addresses
+- **RFC-based filtering** - Filter addresses by RFC classification
+- **High performance** - Up to 52x faster than alternatives (see benchmarks)
+- **Cross-platform** - Linux, macOS, BSD, Windows support
+
+## Quick Start
+
+```rust
+use getifs::{interfaces, local_addrs, gateway_addrs};
+
+// Get all network interfaces
+let interfaces = interfaces()?;
+for interface in interfaces {
+    println!("Interface: {} (index: {})", interface.name(), interface.index());
+    println!("  MTU: {}", interface.mtu());
+    println!("  Flags: {:?}", interface.flags());
+}
+
+// Get local IP addresses
+let local_ips = local_addrs()?;
+for ip in local_ips {
+    println!("Local IP: {}", ip);
+}
+
+// Get gateway addresses
+let gateways = gateway_addrs()?;
+for gateway in gateways {
+    println!("Gateway: {}", gateway);
+}
+```
+
 ## Examples
 
 - Fetching all interfaces: [examples/interfaces.rs](./examples/interfaces.rs)
 - Fetching all interface addresses (excluding multicast addrs): [examples/addrs.rs](./examples/addrs.rs)
-- Fetching all interface multicast addresses: [exampels/multicast_addrs.rs](./examples/multicast_addrs.rs)
+- Fetching all interface multicast addresses: [examples/multicast_addrs.rs](./examples/multicast_addrs.rs)
 - Fetching gateway addresses: [examples/gateway.rs](./examples/gateway.rs)
 - Fetching local ip addresses: [examples/local_ip_addrs.rs](./examples/local_ip_addrs.rs)
 - Fetching ip addresses by RFC: [examples/filter_by_rfc.rs](./examples/filter_by_rfc.rs)
@@ -45,14 +81,20 @@ Linux (no `libc`) | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)
 BSD-like | `sysctl`
 Windows | `GetAdaptersAddresses`
 
-## Why a new network interfaces crate?
+## Why `getifs`?
 
-When implementing [`agnostic-mdns`](https://github.com/al8n/agnostic-mdns) (an mDNS crate), I found that Rust was missing a crate to help play with network interfaces and addresses.
+Existing network interface crates have limitations:
 
-All of current network interfaces crates do not support fetching `MTU` and multicast addresses, and almost all of them are using `libc::getifaddrs`. This crate
-tries to avoid unneeded allocation and use more underlying method to achieve the same functionalities.
+- **Missing features**: Most don't support MTU or multicast addresses
+- **Performance overhead**: Nearly all use `libc::getifaddrs`, which is slower
+- **Unnecessary allocations**: Heavy use of heap allocations for simple queries
 
-Hence, `getifs` is here, which contain a bunch of cross-platform network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
+`getifs` addresses these by:
+
+- Using platform-native APIs directly (netlink, sysctl, GetAdaptersAddresses)
+- Minimizing allocations with `SmallVec` and `SmolStr`
+- Providing comprehensive interface information including MTU and multicast support
+- Achieving up to **52x better performance** than alternatives
 
 ## Roadmap
 
@@ -60,13 +102,57 @@ Hence, `getifs` is here, which contain a bunch of cross-platform network tools f
 
 ## Benchmarks
 
-### Ubuntu 22.04 ARM64 (Parallel Desktop, 1 CPU, 8GB memory)
+All benchmarks are run with [Criterion.rs](https://github.com/bheisler/criterion.rs). Lower is better.
+
+> **Note**: Automated benchmarks run on Linux, macOS, and Windows via GitHub Actions. View the latest results in the [Actions tab](https://github.com/al8n/getifs/actions/workflows/benchmark.yml) or see [benchmark documentation](.github/BENCHMARKS.md) for more details.
+
+### Interface Operations (macOS - Apple M1 Max, 32GB)
+
+| Operation | `getifs` | Alternative | Speedup |
+|-----------|----------|-------------|---------|
+| List all interfaces | 18.0 μs | 938.2 μs (`network-interface`) | **52x faster** |
+| Get interface by index | 2.7 μs | 894.7 μs (`network-interface`) | **332x faster** |
+| Get interface by name | 21.0 μs | 887.8 μs (`network-interface`) | **42x faster** |
+| Get interface addresses | 17.7 μs | - | - |
+| Get multicast addresses | 4.5 μs | - | - |
+
+### Local IP Address Operations (macOS - Apple M1 Max, 32GB)
+
+| Operation | `getifs` | Alternative | Speedup |
+|-----------|----------|-------------|---------|
+| Get local IPv4 address | 14.3 μs | 20.2 μs (`local-ip-address`) | **1.4x faster** |
+| Get local IPv6 address | 17.6 μs | 20.2 μs (`local-ip-address`) | **1.1x faster** |
+
+### Gateway Operations (macOS - Apple M1 Max, 32GB)
+
+| Operation | `getifs` | Notes |
+|-----------|----------|-------|
+| Get IPv4 gateways | 12.6 μs | No direct alternative |
+| Get IPv6 gateways | 4.7 μs | No direct alternative |
+| Get all gateways | 16.8 μs | No direct alternative |
+
+**Why is `getifs` faster?**
+
+- **Direct system calls**: Uses platform-native APIs (netlink on Linux, sysctl on BSD, GetAdaptersAddresses on Windows)
+- **Zero-copy parsing**: Minimal allocations and efficient buffer reuse
+- **No libc dependency** on Linux: Direct netlink socket communication
+- **Optimized data structures**: Uses `SmallVec` and `SmolStr` to avoid heap allocations for common cases
+
+### Previous Benchmark Visualizations
+
+<details>
+<summary>Ubuntu 22.04 ARM64 (Parallel Desktop, 1 CPU, 8GB memory)</summary>
 
 <img src="https://raw.githubusercontent.com/al8n/getifs/main/benches/benchmark_interfaces_linux.svg">
 
-### MacOS (Apple M1 Max, 32GB)
+</details>
+
+<details>
+<summary>MacOS (Apple M1 Max, 32GB) - Legacy Visualization</summary>
 
 <img src="https://raw.githubusercontent.com/al8n/getifs/main/benches/benchmark_interfaces_macos.svg">
+
+</details>
 
 
 ## Sister crates
