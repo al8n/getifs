@@ -3,7 +3,8 @@
 </div>
 <div align="center">
 
-A bunch of cross-platform network tools for fetching interfaces, multicast addresses, local ip addresses, private ip addresses, public ip addresses and etc.
+A high-performance, cross-platform Rust library providing comprehensive network interface information without relying on libc's `getifaddrs`. Get interfaces, multicast addresses, local/private/public IP addresses, MTU, and gateway information with minimal overhead.
+
 
 [<img alt="github" src="https://img.shields.io/badge/github-al8n/getifs-8da0cb?style=for-the-badge&logo=Github" height="22">][Github-url]
 <img alt="LoC" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fal8n%2F327b2a8aef9003246e45c6e47fe63937%2Fraw%2Fgetifs" height="22">
