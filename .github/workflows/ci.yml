@@ -79,7 +79,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Cache cargo build and registry
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
@@ -92,7 +92,7 @@ jobs:
       # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable --no-self-update && rustup default stable
     - name: Cache ~/.cargo
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.cargo
         key: ${{ runner.os }}-coverage-dotcargo
@@ -111,7 +111,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - name: Cache cargo build and registry
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
@@ -124,7 +124,7 @@ jobs:
       # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable --no-self-update && rustup default stable
     - name: Cache ~/.cargo
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.cargo
         key: ${{ runner.os }}-coverage-dotcargo
@@ -141,7 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache cargo build and registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
