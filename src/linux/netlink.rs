@@ -170,9 +170,14 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
                   // Kernel-emitted IFLA_IFNAME is null-terminated, but
                   // we still bound the read to `data` in case of a
                   // malformed message (avoids UB from `CStr::from_ptr`
-                  // scanning past the attribute).
+                  // scanning past the attribute). Use the lossy UTF-8
+                  // conversion — matching the pre-refactor
+                  // `CStr::to_string_lossy` behaviour — so an interface
+                  // with non-UTF8 bytes surfaces as a replacement-char
+                  // string rather than silently becoming empty and
+                  // collisioning with other nameless interfaces.
                   let nul = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-                  interface.name = core::str::from_utf8(&data[..nul]).unwrap_or("").into();
+                  interface.name = String::from_utf8_lossy(&data[..nul]).as_ref().into();
                 }
                 IFLA_ADDRESS => match data.len() {
                   // We never return any /32 or /128 IP address
@@ -416,7 +421,13 @@ where
 
               let attrlen = attr.len as usize;
               if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-                break;
+                // A malformed attribute must not be silently used to
+                // select `best_ifindex`: if we `break`ed here and then
+                // applied partial `current_metric` / `current_oif`,
+                // corrupted kernel output could steer us to the wrong
+                // interface. Bail out in the same way the interface
+                // and address parsers above do.
+                return Err(rustix::io::Errno::INVAL.into());
               }
               let data = &rtattr_buf[RtAttr::SIZE..attrlen];
               let alen = rta_align_of(attrlen).min(rtattr_buf.len());
@@ -532,7 +543,10 @@ where
 
               let attrlen = attr.len as usize;
               if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-                break;
+                // Same rationale as in `netlink_best_local_addrs`:
+                // a partially-parsed route could emit a bogus address
+                // into `gateways`. Fail the whole call instead.
+                return Err(rustix::io::Errno::INVAL.into());
               }
 
               let data = &rtattr_buf[RtAttr::SIZE..attrlen];

@@ -50,14 +50,31 @@ struct Information {
   // `Next`/`FirstUnicastAddress`/`FriendlyName`/… pointer aimed back
   // into it. We keep the buffer alive and walk the list via an
   // iterator — no per-adapter copy.
-  buffer: Vec<u8>,
+  //
+  // Backing type is `Vec<u64>` rather than `Vec<u8>` so that the
+  // pointer cast to `*mut IP_ADAPTER_ADDRESSES_LH` is guaranteed
+  // 8-byte aligned. `Vec<u8>` only guarantees 1-byte alignment, and
+  // dereferencing a misaligned `IP_ADAPTER_ADDRESSES_LH` is UB in
+  // Rust — even though every real-world allocator happens to return
+  // a 16-byte-aligned block for small Vecs, Rust's safety model
+  // doesn't let us rely on that.
+  buffer: Vec<u64>,
+}
+
+/// Bytes per `u64` element in the backing buffer.
+const BYTES_PER_U64: usize = core::mem::size_of::<u64>();
+
+/// Round a byte count up to a whole number of `u64` elements.
+#[inline]
+fn u64_len(size_bytes: u32) -> usize {
+  (size_bytes as usize + BYTES_PER_U64 - 1) / BYTES_PER_U64
 }
 
 impl Information {
   fn fetch() -> Result<Self> {
     let mut size = 15000u32; // recommended initial size
 
-    let mut buffer = vec![0; size as usize];
+    let mut buffer: Vec<u64> = vec![0; u64_len(size)];
     loop {
       let result = unsafe {
         GetAdaptersAddresses(
@@ -80,10 +97,12 @@ impl Information {
         return Err(Error::last_os_error());
       }
 
-      if size <= buffer.len() as u32 {
+      // `size` is in bytes; compare against the byte capacity of
+      // the u64-backed buffer.
+      if (size as usize) <= buffer.len() * BYTES_PER_U64 {
         return Err(Error::last_os_error());
       }
-      buffer.resize(size as usize, 0);
+      buffer.resize(u64_len(size), 0);
     }
 
     Ok(Self { buffer })
