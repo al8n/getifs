@@ -8,11 +8,23 @@ use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 
 use super::{
-  ifname_to_index, ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, os, Flags, IfAddr, IfNet,
-  Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net,
+  ifname_to_index, ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, os, Flags, IfNet, Ifv4Net,
+  Ifv6Net,
 };
 
-/// The inferface struct
+// `IfAddr` / `Ifv4Addr` / `Ifv6Addr` appear only inside `cfg_multicast!`
+// blocks, which expand on Apple, FreeBSD, Linux, and Windows. Gating the
+// import to the same cfg keeps NetBSD/OpenBSD/DragonFly builds
+// warning-free.
+#[cfg(any(
+  target_vendor = "apple",
+  target_os = "freebsd",
+  target_os = "linux",
+  windows
+))]
+use super::{IfAddr, Ifv4Addr, Ifv6Addr};
+
+/// The interface struct
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Interface {
   pub(super) index: u32,

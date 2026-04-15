@@ -10,7 +10,7 @@ use rustix::net::{
 };
 
 use smallvec_wrapper::{SmallVec, TinyVec};
-use std::{ffi::CStr, io, mem, net::IpAddr, os::fd::OwnedFd};
+use std::{io, mem, net::IpAddr, os::fd::OwnedFd};
 
 use crate::local_ip_filter;
 
@@ -152,17 +152,34 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
                 return Err(rustix::io::Errno::INVAL.into());
               }
 
-              let alen = rta_align_of(attrlen);
-              let vbuf = &info_data[RtAttr::SIZE..alen];
+              // Payload excludes the header and excludes any trailing
+              // padding (the padding is counted by `alen` for iterator
+              // advance but is not part of the attribute value).
+              let data = &info_data[RtAttr::SIZE..attrlen];
+              // Aligned length is used to walk to the next attribute,
+              // but must not be allowed to exceed the buffer — a
+              // malformed last attribute could otherwise make the
+              // slice below panic.
+              let alen = rta_align_of(attrlen).min(info_data.len());
 
               match attr.ty as u32 {
-                IFLA_MTU => {
-                  interface.mtu = u32::from_ne_bytes(vbuf[..4].try_into().unwrap());
+                IFLA_MTU if data.len() >= 4 => {
+                  interface.mtu = u32::from_ne_bytes(data[..4].try_into().unwrap());
                 }
                 IFLA_IFNAME => {
-                  interface.name = CStr::from_ptr(vbuf.as_ptr() as _).to_string_lossy().into();
+                  // Kernel-emitted IFLA_IFNAME is null-terminated, but
+                  // we still bound the read to `data` in case of a
+                  // malformed message (avoids UB from `CStr::from_ptr`
+                  // scanning past the attribute). Use the lossy UTF-8
+                  // conversion — matching the pre-refactor
+                  // `CStr::to_string_lossy` behaviour — so an interface
+                  // with non-UTF8 bytes surfaces as a replacement-char
+                  // string rather than silently becoming empty and
+                  // colliding with other nameless interfaces.
+                  let nul = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+                  interface.name = String::from_utf8_lossy(&data[..nul]).as_ref().into();
                 }
-                IFLA_ADDRESS => match vbuf.len() {
+                IFLA_ADDRESS => match data.len() {
                   // We never return any /32 or /128 IP address
                   // prefix on any IP tunnel interface as the
                   // hardware address.
@@ -180,17 +197,17 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
                   } // 823 is any over GRE over IPv6 tunneling
                   _ => {
                     let mut nonzero = false;
-                    for b in vbuf {
+                    for b in data {
                       if *b != 0 {
                         nonzero = true;
                         break;
                       }
                     }
                     if nonzero {
-                      let mut data = [0; MAC_ADDRESS_SIZE];
-                      let len = vbuf.len().min(MAC_ADDRESS_SIZE);
-                      data[..len].copy_from_slice(&vbuf[..len]);
-                      interface.mac_addr = Some(MacAddr::from_raw(data));
+                      let mut buf = [0; MAC_ADDRESS_SIZE];
+                      let len = data.len().min(MAC_ADDRESS_SIZE);
+                      buf[..len].copy_from_slice(&data[..len]);
+                      interface.mac_addr = Some(MacAddr::from_raw(buf));
                     }
                   }
                 },
@@ -280,11 +297,14 @@ where
               if attrlen < RtAttr::SIZE || attrlen > ifa_msg_data.len() {
                 return Err(rustix::io::Errno::INVAL.into());
               }
-              let alen = rta_align_of(attrlen);
-              let vbuf = &ifa_msg_data[RtAttr::SIZE..alen];
+              // `data` excludes trailing padding; `alen` (aligned) is
+              // used only to advance to the next attribute, and is
+              // clamped so a malformed last attribute cannot panic.
+              let data = &ifa_msg_data[RtAttr::SIZE..attrlen];
+              let alen = rta_align_of(attrlen).min(ifa_msg_data.len());
 
               if ifi == 0 || ifi == ifam.index {
-                attrs.push((attr, vbuf));
+                attrs.push((attr, data));
               }
               ifa_msg_data = &ifa_msg_data[alen..];
             }
@@ -296,14 +316,14 @@ where
               }
             }
 
-            for (attr, vbuf) in attrs.iter() {
+            for (attr, data) in attrs.iter() {
               if point_to_point && attr.ty == IFA_ADDRESS as u16 {
                 continue;
               }
 
               match AddressFamily::from_raw(ifam.family as u16) {
-                AddressFamily::INET => {
-                  let ip: [u8; 4] = vbuf[..4].try_into().unwrap();
+                AddressFamily::INET if data.len() >= 4 => {
+                  let ip: [u8; 4] = data[..4].try_into().unwrap();
                   if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
                     if let Some(addr) =
                       N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
@@ -314,8 +334,8 @@ where
                     }
                   }
                 }
-                AddressFamily::INET6 if vbuf.len() >= 16 => {
-                  let ip: [u8; 16] = vbuf[..16].try_into().unwrap();
+                AddressFamily::INET6 if data.len() >= 16 => {
+                  let ip: [u8; 16] = data[..16].try_into().unwrap();
                   if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
                     if let Some(addr) =
                       N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
@@ -400,8 +420,17 @@ where
               };
 
               let attrlen = attr.len as usize;
-              let alen = rta_align_of(attrlen);
+              if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
+                // A malformed attribute must not be silently used to
+                // select `best_ifindex`: if we `break`ed here and then
+                // applied partial `current_metric` / `current_oif`,
+                // corrupted kernel output could steer us to the wrong
+                // interface. Bail out in the same way the interface
+                // and address parsers above do.
+                return Err(rustix::io::Errno::INVAL.into());
+              }
               let data = &rtattr_buf[RtAttr::SIZE..attrlen];
+              let alen = rta_align_of(attrlen).min(rtattr_buf.len());
 
               match attr.ty {
                 RTA_PRIORITY if data.len() >= 4 => {
@@ -514,11 +543,14 @@ where
 
               let attrlen = attr.len as usize;
               if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-                break;
+                // Same rationale as in `netlink_best_local_addrs`:
+                // a partially-parsed route could emit a bogus address
+                // into `gateways`. Fail the whole call instead.
+                return Err(rustix::io::Errno::INVAL.into());
               }
 
-              let alen = rta_align_of(attrlen);
               let data = &rtattr_buf[RtAttr::SIZE..attrlen];
+              let alen = rta_align_of(attrlen).min(rtattr_buf.len());
 
               match attr.ty {
                 val if val == rta => match (

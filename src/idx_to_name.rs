@@ -40,12 +40,16 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
 
 #[cfg(linux_like)]
 fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
-  use rustix::net::{netdevice::index_to_name, socket, AddressFamily, SocketType};
+  use rustix::net::{netdevice::index_to_name_inlined, socket, AddressFamily, SocketType};
 
   let socket_fd = socket(AddressFamily::INET, SocketType::DGRAM, None)?;
 
-  index_to_name(socket_fd, idx)
-    .map(Into::into)
+  // `index_to_name_inlined` (rustix 1.1) returns a stack-allocated
+  // `InlinedName` — no intermediate `String` on the heap. Interface
+  // names are bounded by `IF_NAMESIZE` (16), which fits within
+  // `SmolStr`'s inline capacity (23), so this stays allocation-free.
+  index_to_name_inlined(socket_fd, idx)
+    .map(|name| SmolStr::new(name.as_str()))
     .map_err(Into::into)
 }
 

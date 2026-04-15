@@ -1,4 +1,5 @@
 use smallvec_wrapper::SmallVec;
+use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
@@ -47,6 +48,12 @@ where
   F: FnMut(&IpAddr) -> bool,
 {
   let mut results = SmallVec::new();
+  // Multi-homed or multi-path Windows hosts can surface the same
+  // gateway via several routes in the forwarding table. The previous
+  // `!results.contains(&addr)` check was O(n²); dedup via a HashSet
+  // keyed by `(index, IpAddr)` makes it O(1) per candidate, matching
+  // the pattern already used on BSD (`src/bsd_like/rt_generic.rs`).
+  let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
 
   unsafe {
     // Get the forward table for both IPv4 and IPv6
@@ -88,12 +95,10 @@ where
     // Process IPv4 routes
     if !table_v4.is_null() {
       let table = &*table_v4;
-      let rows = unsafe {
-        core::slice::from_raw_parts(
-          &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
-          table.NumEntries as usize,
-        )
-      };
+      let rows = core::slice::from_raw_parts(
+        &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
+        table.NumEntries as usize,
+      );
       for route in rows.iter() {
         // Check if route is up and has a gateway
         if route.ValidLifetime > 0 && !route.Loopback {
@@ -111,7 +116,7 @@ where
             if let Some(addr) =
               A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
             {
-              if !results.contains(&addr) {
+              if seen.insert((addr.index(), addr.addr())) {
                 results.push(addr);
               }
             }
@@ -123,12 +128,10 @@ where
     // Process IPv6 routes
     if !table_v6.is_null() {
       let table = &*table_v6;
-      let rows = unsafe {
-        core::slice::from_raw_parts(
-          &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
-          table.NumEntries as usize,
-        )
-      };
+      let rows = core::slice::from_raw_parts(
+        &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
+        table.NumEntries as usize,
+      );
       for route in rows.iter() {
         // Check if route is up and has a gateway
         if route.ValidLifetime > 0 && !route.Loopback {
@@ -146,7 +149,7 @@ where
             if let Some(addr) =
               A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
             {
-              if !results.contains(&addr) {
+              if seen.insert((addr.index(), addr.addr())) {
                 results.push(addr);
               }
             }

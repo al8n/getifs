@@ -1,4 +1,5 @@
 use std::{
+  collections::HashSet,
   io,
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
@@ -8,7 +9,7 @@ use smallvec_wrapper::SmallVec;
 
 use crate::is_ipv6_unspecified;
 
-use super::{super::Address, fetch, invalid_message, message_too_short, roundup};
+use super::{super::Address, compat::RtMsghdr, fetch, invalid_message, message_too_short, roundup};
 
 pub(super) fn rt_generic_addrs_in<A, F>(
   family: i32,
@@ -22,6 +23,11 @@ where
 {
   let buf = fetch(family, NET_RT_FLAGS, rtf)?;
   let mut results = SmallVec::new();
+  // The routing table can contain many duplicates (same address
+  // reached via different routes). Previously the code used
+  // `results.contains(&addr)` which is O(n²); this tracks dedup in a
+  // HashSet keyed by `(index, IpAddr)` for O(1) check per candidate.
+  let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
   unsafe {
     let mut src = buf.as_slice();
 
@@ -45,7 +51,7 @@ where
       }
 
       // Cast the buffer to rt_msghdr to read the sa_len fields
-      let rtm = &*(src.as_ptr() as *const libc::rt_msghdr);
+      let rtm = &*(src.as_ptr() as *const RtMsghdr);
 
       // Only consider UP routes
       if (rtm.rtm_flags & (RTF_UP | rtf)) == 0 {
@@ -54,7 +60,7 @@ where
       }
 
       // Skip header to get to addresses
-      let base_ptr = src.as_ptr().add(std::mem::size_of::<libc::rt_msghdr>());
+      let base_ptr = src.as_ptr().add(std::mem::size_of::<RtMsghdr>());
       let mut addr_ptr = base_ptr;
 
       // Iterate through addresses
@@ -67,11 +73,11 @@ where
             (AF_INET, AF_INET) | (AF_UNSPEC, AF_INET) if i == rta => {
               let sa_in = &*(addr_ptr as *const libc::sockaddr_in);
               if sa_in.sin_addr.s_addr != 0 {
-                let addr = Ipv4Addr::from(sa_in.sin_addr.s_addr.swap_bytes());
+                let ip = IpAddr::V4(Ipv4Addr::from(sa_in.sin_addr.s_addr.swap_bytes()));
                 if let Some(addr) =
-                  A::try_from_with_filter(rtm.rtm_index as u32, addr.into(), |addr| f(addr))
+                  A::try_from_with_filter(rtm.rtm_index as u32, ip, |addr| f(addr))
                 {
-                  if !results.contains(&addr) {
+                  if seen.insert((addr.index(), addr.addr())) {
                     results.push(addr);
                   }
                 }
@@ -80,11 +86,11 @@ where
             (AF_INET6, AF_INET6) | (AF_UNSPEC, AF_INET6) if i == rta => {
               let sa_in6 = &*(addr_ptr as *const libc::sockaddr_in6);
               if !is_ipv6_unspecified(sa_in6.sin6_addr.s6_addr) {
-                let addr = Ipv6Addr::from(sa_in6.sin6_addr.s6_addr);
+                let ip = IpAddr::V6(Ipv6Addr::from(sa_in6.sin6_addr.s6_addr));
                 if let Some(addr) =
-                  A::try_from_with_filter(rtm.rtm_index as u32, addr.into(), |addr| f(addr))
+                  A::try_from_with_filter(rtm.rtm_index as u32, ip, |addr| f(addr))
                 {
-                  if !results.contains(&addr) {
+                  if seen.insert((addr.index(), addr.addr())) {
                     results.push(addr);
                   }
                 }

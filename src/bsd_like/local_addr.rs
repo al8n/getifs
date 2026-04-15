@@ -10,27 +10,31 @@ use crate::is_ipv6_unspecified;
 
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
+  compat::RtMsghdr,
   fetch, interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, invalid_message,
   message_too_short, roundup, IfNet, Ifv4Net, Ifv6Net, Net,
 };
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
-  bast_local_addrs_in(AF_INET)
+  best_local_addrs_in(AF_INET)
 }
 
 pub(crate) fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
-  bast_local_addrs_in(AF_INET6)
+  best_local_addrs_in(AF_INET6)
 }
 
 pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
-  bast_local_addrs_in(AF_UNSPEC)
+  best_local_addrs_in(AF_UNSPEC)
 }
 
-fn bast_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
+fn best_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
   // First get the default route to find the interface index
   let routes = fetch(family, NET_RT_DUMP, 0)?;
   let mut best_ifindex = None;
-  let mut best_metric = u32::MAX;
+  // Widened to `u64` so the same variable can hold `rmx_recvpipe` across
+  // BSDs — on Apple/OpenBSD the field is 32-bit, on FreeBSD/DragonFly
+  // it's `u_long` (64-bit on LP64 hosts).
+  let mut best_metric: u64 = u64::MAX;
 
   unsafe {
     let mut src = routes.as_slice();
@@ -47,7 +51,7 @@ fn bast_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
         continue;
       }
 
-      let rtm = &*(src.as_ptr() as *const libc::rt_msghdr);
+      let rtm = &*(src.as_ptr() as *const RtMsghdr);
 
       // Only consider UP routes
       if (rtm.rtm_flags & RTF_UP) == 0 {
@@ -55,7 +59,7 @@ fn bast_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
         continue;
       }
 
-      let mut addr_ptr = src.as_ptr().add(std::mem::size_of::<libc::rt_msghdr>());
+      let mut addr_ptr = src.as_ptr().add(std::mem::size_of::<RtMsghdr>());
       let mut addrs = rtm.rtm_addrs;
       let mut i = 1;
       let mut is_default = false;
@@ -91,8 +95,9 @@ fn bast_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
       }
 
       // If this is a default route and has better metric, update best_ifindex
-      if is_default && rtm.rtm_rmx.rmx_recvpipe < best_metric {
-        best_metric = rtm.rtm_rmx.rmx_recvpipe;
+      let metric = rtm.rtm_rmx.rmx_recvpipe as u64;
+      if is_default && metric < best_metric {
+        best_metric = metric;
         best_ifindex = Some(rtm.rtm_index);
       }
 

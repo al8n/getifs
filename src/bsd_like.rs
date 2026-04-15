@@ -1,9 +1,18 @@
 use ipnet::ip_mask_to_prefix;
 use libc::{
-  c_void, if_msghdr, ifa_msghdr, size_t, sysctl, AF_INET, AF_INET6, AF_LINK, AF_ROUTE, AF_UNSPEC,
-  CTL_NET, NET_RT_IFLIST, NET_RT_IFLIST2, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO,
-  RTM_NEWADDR, RTM_VERSION,
+  c_void, if_msghdr, size_t, sysctl, AF_INET, AF_INET6, AF_LINK, AF_ROUTE, AF_UNSPEC, CTL_NET,
+  NET_RT_IFLIST, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO, RTM_NEWADDR, RTM_VERSION,
 };
+// `NET_RT_IFLIST2` is an Apple-only sysctl target. Keep it out of the
+// cross-BSD top-level import — the libc crate does not expose it on
+// FreeBSD/DragonFly/NetBSD/OpenBSD.
+#[cfg(apple)]
+use libc::NET_RT_IFLIST2;
+
+// `libc::ifa_msghdr` is absent on NetBSD/OpenBSD. Route it through the
+// compat module, which provides a local definition on those targets
+// and re-exports `libc::ifa_msghdr` everywhere else.
+use compat::IfaMsghdr as ifa_msghdr;
 use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 use std::{
@@ -12,10 +21,14 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{
-  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net,
-  MAC_ADDRESS_SIZE,
-};
+use super::{IfNet, Ifv4Net, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
+
+// `Address` / `IfAddr` / `Ifv4Addr` / `Ifv6Addr` are only referenced
+// inside the `cfg_bsd_multicast!`-gated `interface_multiaddr_table`
+// impls, which only expand for Apple and FreeBSD. Gating the import
+// to the same cfg keeps NetBSD/OpenBSD/DragonFly builds warning-free.
+#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
 macro_rules! rt_generic_mod {
   ($($name:ident($rtf:ident, $rta:ident)), +$(,)?) => {
@@ -86,6 +99,8 @@ rt_generic_mod!(gateway(RTF_GATEWAY, RTA_GATEWAY),);
 
 pub(super) use local_addr::*;
 
+#[path = "bsd_like/compat.rs"]
+mod compat;
 #[path = "bsd_like/local_addr.rs"]
 mod local_addr;
 #[path = "bsd_like/rt_generic.rs"]
@@ -458,7 +473,12 @@ pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
           let (name, mac) = parse(&src[size_of::<if_msghdr>()..l])?;
           let interface = Interface {
             index: ifm.ifm_index as u32,
-            mtu: ifm.ifm_data.ifi_mtu,
+            // `ifi_mtu` is `u_int32_t` on Apple, `u_long` on FreeBSD/
+            // DragonFly, `uint64_t` on NetBSD, `u_int` on OpenBSD. Cast
+            // narrows to `u32` to match `Interface.mtu`'s type —
+            // realistic MTUs never exceed 65535 so this is lossless in
+            // practice.
+            mtu: ifm.ifm_data.ifi_mtu as u32,
             name,
             mac_addr: mac,
             flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),

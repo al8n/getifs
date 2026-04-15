@@ -1,5 +1,7 @@
 use std::{
   io::{self, Error, Result},
+  marker::PhantomData,
+  mem::MaybeUninit,
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -44,16 +46,54 @@ bitflags::bitflags! {
 }
 
 struct Information {
-  #[allow(dead_code)]
-  buffer: Vec<u8>,
-  adapters: SmallVec<IP_ADAPTER_ADDRESSES_LH>,
+  // The kernel writes a null-terminated singly-linked list of
+  // `IP_ADAPTER_ADDRESSES_LH` records into this buffer, with every
+  // `Next`/`FirstUnicastAddress`/`FriendlyName`/… pointer aimed back
+  // into it. We keep the buffer alive and walk the list via an
+  // iterator — no per-adapter copy.
+  //
+  // Backing type is `Vec<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>>` so
+  // the allocation is aligned for `IP_ADAPTER_ADDRESSES_LH` itself —
+  // `MaybeUninit<T>` is documented to have the same size, alignment,
+  // and ABI as `T`. `Vec<u8>` would only guarantee 1-byte alignment,
+  // and `Vec<u64>` only `align_of::<u64>()`, neither of which is a
+  // sound proxy for the struct's alignment across all targets.
+  // Dereferencing a misaligned `IP_ADAPTER_ADDRESSES_LH` is UB in
+  // Rust, so the backing allocation must carry the correct alignment
+  // by construction.
+  buffer: Vec<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>>,
+}
+
+/// Compile-time assertion that `MaybeUninit<IP_ADAPTER_ADDRESSES_LH>`
+/// inherits the struct's alignment. Guaranteed by the standard library,
+/// but the explicit check makes the invariant load-bearing if anyone
+/// ever changes the backing element type.
+const _: () = assert!(
+  core::mem::align_of::<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>>()
+    == core::mem::align_of::<IP_ADAPTER_ADDRESSES_LH>()
+);
+
+/// Bytes per backing slot — one whole `IP_ADAPTER_ADDRESSES_LH` worth
+/// of storage. Rounding the requested byte count up to whole slots
+/// wastes at most `size_of - 1` bytes per fetch and keeps the
+/// struct-aligned guarantee.
+const SLOT_SIZE: usize = core::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>();
+
+/// Round a byte count up to a whole number of backing slots.
+#[inline]
+fn slots_for(size_bytes: u32) -> usize {
+  (size_bytes as usize + SLOT_SIZE - 1) / SLOT_SIZE
 }
 
 impl Information {
   fn fetch() -> Result<Self> {
     let mut size = 15000u32; // recommended initial size
 
-    let mut buffer = vec![0; size as usize];
+    let mut buffer: Vec<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>> = Vec::new();
+    // `MaybeUninit::uninit` skips the zero-fill that `vec![0u64; …]`
+    // would incur — the kernel overwrites the entire buffer on the
+    // next call anyway.
+    buffer.resize_with(slots_for(size), MaybeUninit::uninit);
     loop {
       let result = unsafe {
         GetAdaptersAddresses(
@@ -67,10 +107,7 @@ impl Information {
 
       if result == NO_ERROR {
         if size == 0 {
-          return Ok(Self {
-            buffer: Vec::new(),
-            adapters: SmallVec::new(),
-          });
+          return Ok(Self { buffer: Vec::new() });
         }
         break;
       }
@@ -79,37 +116,78 @@ impl Information {
         return Err(Error::last_os_error());
       }
 
-      if size <= buffer.len() as u32 {
+      // `size` is in bytes; compare against the byte capacity of
+      // the slot-backed buffer.
+      if (size as usize) <= buffer.len() * SLOT_SIZE {
         return Err(Error::last_os_error());
       }
-      buffer.resize(size as usize, 0);
+      buffer.resize_with(slots_for(size), MaybeUninit::uninit);
     }
 
-    let mut adapters = SmallVec::new();
-    let mut current = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
-
-    // Safety: current is guaranteed to be valid as we just allocated it
-    unsafe {
-      while let Some(curr) = current.as_ref() {
-        adapters.push(*curr);
-        current = curr.Next;
-      }
-    }
-
-    Ok(Self { buffer, adapters })
+    Ok(Self { buffer })
   }
+
+  /// Iterate over the native adapter linked list in-place, without
+  /// copying the (~400-byte) `IP_ADAPTER_ADDRESSES_LH` records.
+  ///
+  /// Each yielded reference borrows from `self.buffer`, so the iterator
+  /// (and any pointer fields read from its items) must not outlive
+  /// this `Information`.
+  fn iter(&self) -> AdapterIter<'_> {
+    let head = if self.buffer.is_empty() {
+      std::ptr::null()
+    } else {
+      self.buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH
+    };
+    AdapterIter {
+      current: head,
+      _marker: PhantomData,
+    }
+  }
+}
+
+struct AdapterIter<'a> {
+  current: *const IP_ADAPTER_ADDRESSES_LH,
+  _marker: PhantomData<&'a IP_ADAPTER_ADDRESSES_LH>,
+}
+
+impl<'a> Iterator for AdapterIter<'a> {
+  type Item = &'a IP_ADAPTER_ADDRESSES_LH;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    // SAFETY: `current` is either null, or a pointer into the buffer
+    // of the `Information` whose lifetime this iterator borrows. The
+    // kernel produced a null-terminated singly-linked list of these
+    // structs in that buffer.
+    unsafe {
+      let curr = self.current.as_ref()?;
+      self.current = curr.Next;
+      Some(curr)
+    }
+  }
+}
+
+/// Resolves the interface index for a Windows adapter.
+///
+/// Mirrors Go's `net/interface_windows.go`: prefer the LUID-derived
+/// index, fall back to `Ipv6IfIndex` only when the conversion fails.
+fn adapter_index(adapter: &IP_ADAPTER_ADDRESSES_LH) -> u32 {
+  let mut index = 0u32;
+  // SAFETY: `adapter.Luid` is a kernel-populated LUID; `index` is a
+  // writable local `u32`.
+  let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
+  if res != NO_ERROR {
+    index = adapter.Ipv6IfIndex;
+  }
+  index
 }
 
 pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>> {
   let info = Information::fetch()?;
   let mut interfaces = TinyVec::new();
 
-  for adapter in info.adapters.iter() {
-    let mut index = 0;
-    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
-    if res == NO_ERROR {
-      index = adapter.Ipv6IfIndex;
-    }
+  for adapter in info.iter() {
+    let index = adapter_index(adapter);
 
     if let Some(idx) = idx {
       if idx == index {
@@ -277,12 +355,8 @@ where
   let info = Information::fetch()?;
   let mut addresses = SmallVec::new();
 
-  for adapter in info.adapters.iter() {
-    let mut index = 0;
-    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
-    if res == NO_ERROR {
-      index = adapter.Ipv6IfIndex;
-    }
+  for adapter in info.iter() {
+    let index = adapter_index(adapter);
 
     if let Some(ifi) = ifi {
       if ifi == index {
@@ -385,12 +459,8 @@ where
   let info = Information::fetch()?;
   let mut addresses = SmallVec::new();
 
-  for adapter in info.adapters.iter() {
-    let mut index = 0;
-    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
-    if res == NO_ERROR {
-      index = adapter.Ipv6IfIndex;
-    }
+  for adapter in info.iter() {
+    let index = adapter_index(adapter);
 
     if let Some(ifi) = ifi {
       if ifi == index {

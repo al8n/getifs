@@ -14,17 +14,21 @@ fn main() {
   if freebsdlike {
     use_feature("freebsdlike");
   }
+
   let netbsdlike = os == "openbsd" || os == "netbsd";
   if netbsdlike {
     use_feature("netbsdlike");
   }
+
   let apple = os == "macos" || os == "ios" || os == "tvos" || os == "visionos" || os == "watchos";
   if apple {
     use_feature("apple");
   }
+
   if os == "linux" || os == "l4re" || os == "android" || os == "emscripten" {
     use_feature("linux_like");
   }
+
   if apple || freebsdlike || netbsdlike {
     use_feature("bsd_like");
   }
