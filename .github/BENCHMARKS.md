@@ -230,7 +230,7 @@ schedule:
 Edit `.github/workflows/benchmark.yml`:
 ```yaml
 - name: Upload benchmark results
-  uses: actions/upload-artifact@v4
+  uses: actions/upload-artifact@v7
   with:
     retention-days: 90  # Change this value (1-90 days)
 ```

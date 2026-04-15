@@ -21,10 +21,14 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{
-  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net,
-  MAC_ADDRESS_SIZE,
-};
+use super::{IfNet, Ifv4Net, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
+
+// `Address` / `IfAddr` / `Ifv4Addr` / `Ifv6Addr` are only referenced
+// inside the `cfg_bsd_multicast!`-gated `interface_multiaddr_table`
+// impls, which only expand for Apple and FreeBSD. Gating the import
+// to the same cfg keeps NetBSD/OpenBSD/DragonFly builds warning-free.
+#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
 macro_rules! rt_generic_mod {
   ($($name:ident($rtf:ident, $rta:ident)), +$(,)?) => {

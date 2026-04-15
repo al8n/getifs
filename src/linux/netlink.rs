@@ -175,7 +175,7 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
                   // `CStr::to_string_lossy` behaviour — so an interface
                   // with non-UTF8 bytes surfaces as a replacement-char
                   // string rather than silently becoming empty and
-                  // collisioning with other nameless interfaces.
+                  // colliding with other nameless interfaces.
                   let nul = data.iter().position(|&b| b == 0).unwrap_or(data.len());
                   interface.name = String::from_utf8_lossy(&data[..nul]).as_ref().into();
                 }

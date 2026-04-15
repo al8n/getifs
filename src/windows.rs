@@ -1,6 +1,7 @@
 use std::{
   io::{self, Error, Result},
   marker::PhantomData,
+  mem::MaybeUninit,
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -51,30 +52,48 @@ struct Information {
   // into it. We keep the buffer alive and walk the list via an
   // iterator — no per-adapter copy.
   //
-  // Backing type is `Vec<u64>` rather than `Vec<u8>` so that the
-  // pointer cast to `*mut IP_ADAPTER_ADDRESSES_LH` is guaranteed
-  // 8-byte aligned. `Vec<u8>` only guarantees 1-byte alignment, and
-  // dereferencing a misaligned `IP_ADAPTER_ADDRESSES_LH` is UB in
-  // Rust — even though every real-world allocator happens to return
-  // a 16-byte-aligned block for small Vecs, Rust's safety model
-  // doesn't let us rely on that.
-  buffer: Vec<u64>,
+  // Backing type is `Vec<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>>` so
+  // the allocation is aligned for `IP_ADAPTER_ADDRESSES_LH` itself —
+  // `MaybeUninit<T>` is documented to have the same size, alignment,
+  // and ABI as `T`. `Vec<u8>` would only guarantee 1-byte alignment,
+  // and `Vec<u64>` only `align_of::<u64>()`, neither of which is a
+  // sound proxy for the struct's alignment across all targets.
+  // Dereferencing a misaligned `IP_ADAPTER_ADDRESSES_LH` is UB in
+  // Rust, so the backing allocation must carry the correct alignment
+  // by construction.
+  buffer: Vec<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>>,
 }
 
-/// Bytes per `u64` element in the backing buffer.
-const BYTES_PER_U64: usize = core::mem::size_of::<u64>();
+/// Compile-time assertion that `MaybeUninit<IP_ADAPTER_ADDRESSES_LH>`
+/// inherits the struct's alignment. Guaranteed by the standard library,
+/// but the explicit check makes the invariant load-bearing if anyone
+/// ever changes the backing element type.
+const _: () = assert!(
+  core::mem::align_of::<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>>()
+    == core::mem::align_of::<IP_ADAPTER_ADDRESSES_LH>()
+);
 
-/// Round a byte count up to a whole number of `u64` elements.
+/// Bytes per backing slot — one whole `IP_ADAPTER_ADDRESSES_LH` worth
+/// of storage. Rounding the requested byte count up to whole slots
+/// wastes at most `size_of - 1` bytes per fetch and keeps the
+/// struct-aligned guarantee.
+const SLOT_SIZE: usize = core::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>();
+
+/// Round a byte count up to a whole number of backing slots.
 #[inline]
-fn u64_len(size_bytes: u32) -> usize {
-  (size_bytes as usize + BYTES_PER_U64 - 1) / BYTES_PER_U64
+fn slots_for(size_bytes: u32) -> usize {
+  (size_bytes as usize + SLOT_SIZE - 1) / SLOT_SIZE
 }
 
 impl Information {
   fn fetch() -> Result<Self> {
     let mut size = 15000u32; // recommended initial size
 
-    let mut buffer: Vec<u64> = vec![0; u64_len(size)];
+    let mut buffer: Vec<MaybeUninit<IP_ADAPTER_ADDRESSES_LH>> = Vec::new();
+    // `MaybeUninit::uninit` skips the zero-fill that `vec![0u64; …]`
+    // would incur — the kernel overwrites the entire buffer on the
+    // next call anyway.
+    buffer.resize_with(slots_for(size), MaybeUninit::uninit);
     loop {
       let result = unsafe {
         GetAdaptersAddresses(
@@ -98,11 +117,11 @@ impl Information {
       }
 
       // `size` is in bytes; compare against the byte capacity of
-      // the u64-backed buffer.
-      if (size as usize) <= buffer.len() * BYTES_PER_U64 {
+      // the slot-backed buffer.
+      if (size as usize) <= buffer.len() * SLOT_SIZE {
         return Err(Error::last_os_error());
       }
-      buffer.resize(u64_len(size), 0);
+      buffer.resize_with(slots_for(size), MaybeUninit::uninit);
     }
 
     Ok(Self { buffer })

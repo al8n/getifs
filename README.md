@@ -3,7 +3,7 @@
 </div>
 <div align="center">
 
-A high-performance, cross-platform Rust library providing comprehensive network interface information without relying on libc's `getifaddrs`. Get interfaces, multicast addresses, local/private/public IP addresses, MTU, and gateway information with minimal overhead.
+Cross-platform enumeration of network interfaces and their MTU, gateway, multicast, and local/private/public IP addresses — with a libc-free netlink backend on Linux and no getifaddrs dependency.
 
 
 [<img alt="github" src="https://img.shields.io/badge/github-al8n/getifs-8da0cb?style=for-the-badge&logo=Github" height="22">][Github-url]
