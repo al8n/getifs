@@ -18,7 +18,8 @@ on:
       - '**.md'
       - '**.txt'
   workflow_dispatch:
-  schedule: [cron: "0 1 */7 * *"]
+  schedule: 
+    - cron: "0 1 1 * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,11 +36,9 @@ jobs:
       matrix:
         os:
           - ubuntu-latest
-          - macos-latest
-          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Install Rust
       # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable --no-self-update && rustup default stable
@@ -58,7 +57,7 @@ jobs:
           - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Install Rust
       # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable --no-self-update && rustup default stable
@@ -77,9 +76,9 @@ jobs:
           - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Cache cargo build and registry
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
@@ -92,7 +91,7 @@ jobs:
       # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable --no-self-update && rustup default stable
     - name: Cache ~/.cargo
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.cargo
         key: ${{ runner.os }}-coverage-dotcargo
@@ -109,9 +108,9 @@ jobs:
           - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Cache cargo build and registry
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: |
           ~/.cargo/registry
@@ -124,7 +123,7 @@ jobs:
       # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
       run: rustup update stable --no-self-update && rustup default stable
     - name: Cache ~/.cargo
-      uses: actions/cache@v4
+      uses: actions/cache@v5
       with:
         path: ~/.cargo
         key: ${{ runner.os }}-coverage-dotcargo
@@ -139,9 +138,9 @@ jobs:
           - ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Cache cargo build and registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -158,4 +157,55 @@ jobs:
         run: cargo install cargo-hack
       - name: ASAN / LSAN / TSAN (Linux)
         run: ci/sanitizer.sh
- 
+
+  # Verify the library compiles cleanly across every supported target
+  # triple. Platform-specific code (`linux_like` / `bsd_like` /
+  # `windows` cfgs) is the main source of breakage here — changes to
+  # any of the three paths should be caught by this matrix before they
+  # land on users' machines.
+  #
+  # Uses `cargo check` rather than `cargo build` so we don't need a
+  # target-specific linker installed in the runner — we're verifying
+  # the source compiles for each target, not producing runnable
+  # binaries.
+  cross:
+    name: cross
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # --- Linux: glibc, musl, multiple architectures -----------
+          - aarch64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - i686-unknown-linux-gnu
+          - powerpc64-unknown-linux-gnu
+          - riscv64gc-unknown-linux-gnu
+
+          # --- BSDs (uses the `bsd_like` code path) -----------------
+          - x86_64-unknown-freebsd
+          - x86_64-unknown-netbsd
+          - i686-unknown-freebsd
+
+          # --- Windows (MinGW / MSVC) -------------------------------
+          - i686-pc-windows-gnu
+          - x86_64-pc-windows-gnu
+          - x86_64-pc-windows-msvc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cross-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cross-${{ matrix.target }}-
+      - name: Install Rust + target
+        run: |
+          rustup update stable && rustup default stable
+          rustup target add ${{ matrix.target }}
+      - name: cargo check --target ${{ matrix.target }}
+        run: cargo check --target ${{ matrix.target }}

@@ -7,8 +7,8 @@ use smallvec_wrapper::SmallVec;
 
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
-  interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, sockaddr_to_ipaddr,
-  IfNet, IfOperStatusUp, Ifv4Net, Ifv6Net, Information, Net, NO_ERROR,
+  adapter_index, interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses,
+  sockaddr_to_ipaddr, IfNet, IfOperStatusUp, Ifv4Net, Ifv6Net, Information, Net, NO_ERROR,
 };
 
 use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
@@ -21,14 +21,10 @@ fn best_local_addrs_in<T: Net>(family: u16) -> io::Result<SmallVec<T>> {
   let mut addresses = SmallVec::new();
 
   // Iterate through adapters
-  for adapter in info.adapters.iter() {
+  for adapter in info.iter() {
     // Only consider operational adapters
     if adapter.OperStatus == IfOperStatusUp {
-      let mut index = 0;
-      let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
-      if res == NO_ERROR {
-        index = adapter.Ipv6IfIndex;
-      }
+      let index = adapter_index(adapter);
 
       // Check if this interface has a default route
       let has_default_route = unsafe {

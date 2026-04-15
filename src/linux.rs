@@ -222,42 +222,46 @@ where
 
   for line in lines {
     let line = line?;
-    let fields: smallvec_wrapper::MediumVec<&str> = line
-      .split([' ', ':', '\r', '\t', '\n'])
-      .filter(|s| !s.is_empty())
-      .collect();
 
-    if fields.len() < 4 {
+    // Only `fields[0]` is consulted below and we need ≥4 fields total.
+    // Walking the whitespace-delimited iterator directly avoids the
+    // per-line allocation of the old `split([' ',':','\r','\t','\n'])
+    // .filter(...).collect::<MediumVec<_>>()`. Colons are never in
+    // `fields[0]` (neither in the leading index nor in an 8-char
+    // group-address column), so dropping them from the delimiter set
+    // does not affect parsing.
+    let mut it = line.split_ascii_whitespace();
+    let field0 = match it.next() {
+      Some(s) => s,
+      None => continue,
+    };
+    if it.nth(2).is_none() {
+      // Fewer than 4 tokens on this line.
       continue;
     }
 
-    match () {
-      () if !line.starts_with(' ') && !line.starts_with('\t') => {
-        // New interface line
-        match fields[0].parse() {
-          Ok(res) => idx = res,
-          Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
-        }
+    if !line.starts_with(' ') && !line.starts_with('\t') {
+      // New interface line
+      match field0.parse() {
+        Ok(res) => idx = res,
+        Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
       }
-      () if fields[0].len() == 8 => {
-        if ifi == 0 || ifi == idx {
-          // The Linux kernel puts the IP
-          // address in /proc/net/igmp in native
-          // endianness.
-          let src = fields[0];
-          let mut b = [0u8; 4];
-          for i in (0..src.len()).step_by(2) {
-            b[i / 2] = xtoi2(&src.as_bytes()[i..i + 2], 0).unwrap_or(0);
-          }
+    } else if field0.len() == 8 {
+      if ifi == 0 || ifi == idx {
+        // The Linux kernel puts the IP address in /proc/net/igmp in
+        // native endianness.
+        let src = field0.as_bytes();
+        let mut b = [0u8; 4];
+        for i in (0..src.len()).step_by(2) {
+          b[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
+        }
 
-          b.reverse();
-          let ip = b.into();
-          if f(&ip) {
-            ifmat.push(Ifv4Addr::new(idx, ip));
-          }
+        b.reverse();
+        let ip = b.into();
+        if f(&ip) {
+          ifmat.push(Ifv4Addr::new(idx, ip));
         }
       }
-      _ => {}
     }
   }
 
@@ -276,26 +280,38 @@ where
 
   for line in reader.lines() {
     let line = line?;
-    let fields: smallvec_wrapper::MediumVec<&str> = line
-      .split([' ', '\r', '\t', '\n'])
-      .filter(|s| !s.is_empty())
-      .collect();
 
-    if fields.len() < 6 {
+    // `split_ascii_whitespace` already handles spaces/tabs/CR/LF without
+    // a collect+filter, and we only use `fields[0]` and `fields[2]`.
+    let mut it = line.split_ascii_whitespace();
+    let field0 = match it.next() {
+      Some(s) => s,
+      None => continue,
+    };
+    // skip field1
+    if it.next().is_none() {
+      continue;
+    }
+    let field2 = match it.next() {
+      Some(s) => s,
+      None => continue,
+    };
+    // need 3 more tokens (fields[3..=5]) for a total of 6+.
+    if it.nth(2).is_none() {
       continue;
     }
 
-    let idx = match fields[0].parse() {
+    let idx = match field0.parse() {
       Ok(res) => res,
       Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
     };
 
     if ifi == 0 || ifi == idx {
       let mut i = 0;
-      let src = fields[2];
+      let src = field2.as_bytes();
       let mut data = [0u8; 16];
       while i + 1 < src.len() {
-        data[i / 2] = xtoi2(&src.as_bytes()[i..i + 2], 0).unwrap_or(0);
+        data[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
         i += 2;
       }
 

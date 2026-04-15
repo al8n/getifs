@@ -26,7 +26,7 @@ A high-performance, cross-platform Rust library providing comprehensive network 
 
 ```toml
 [dependencies]
-getifs = "0.4"
+getifs = "0.5"
 ```
 
 ## Features
@@ -216,7 +216,7 @@ Apache License (Version 2.0).
 
 See [LICENSE-APACHE](LICENSE-APACHE), [LICENSE-MIT](LICENSE-MIT) for details.
 
-Copyright (c) 2025 Al Liu.
+Copyright (c) 2026 Al Liu.
 
 [Github-url]: https://github.com/al8n/getifs/
 [CI-url]: https://github.com/al8n/getifs/actions/workflows/ci.yml

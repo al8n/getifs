@@ -1,5 +1,6 @@
 use std::{
   io::{self, Error, Result},
+  marker::PhantomData,
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -44,9 +45,12 @@ bitflags::bitflags! {
 }
 
 struct Information {
-  #[allow(dead_code)]
+  // The kernel writes a null-terminated singly-linked list of
+  // `IP_ADAPTER_ADDRESSES_LH` records into this buffer, with every
+  // `Next`/`FirstUnicastAddress`/`FriendlyName`/… pointer aimed back
+  // into it. We keep the buffer alive and walk the list via an
+  // iterator — no per-adapter copy.
   buffer: Vec<u8>,
-  adapters: SmallVec<IP_ADAPTER_ADDRESSES_LH>,
 }
 
 impl Information {
@@ -67,10 +71,7 @@ impl Information {
 
       if result == NO_ERROR {
         if size == 0 {
-          return Ok(Self {
-            buffer: Vec::new(),
-            adapters: SmallVec::new(),
-          });
+          return Ok(Self { buffer: Vec::new() });
         }
         break;
       }
@@ -85,31 +86,70 @@ impl Information {
       buffer.resize(size as usize, 0);
     }
 
-    let mut adapters = SmallVec::new();
-    let mut current = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
-
-    // Safety: current is guaranteed to be valid as we just allocated it
-    unsafe {
-      while let Some(curr) = current.as_ref() {
-        adapters.push(*curr);
-        current = curr.Next;
-      }
-    }
-
-    Ok(Self { buffer, adapters })
+    Ok(Self { buffer })
   }
+
+  /// Iterate over the native adapter linked list in-place, without
+  /// copying the (~400-byte) `IP_ADAPTER_ADDRESSES_LH` records.
+  ///
+  /// Each yielded reference borrows from `self.buffer`, so the iterator
+  /// (and any pointer fields read from its items) must not outlive
+  /// this `Information`.
+  fn iter(&self) -> AdapterIter<'_> {
+    let head = if self.buffer.is_empty() {
+      std::ptr::null()
+    } else {
+      self.buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH
+    };
+    AdapterIter {
+      current: head,
+      _marker: PhantomData,
+    }
+  }
+}
+
+struct AdapterIter<'a> {
+  current: *const IP_ADAPTER_ADDRESSES_LH,
+  _marker: PhantomData<&'a IP_ADAPTER_ADDRESSES_LH>,
+}
+
+impl<'a> Iterator for AdapterIter<'a> {
+  type Item = &'a IP_ADAPTER_ADDRESSES_LH;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    // SAFETY: `current` is either null, or a pointer into the buffer
+    // of the `Information` whose lifetime this iterator borrows. The
+    // kernel produced a null-terminated singly-linked list of these
+    // structs in that buffer.
+    unsafe {
+      let curr = self.current.as_ref()?;
+      self.current = curr.Next;
+      Some(curr)
+    }
+  }
+}
+
+/// Resolves the interface index for a Windows adapter.
+///
+/// Mirrors Go's `net/interface_windows.go`: prefer the LUID-derived
+/// index, fall back to `Ipv6IfIndex` only when the conversion fails.
+fn adapter_index(adapter: &IP_ADAPTER_ADDRESSES_LH) -> u32 {
+  let mut index = 0u32;
+  // SAFETY: `adapter.Luid` is a kernel-populated LUID; `index` is a
+  // writable local `u32`.
+  let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
+  if res != NO_ERROR {
+    index = adapter.Ipv6IfIndex;
+  }
+  index
 }
 
 pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>> {
   let info = Information::fetch()?;
   let mut interfaces = TinyVec::new();
 
-  for adapter in info.adapters.iter() {
-    let mut index = 0;
-    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
-    if res == NO_ERROR {
-      index = adapter.Ipv6IfIndex;
-    }
+  for adapter in info.iter() {
+    let index = adapter_index(adapter);
 
     if let Some(idx) = idx {
       if idx == index {
@@ -277,12 +317,8 @@ where
   let info = Information::fetch()?;
   let mut addresses = SmallVec::new();
 
-  for adapter in info.adapters.iter() {
-    let mut index = 0;
-    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
-    if res == NO_ERROR {
-      index = adapter.Ipv6IfIndex;
-    }
+  for adapter in info.iter() {
+    let index = adapter_index(adapter);
 
     if let Some(ifi) = ifi {
       if ifi == index {
@@ -385,12 +421,8 @@ where
   let info = Information::fetch()?;
   let mut addresses = SmallVec::new();
 
-  for adapter in info.adapters.iter() {
-    let mut index = 0;
-    let res = unsafe { ConvertInterfaceLuidToIndex(&adapter.Luid, &mut index) };
-    if res == NO_ERROR {
-      index = adapter.Ipv6IfIndex;
-    }
+  for adapter in info.iter() {
+    let index = adapter_index(adapter);
 
     if let Some(ifi) = ifi {
       if ifi == index {
