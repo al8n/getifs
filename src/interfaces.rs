@@ -24,7 +24,7 @@ use super::{
 ))]
 use super::{IfAddr, Ifv4Addr, Ifv6Addr};
 
-/// The inferface struct
+/// The interface struct
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Interface {
   pub(super) index: u32,

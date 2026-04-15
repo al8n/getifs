@@ -38,12 +38,12 @@ jobs:
           - ubuntu-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v6
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable
-    - name: Check formatting
-      run: cargo fmt --all -- --check
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
 
   # Apply clippy lints
@@ -57,14 +57,14 @@ jobs:
           - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v6
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
-    - name: Apply clippy lints
-      run: cargo hack clippy --each-feature --exclude-no-default-features
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: Apply clippy lints
+        run: cargo hack clippy --each-feature --exclude-no-default-features
 
   build:
     name: build
@@ -76,27 +76,27 @@ jobs:
           - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v6
-    - name: Cache cargo build and registry
-      uses: actions/cache@v5
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-build-
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable
-    - name: Cache ~/.cargo
-      uses: actions/cache@v5
-      with:
-        path: ~/.cargo
-        key: ${{ runner.os }}-coverage-dotcargo
-    - name: Run build
-      run: cargo build --all-features
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-build-
+      - name: Install Rust
+        # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Cache ~/.cargo
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo
+          key: ${{ runner.os }}-coverage-dotcargo
+      - name: Run build
+        run: cargo build --all-features
   
   test:
     name: test
@@ -108,28 +108,28 @@ jobs:
           - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v6
-    - name: Cache cargo build and registry
-      uses: actions/cache@v5
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-test-
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable
-    - name: Cache ~/.cargo
-      uses: actions/cache@v5
-      with:
-        path: ~/.cargo
-        key: ${{ runner.os }}-coverage-dotcargo
-    - name: Run test
-      run: cargo test --all-features -- --nocapture
-  
+      - uses: actions/checkout@v6
+      - name: Cache cargo build and registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-test-
+      - name: Install Rust
+        # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Cache ~/.cargo
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo
+          key: ${{ runner.os }}-coverage-dotcargo
+      - name: Run test
+        run: cargo test --all-features -- --nocapture
+
   sanitizer:
     name: sanitizer
     strategy:
