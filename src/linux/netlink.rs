@@ -10,7 +10,7 @@ use rustix::net::{
 };
 
 use smallvec_wrapper::{SmallVec, TinyVec};
-use std::{io, mem, net::IpAddr, os::fd::OwnedFd};
+use std::{collections::HashSet, io, mem, net::IpAddr, os::fd::OwnedFd};
 
 use crate::local_ip_filter;
 
@@ -498,6 +498,11 @@ where
     let page_size = rustix::param::page_size();
     let mut rb = vec![0u8; page_size];
     let mut gateways = SmallVec::new();
+    // Policy-routing tables and multipath/ECMP entries can surface the
+    // same gateway on multiple route messages. Dedup via a HashSet
+    // keyed by `(index, IpAddr)`, matching the pattern already used in
+    // `src/bsd_like/rt_generic.rs` and `src/windows/gateway.rs`.
+    let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
 
     'outer: loop {
       let nr = handle.recv(&mut rb)?;
@@ -595,11 +600,13 @@ where
               rtattr_buf = &rtattr_buf[alen..];
             }
 
-            gateways.extend(
-              tmp_addrs
-                .into_iter()
-                .filter_map(|addr| A::try_from(current_ifi, addr)),
-            );
+            for raw in tmp_addrs {
+              if let Some(addr) = A::try_from(current_ifi, raw) {
+                if seen.insert((addr.index(), addr.addr())) {
+                  gateways.push(addr);
+                }
+              }
+            }
           }
           _ => {}
         }

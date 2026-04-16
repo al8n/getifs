@@ -7,82 +7,111 @@ use smallvec_wrapper::SmallVec;
 
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
-  adapter_index, interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses,
-  sockaddr_to_ipaddr, IfNet, IfOperStatusUp, Ifv4Net, Ifv6Net, Information, Net, NO_ERROR,
+  interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, IfNet, Ifv4Net, Ifv6Net,
+  NO_ERROR,
 };
 
-use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
 use windows_sys::Win32::Networking::WinSock::*;
 
-fn best_local_addrs_in<T: Net>(family: u16) -> io::Result<SmallVec<T>> {
-  let info = Information::fetch()?;
+/// Finds the `InterfaceIndex` of the default-route adapter with the
+/// lowest `Metric` for the requested family, or `None` if no default
+/// route exists for that family.
+///
+/// This replaces the previous `best_local_addrs_in` loop, which:
+///   1. Only ever called `GetIpForwardTable` (IPv4-only), so
+///      `best_local_ipv6_addrs` was driven by IPv4 routing state.
+///   2. Re-read the forwarding table inside the adapter loop, causing
+///      O(#adapters) redundant table fetches.
+///   3. Accepted *any* `0.0.0.0` route without comparing metrics, so a
+///      multi-homed host would emit addresses from every adapter that
+///      had any default route — not "the best" as the docs promise.
+fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
+  // SAFETY: `GetIpForwardTable2` writes a valid `*mut MIB_IPFORWARD_TABLE2`
+  // into `table` on success; `FreeMibTable` is called via the guard below.
+  unsafe {
+    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    let result = GetIpForwardTable2(family, &mut table);
+    if result != NO_ERROR {
+      return Err(io::Error::last_os_error());
+    }
 
-  let mut addresses = SmallVec::new();
-
-  // Iterate through adapters
-  for adapter in info.iter() {
-    // Only consider operational adapters
-    if adapter.OperStatus == IfOperStatusUp {
-      let index = adapter_index(adapter);
-
-      // Check if this interface has a default route
-      let has_default_route = unsafe {
-        let table;
-        let mut num_entries = 0u32;
-        let result = GetIpForwardTable(std::ptr::null_mut(), &mut num_entries, 0);
-        if result == ERROR_INSUFFICIENT_BUFFER {
-          let mut buffer = vec![0u8; num_entries as usize];
-          table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
-          if GetIpForwardTable(table, &mut num_entries, 0) == NO_ERROR {
-            let table_ref = &*table;
-            let rows = core::slice::from_raw_parts(
-              &table_ref.table as *const _ as *const MIB_IPFORWARDROW,
-              table_ref.dwNumEntries as usize,
-            );
-            // Look for a default route (0.0.0.0) on this interface
-            rows
-              .iter()
-              .any(|route| route.dwForwardDest == 0 && route.dwForwardIfIndex == index)
-          } else {
-            false
-          }
-        } else {
-          false
-        }
-      };
-
-      if has_default_route {
-        let mut unicast_address = adapter.FirstUnicastAddress;
-
-        while !unicast_address.is_null() {
-          let addr = unsafe { &*unicast_address };
-
-          if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
-            if let Some(ip) = T::try_from(index, ip, addr.OnLinkPrefixLength) {
-              addresses.push(ip);
-            }
-          }
-
-          unicast_address = addr.Next;
+    // Defer the `FreeMibTable` call so we don't leak on any early
+    // return below.
+    struct TableGuard(*mut MIB_IPFORWARD_TABLE2);
+    impl Drop for TableGuard {
+      fn drop(&mut self) {
+        if !self.0.is_null() {
+          unsafe { FreeMibTable(self.0 as *mut _) }
         }
       }
     }
-  }
+    let _guard = TableGuard(table);
 
-  Ok(addresses)
+    if table.is_null() {
+      return Ok(None);
+    }
+
+    let t = &*table;
+    let rows = core::slice::from_raw_parts(
+      &t.Table as *const _ as *const MIB_IPFORWARD_ROW2,
+      t.NumEntries as usize,
+    );
+
+    // Scan once, tracking the lowest-metric default route.
+    // `PrefixLength == 0` on a `MIB_IPFORWARD_ROW2` identifies a
+    // default route (0.0.0.0/0 or ::/0) regardless of family.
+    let mut best: Option<(u32, u32)> = None; // (metric, interface_index)
+    for route in rows {
+      if route.DestinationPrefix.PrefixLength != 0 {
+        continue;
+      }
+      match best {
+        None => best = Some((route.Metric, route.InterfaceIndex)),
+        Some((best_metric, _)) if route.Metric < best_metric => {
+          best = Some((route.Metric, route.InterfaceIndex));
+        }
+        _ => {}
+      }
+    }
+    Ok(best.map(|(_, idx)| idx))
+  }
 }
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
-  best_local_addrs_in(AF_INET)
+  match best_default_route_interface(AF_INET)? {
+    Some(idx) => interface_ipv4_addresses(Some(idx), local_ip_filter),
+    None => Ok(SmallVec::new()),
+  }
 }
 
 pub(crate) fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
-  best_local_addrs_in(AF_INET6)
+  match best_default_route_interface(AF_INET6)? {
+    Some(idx) => interface_ipv6_addresses(Some(idx), local_ip_filter),
+    None => Ok(SmallVec::new()),
+  }
 }
 
 pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
-  best_local_addrs_in(AF_UNSPEC)
+  // For the any-family variant, independently pick the best v4 and
+  // best v6 default-route interface. This lets a dual-stack host with
+  // different WAN/VPN egress per family surface the right addresses
+  // for each — collapsing both into a single "best interface" would
+  // arbitrarily drop one family's usable addresses.
+  let mut result: SmallVec<IfNet> = SmallVec::new();
+  if let Some(idx) = best_default_route_interface(AF_INET)? {
+    let v4 = interface_ipv4_addresses(Some(idx), local_ip_filter)?;
+    for a in v4 {
+      result.push(a.into());
+    }
+  }
+  if let Some(idx) = best_default_route_interface(AF_INET6)? {
+    let v6 = interface_ipv6_addresses(Some(idx), local_ip_filter)?;
+    for a in v6 {
+      result.push(a.into());
+    }
+  }
+  Ok(result)
 }
 
 pub(crate) fn local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {

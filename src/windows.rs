@@ -167,6 +167,33 @@ impl<'a> Iterator for AdapterIter<'a> {
   }
 }
 
+/// Resolves an adapter name when its `FriendlyName` is unavailable.
+///
+/// Calls `if_indextoname` and guards against a null return — feeding a
+/// null pointer straight into `CStr::from_ptr` is UB, which was the
+/// previous behaviour at three call sites (`interface_table`, the
+/// `idx=None` arm of the same loop, and `idx_to_name::ifindex_to_name`
+/// on Windows). If the fallback also fails we return an empty
+/// `SmolStr` so `interface_table()` can keep producing a value for
+/// every adapter rather than aborting the whole call.
+fn interface_name_fallback(index: u32) -> smol_str::SmolStr {
+  let mut name_buf = [0u8; 256];
+  // SAFETY: `if_indextoname` writes into `name_buf` (which is >= IF_NAMESIZE)
+  // and returns either a pointer into that buffer or null.
+  let hname = unsafe { if_indextoname(index, name_buf.as_mut_ptr()) };
+  if hname.is_null() {
+    return smol_str::SmolStr::default();
+  }
+  // SAFETY: non-null `hname` points into `name_buf`, which is kept
+  // alive for the duration of this call and is guaranteed to contain
+  // a NUL-terminated C string produced by `if_indextoname`.
+  unsafe {
+    std::ffi::CStr::from_ptr(hname as _)
+      .to_string_lossy()
+      .into()
+  }
+}
+
 /// Resolves the interface index for a Windows adapter.
 ///
 /// Mirrors Go's `net/interface_windows.go`: prefer the LUID-derived
@@ -193,15 +220,7 @@ pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>
       if idx == index {
         let name = match crate::utils::friendly_name(adapter.FriendlyName) {
           Some(name) => name,
-          None => {
-            let mut name_buf = [0u8; 256];
-            let hname = unsafe { if_indextoname(index, name_buf.as_mut_ptr()) };
-            unsafe {
-              std::ffi::CStr::from_ptr(hname as _)
-                .to_string_lossy()
-                .into()
-            }
-          }
+          None => interface_name_fallback(index),
         };
 
         let mut flags = Flags::empty();
@@ -258,15 +277,7 @@ pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>
     } else {
       let name = match crate::utils::friendly_name(adapter.FriendlyName) {
         Some(name) => name,
-        None => {
-          let mut name_buf = [0u8; 256];
-          let hname = unsafe { if_indextoname(index, name_buf.as_mut_ptr()) };
-          unsafe {
-            std::ffi::CStr::from_ptr(hname as _)
-              .to_string_lossy()
-              .into()
-          }
-        }
+        None => interface_name_fallback(index),
       };
 
       let mut flags = Flags::empty();
