@@ -150,12 +150,18 @@ pub(crate) fn route_ipv4_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Rou
 where
   F: FnMut(&Routev4) -> bool,
 {
+  // Use `fetch_family` rather than `ForwardTable::fetch` directly so
+  // `ERROR_NOT_FOUND` (the kernel's "this family has no route entries"
+  // signal — common on a single-stack host) maps to an empty
+  // `SmallVec` rather than `Err`. Real syscall failures still
+  // propagate.
   let mut out: SmallVec<Routev4> = SmallVec::new();
-  let table = ForwardTable::fetch(AF_INET)?;
-  for row in table.rows() {
-    if let Some(r) = build_routev4(row) {
-      if f(&r) {
-        out.push(r);
+  if let Some(table) = fetch_family(AF_INET)? {
+    for row in table.rows() {
+      if let Some(r) = build_routev4(row) {
+        if f(&r) {
+          out.push(r);
+        }
       }
     }
   }
@@ -166,12 +172,15 @@ pub(crate) fn route_ipv6_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Rou
 where
   F: FnMut(&Routev6) -> bool,
 {
+  // Same rationale as `route_ipv4_table_by_filter`: empty IPv6 route
+  // table on a v4-only host is `Ok([])`, not `Err(ERROR_NOT_FOUND)`.
   let mut out: SmallVec<Routev6> = SmallVec::new();
-  let table = ForwardTable::fetch(AF_INET6)?;
-  for row in table.rows() {
-    if let Some(r) = build_routev6(row) {
-      if f(&r) {
-        out.push(r);
+  if let Some(table) = fetch_family(AF_INET6)? {
+    for row in table.rows() {
+      if let Some(r) = build_routev6(row) {
+        if f(&r) {
+          out.push(r);
+        }
       }
     }
   }

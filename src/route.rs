@@ -166,11 +166,15 @@ impl Route {
 ///
 /// ## Platform notes
 ///
-/// On NetBSD and OpenBSD this may return a partial table: the kernel
-/// emits some sockaddr forms in `NET_RT_DUMP` messages that the shared
-/// BSD parser doesn't yet decode (notably AF_LINK gateways and certain
-/// kernel-form netmasks), and unparseable entries are skipped rather
-/// than failing the whole call. Linux, macOS, FreeBSD, DragonFlyBSD,
+/// **NetBSD and OpenBSD: result may be incomplete.** The kernel emits
+/// some sockaddr forms in `NET_RT_DUMP` messages that the shared BSD
+/// parser doesn't yet decode (notably AF_LINK gateways and certain
+/// kernel-form netmasks). Those routes are silently skipped rather
+/// than failing the whole call, and there is no signal in the return
+/// value to distinguish "no such route" from "route present but
+/// unparseable." Code that needs an authoritative table on NetBSD or
+/// OpenBSD should cross-check against the OS routing tool until the
+/// per-OS sockaddr decoders land. Linux, macOS, FreeBSD, DragonFlyBSD,
 /// and Windows return a complete table.
 ///
 /// ## Example

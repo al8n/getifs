@@ -54,11 +54,20 @@ fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
     );
 
     if result != NO_ERROR {
-      // ERROR_NETWORK_UNREACHABLE / ERROR_NOT_FOUND etc. — there's no
-      // route to the unspecified destination, e.g. no IPv6 default
-      // route on a v4-only host. Treat as "no best interface" rather
-      // than surfacing as an `io::Error` to callers.
-      return Ok(None);
+      // Whitelist the "no default route exists" codes — those are
+      // legitimate `Ok(None)` (e.g. v6 unconfigured on a v4-only
+      // host). Anything else (allocation failure, invalid parameter,
+      // network-stack failure) is a real syscall error that the
+      // caller deserves to see; collapsing it to `Ok(None)` would
+      // make `best_local_*` indistinguishable from "host has no
+      // default route", which can mask real platform failures.
+      const ERROR_NOT_FOUND: i32 = 1168;
+      const ERROR_NETWORK_UNREACHABLE: i32 = 1231;
+      let code = result as i32;
+      if code == ERROR_NOT_FOUND || code == ERROR_NETWORK_UNREACHABLE {
+        return Ok(None);
+      }
+      return Err(io::Error::from_raw_os_error(code));
     }
 
     Ok(Some(best_route.InterfaceIndex))
