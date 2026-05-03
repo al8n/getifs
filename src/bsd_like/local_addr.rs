@@ -51,7 +51,18 @@ fn best_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
         continue;
       }
 
-      let rtm = &*(src.as_ptr() as *const RtMsghdr);
+      // SAFETY: `src` is a `Vec<u8>` (u8-aligned); copy the header
+      // out via `read_unaligned` before reading fields. Same rationale
+      // as `walk_route_table` / `rt_generic_addrs_in` /
+      // `parse_inet_addr` — see comments there.
+      let header_size = std::mem::size_of::<RtMsghdr>();
+      if l < header_size {
+        // Message claims a length shorter than its own header type;
+        // skip rather than read past the message.
+        src = &src[l..];
+        continue;
+      }
+      let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 
       // Only consider UP routes
       if (rtm.rtm_flags & RTF_UP) == 0 {
@@ -59,36 +70,56 @@ fn best_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
         continue;
       }
 
-      let mut addr_ptr = src.as_ptr().add(std::mem::size_of::<RtMsghdr>());
+      // Bounded address cursor — protects every read below from
+      // overflowing into the next route message or off the sysctl
+      // buffer if `sa_len` is malformed or the layout differs.
+      let mut cur = &src[header_size..l];
       let mut addrs = rtm.rtm_addrs;
       let mut i = 1;
       let mut is_default = false;
 
       while addrs != 0 {
         if (addrs & 1) != 0 {
-          let sa = &*(addr_ptr as *const libc::sockaddr);
+          const SA_HEADER: usize = std::mem::size_of::<libc::sockaddr>();
+          if cur.len() < SA_HEADER {
+            break;
+          }
+          // SAFETY: bounds-checked above.
+          let sa: libc::sockaddr = std::ptr::read_unaligned(cur.as_ptr() as *const libc::sockaddr);
           match (family, sa.sa_family as i32, i) {
             (AF_INET, AF_INET, RTA_DST) | (AF_UNSPEC, AF_INET, RTA_DST) => {
-              let sa_in = &*(addr_ptr as *const libc::sockaddr_in);
-              if sa_in.sin_addr.s_addr == 0 {
-                is_default = true;
+              const SA_IN: usize = std::mem::size_of::<libc::sockaddr_in>();
+              if cur.len() >= SA_IN {
+                let sa_in: libc::sockaddr_in =
+                  std::ptr::read_unaligned(cur.as_ptr() as *const libc::sockaddr_in);
+                if sa_in.sin_addr.s_addr == 0 {
+                  is_default = true;
+                }
               }
             }
             (AF_INET6, AF_INET6, RTA_DST) | (AF_UNSPEC, AF_INET6, RTA_DST) => {
-              let sa_in6 = &*(addr_ptr as *const libc::sockaddr_in6);
-              if is_ipv6_unspecified(sa_in6.sin6_addr.s6_addr) {
-                is_default = true;
+              const SA_IN6: usize = std::mem::size_of::<libc::sockaddr_in6>();
+              if cur.len() >= SA_IN6 {
+                let sa_in6: libc::sockaddr_in6 =
+                  std::ptr::read_unaligned(cur.as_ptr() as *const libc::sockaddr_in6);
+                if is_ipv6_unspecified(sa_in6.sin6_addr.s6_addr) {
+                  is_default = true;
+                }
               }
             }
             _ => {}
           }
 
           let sa_len = if sa.sa_len == 0 {
-            std::mem::size_of::<libc::sockaddr>()
+            SA_HEADER
           } else {
             sa.sa_len as usize
           };
-          addr_ptr = addr_ptr.add(roundup(sa_len));
+          let advance = roundup(sa_len);
+          if advance == 0 || advance > cur.len() {
+            break;
+          }
+          cur = &cur[advance..];
         }
         i += 1;
         addrs >>= 1;

@@ -90,21 +90,29 @@ where
   F: FnMut(&Route) -> bool,
 {
   let mut out: SmallVec<Route> = SmallVec::new();
-  let table_v4 = ForwardTable::fetch(AF_INET)?;
-  for row in table_v4.rows() {
-    if let Some(r) = build_routev4(row) {
-      let r = Route::V4(r);
-      if f(&r) {
-        out.push(r);
+
+  // Fetch each family independently. If either family's table is
+  // unavailable (e.g. IPv6 disabled on the host) preserve whatever the
+  // other family returned rather than failing the union API. Callers
+  // that want the per-family error semantics should use
+  // `route_ipv4_table_by_filter` / `route_ipv6_table_by_filter`.
+  if let Ok(table_v4) = ForwardTable::fetch(AF_INET) {
+    for row in table_v4.rows() {
+      if let Some(r) = build_routev4(row) {
+        let r = Route::V4(r);
+        if f(&r) {
+          out.push(r);
+        }
       }
     }
   }
-  let table_v6 = ForwardTable::fetch(AF_INET6)?;
-  for row in table_v6.rows() {
-    if let Some(r) = build_routev6(row) {
-      let r = Route::V6(r);
-      if f(&r) {
-        out.push(r);
+  if let Ok(table_v6) = ForwardTable::fetch(AF_INET6) {
+    for row in table_v6.rows() {
+      if let Some(r) = build_routev6(row) {
+        let r = Route::V6(r);
+        if f(&r) {
+          out.push(r);
+        }
       }
     }
   }
