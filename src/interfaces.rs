@@ -13,12 +13,14 @@ use super::{
 };
 
 // `IfAddr` / `Ifv4Addr` / `Ifv6Addr` appear only inside `cfg_multicast!`
-// blocks, which expand on Apple, FreeBSD, Linux, and Windows. Gating the
-// import to the same cfg keeps NetBSD/OpenBSD/DragonFly builds
-// warning-free.
+// blocks. Keep this import gate in lock-step with `cfg_multicast!`
+// (src/macros.rs) — otherwise DragonFly (added when multicast support
+// expanded) would compile the multicast methods/free-functions with
+// these names unresolved.
 #[cfg(any(
   target_vendor = "apple",
   target_os = "freebsd",
+  target_os = "dragonfly",
   target_os = "linux",
   windows
 ))]

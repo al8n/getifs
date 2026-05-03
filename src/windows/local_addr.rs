@@ -14,67 +14,54 @@ use super::{
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
 use windows_sys::Win32::Networking::WinSock::*;
 
-/// Finds the `InterfaceIndex` of the default-route adapter with the
-/// lowest `Metric` for the requested family, or `None` if no default
-/// route exists for that family.
+/// Finds the `InterfaceIndex` of the adapter that the kernel would use
+/// to reach the unspecified address of the requested family, or `None`
+/// if no route is available for that family.
 ///
-/// This replaces the previous `best_local_addrs_in` loop, which:
-///   1. Only ever called `GetIpForwardTable` (IPv4-only), so
-///      `best_local_ipv6_addrs` was driven by IPv4 routing state.
-///   2. Re-read the forwarding table inside the adapter loop, causing
-///      O(#adapters) redundant table fetches.
-///   3. Accepted *any* `0.0.0.0` route without comparing metrics, so a
-///      multi-homed host would emit addresses from every adapter that
-///      had any default route — not "the best" as the docs promise.
+/// Defers to `GetBestRoute2` rather than scanning `MIB_IPFORWARD_TABLE2`
+/// ourselves: the kernel's selection is the **effective** metric (route
+/// metric + interface metric — not just `MIB_IPFORWARD_ROW2.Metric`)
+/// and also rejects unusable rows (loopback / dead / disabled), which
+/// matches Windows' own outbound interface selection. Querying the
+/// table and comparing only `route.Metric` would mis-order multi-homed
+/// hosts where a low-route-metric route lives on a high-cost interface.
+///
+/// History: an earlier revision scanned `MIB_IPFORWARD_TABLE2` and
+/// picked the lowest `route.Metric`; before that, `best_local_addrs_in`
+/// fetched the legacy IPv4-only `GetIpForwardTable` *per adapter* and
+/// accepted any default route. This is the version that actually models
+/// what Windows does.
 fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
-  // SAFETY: `GetIpForwardTable2` writes a valid `*mut MIB_IPFORWARD_TABLE2`
-  // into `table` on success; `FreeMibTable` is called via the guard below.
+  // SAFETY: We hand `GetBestRoute2` a zero-initialised `SOCKADDR_INET`
+  // with `si_family` set to the requested family, which the kernel
+  // reads as `0.0.0.0:0` or `[::]:0` — the canonical "default-route"
+  // destination. All output buffers are kernel-writable locals.
   unsafe {
-    let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
-    let result = GetIpForwardTable2(family, &mut table);
+    let mut destination: SOCKADDR_INET = std::mem::zeroed();
+    destination.si_family = family;
+
+    let mut best_route: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
+    let mut best_source: SOCKADDR_INET = std::mem::zeroed();
+
+    let result = GetBestRoute2(
+      std::ptr::null(), // InterfaceLuid: let kernel choose
+      0,                // InterfaceIndex: let kernel choose
+      std::ptr::null(), // SourceAddress: let kernel choose
+      &destination,
+      0, // AddressSortOptions
+      &mut best_route,
+      &mut best_source,
+    );
+
     if result != NO_ERROR {
-      return Err(io::Error::last_os_error());
-    }
-
-    // Defer the `FreeMibTable` call so we don't leak on any early
-    // return below.
-    struct TableGuard(*mut MIB_IPFORWARD_TABLE2);
-    impl Drop for TableGuard {
-      fn drop(&mut self) {
-        if !self.0.is_null() {
-          unsafe { FreeMibTable(self.0 as *mut _) }
-        }
-      }
-    }
-    let _guard = TableGuard(table);
-
-    if table.is_null() {
+      // ERROR_NETWORK_UNREACHABLE / ERROR_NOT_FOUND etc. — there's no
+      // route to the unspecified destination, e.g. no IPv6 default
+      // route on a v4-only host. Treat as "no best interface" rather
+      // than surfacing as an `io::Error` to callers.
       return Ok(None);
     }
 
-    let t = &*table;
-    let rows = core::slice::from_raw_parts(
-      &t.Table as *const _ as *const MIB_IPFORWARD_ROW2,
-      t.NumEntries as usize,
-    );
-
-    // Scan once, tracking the lowest-metric default route.
-    // `PrefixLength == 0` on a `MIB_IPFORWARD_ROW2` identifies a
-    // default route (0.0.0.0/0 or ::/0) regardless of family.
-    let mut best: Option<(u32, u32)> = None; // (metric, interface_index)
-    for route in rows {
-      if route.DestinationPrefix.PrefixLength != 0 {
-        continue;
-      }
-      match best {
-        None => best = Some((route.Metric, route.InterfaceIndex)),
-        Some((best_metric, _)) if route.Metric < best_metric => {
-          best = Some((route.Metric, route.InterfaceIndex));
-        }
-        _ => {}
-      }
-    }
-    Ok(best.map(|(_, idx)| idx))
+    Ok(Some(best_route.InterfaceIndex))
   }
 }
 

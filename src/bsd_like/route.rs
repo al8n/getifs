@@ -59,7 +59,15 @@ where
         continue;
       }
 
-      let rtm = &*(src.as_ptr() as *const RtMsghdr);
+      // `Vec<u8>` only formally guarantees u8 alignment for its data
+      // pointer, so creating `&*(src.as_ptr() as *const RtMsghdr)` is
+      // UB even when each BSD's sysctl kernel-side padding makes the
+      // bytes happen to land aligned in practice. `read_unaligned`
+      // copies into a properly-aligned local without that assumption.
+      // (The same caveat applies to the sockaddr derefs reached via
+      // `parse_addrs` — those live in shared pre-existing code paths
+      // and are tracked separately.)
+      let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 
       // Tolerate per-message sockaddr parse failures: this is the only
       // way to get *any* routes back on NetBSD/OpenBSD where
