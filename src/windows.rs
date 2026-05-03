@@ -13,18 +13,22 @@ use windows_sys::{
 };
 
 use super::{
-  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net,
-  MAC_ADDRESS_SIZE,
+  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net, Route,
+  Routev4, Routev6, MAC_ADDRESS_SIZE,
 };
 
 pub(super) use gateway::*;
 pub(super) use local_addr::*;
+pub(super) use route::*;
 
 #[path = "windows/local_addr.rs"]
 mod local_addr;
 
 #[path = "windows/gateway.rs"]
 mod gateway;
+
+#[path = "windows/route.rs"]
+mod route;
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.

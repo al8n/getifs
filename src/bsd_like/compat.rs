@@ -181,6 +181,36 @@ pub(super) struct RtMetricsOpenBsd {
 }
 
 // =====================================================================
+// ifma_msghdr (multicast group membership)
+// =====================================================================
+//
+// Apple / FreeBSD: `libc` exports the struct + `NET_RT_IFMALIST`
+// directly. DragonFly's kernel has them too (forked from FreeBSD with
+// the same layout) but `libc` only declares them under `target_os =
+// "freebsd"`, so we re-export the FreeBSD-shaped struct on DragonFly
+// and define `NET_RT_IFMALIST` locally.
+
+#[cfg(target_os = "dragonfly")]
+#[repr(C)]
+pub(super) struct IfmaMsghdr {
+  pub ifmam_msglen: u16,
+  pub ifmam_version: u8,
+  pub ifmam_type: u8,
+  pub ifmam_addrs: libc::c_int,
+  pub ifmam_flags: libc::c_int,
+  pub ifmam_index: u16,
+}
+
+#[cfg(target_os = "dragonfly")]
+pub(super) const NET_RT_IFMALIST: libc::c_int = 4;
+
+#[cfg(target_os = "freebsd")]
+pub(super) use libc::ifma_msghdr as IfmaMsghdr;
+
+#[cfg(target_os = "freebsd")]
+pub(super) use libc::NET_RT_IFMALIST;
+
+// =====================================================================
 // ifa_msghdr
 // =====================================================================
 //

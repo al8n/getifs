@@ -31,6 +31,7 @@ getifs = "0.5"
 - **MTU information** - Get interface MTU values
 - **Multicast addresses** - Fetch multicast group memberships
 - **Gateway discovery** - Find IPv4 and IPv6 gateway addresses
+- **Routing table** - Enumerate kernel routing-table entries
 - **RFC-based filtering** - Filter addresses by RFC classification
 - **High performance** - Up to 189x faster than alternatives on macOS (see benchmarks)
 - **Cross-platform** - Linux, macOS, BSD, Windows support
@@ -67,6 +68,7 @@ for gateway in gateways {
 - Fetching all interface addresses (excluding multicast addrs): [examples/addrs.rs](./examples/addrs.rs)
 - Fetching all interface multicast addresses: [examples/multicast_addrs.rs](./examples/multicast_addrs.rs)
 - Fetching gateway addresses: [examples/gateway.rs](./examples/gateway.rs)
+- Fetching the routing table: [examples/route.rs](./examples/route.rs)
 - Fetching local ip addresses: [examples/local_ip_addrs.rs](./examples/local_ip_addrs.rs)
 - Fetching ip addresses by RFC: [examples/filter_by_rfc.rs](./examples/filter_by_rfc.rs)
 
@@ -100,7 +102,7 @@ Existing network interface crates have limitations:
 
 ## Roadmap
 
-- [ ] Support fetching routing tables
+- [x] Support fetching routing tables
 
 ## Benchmarks
 

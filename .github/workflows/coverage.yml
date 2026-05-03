@@ -54,8 +54,91 @@ jobs:
           name: ${{ matrix.os }}
           path: coverage/${{ matrix.os }}/cobertura.xml
 
+  # Coverage on BSDs runs in a vmactions VM and uses cargo-llvm-cov
+  # (cargo-tarpaulin only supports Linux). FreeBSD uses rustup so we can
+  # pull in `llvm-tools-preview`; NetBSD uses pkgsrc rust + the bundled
+  # llvm-cov from rustlib so the LLVM major version matches rustc.
+  # OpenBSD/DragonFly are skipped: rustup isn't supported there and
+  # matching system llvm to system rust is brittle. The `freebsdlike`
+  # path (FreeBSD/DragonFly) and `netbsdlike` path (NetBSD/OpenBSD) are
+  # both exercised by the two coverage targets we keep.
+  #
+  # PRs skip BSD coverage because installing cargo-llvm-cov from source
+  # inside each VM costs ~10 minutes; runs on push/dispatch instead.
+  # Both jobs are best-effort: the VM step is continue-on-error and the
+  # artifact upload is gated on the report existing.
+  coverage-freebsd:
+    name: Generate Coverage for freebsd
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate coverage on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          copyback: true
+          prepare: |
+            pkg install -y curl
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable -c llvm-tools-preview
+            . $HOME/.cargo/env
+            cargo install cargo-llvm-cov --locked
+          run: |
+            . $HOME/.cargo/env
+            mkdir -p coverage/freebsd
+            cargo llvm-cov --all-features --cobertura --output-path coverage/freebsd/cobertura.xml -- --nocapture
+        continue-on-error: true
+      - name: Upload Coverage Report as Artifact
+        if: hashFiles('coverage/freebsd/cobertura.xml') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: freebsd
+          path: coverage/freebsd/cobertura.xml
+
+  coverage-netbsd:
+    name: Generate Coverage for netbsd
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate coverage on NetBSD
+        uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          copyback: true
+          prepare: |
+            /usr/sbin/pkg_add rust
+            export PATH=$HOME/.cargo/bin:$PATH
+            cargo install cargo-llvm-cov --locked
+          run: |
+            export PATH=$HOME/.cargo/bin:$PATH
+            # Prefer the llvm-cov / llvm-profdata that ship with pkgsrc's
+            # rust (under /usr/pkg/lib/rustlib/<target>/bin) so the LLVM
+            # major version matches rustc. Falls through to PATH discovery
+            # if the rustlib copy isn't present.
+            RUST_BIN=$(find /usr/pkg/lib/rustlib -type d -name bin 2>/dev/null | head -1)
+            if [ -x "$RUST_BIN/llvm-cov" ] && [ -x "$RUST_BIN/llvm-profdata" ]; then
+              export LLVM_COV="$RUST_BIN/llvm-cov"
+              export LLVM_PROFDATA="$RUST_BIN/llvm-profdata"
+            fi
+            mkdir -p coverage/netbsd
+            cargo llvm-cov --all-features --cobertura --output-path coverage/netbsd/cobertura.xml -- --nocapture
+        continue-on-error: true
+      - name: Upload Coverage Report as Artifact
+        if: hashFiles('coverage/netbsd/cobertura.xml') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: netbsd
+          path: coverage/netbsd/cobertura.xml
+
   upload-codecov:
-    needs: coverage-report
+    # `needs:` waits on every coverage producer. BSD jobs are skipped on
+    # PR via their `if:` — GitHub Actions treats a skipped dependency as
+    # successful, so `upload-codecov` still runs on PRs with just the
+    # tarpaulin Linux/macOS/Windows reports.
+    needs: [coverage-report, coverage-freebsd, coverage-netbsd]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

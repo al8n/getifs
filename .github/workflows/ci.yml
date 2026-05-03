@@ -209,3 +209,83 @@ jobs:
           rustup target add ${{ matrix.target }}
       - name: cargo check --target ${{ matrix.target }}
         run: cargo check --target ${{ matrix.target }}
+
+  # Run the test suite inside real BSD VMs via https://github.com/vmactions.
+  # The `cross` job above only verifies that the BSD cfg paths compile —
+  # these jobs exercise them at runtime, which catches bugs (e.g. wrong
+  # struct layouts, kernel-form sockaddr parsing) that pure compile
+  # checks miss. Each BSD installs Rust from its own package manager.
+  test-freebsd:
+    name: test (freebsd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          copyback: false
+          prepare: |
+            pkg install -y rust
+          run: |
+            cargo build --all-features
+            cargo test --all-features -- --nocapture
+
+  test-openbsd:
+    name: test (openbsd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test on OpenBSD
+        uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          copyback: false
+          prepare: |
+            pkg_add -I rust
+          run: |
+            cargo build --all-features
+            cargo test --all-features -- --nocapture
+
+  test-netbsd:
+    name: test (netbsd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test on NetBSD
+        uses: vmactions/netbsd-vm@v1
+        with:
+          usesh: true
+          copyback: false
+          prepare: |
+            /usr/sbin/pkg_add rust
+          run: |
+            cargo build --all-features
+            cargo test --all-features -- --nocapture
+
+  # DragonFlyBSD's `pkg` ships rust 1.85.x (as of 2026-05), which is
+  # below the MSRV of several transitive dependencies (e.g. smol_str
+  # 0.3.6 requires 1.89). Until the pkg version catches up the build
+  # will fail with `error: rustc 1.85.x is not supported by ...`.
+  # `continue-on-error` keeps the run green while still surfacing the
+  # failure in the run summary.
+  test-dragonflybsd:
+    name: test (dragonflybsd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test on DragonFlyBSD
+        uses: vmactions/dragonflybsd-vm@v1
+        with:
+          usesh: true
+          copyback: false
+          prepare: |
+            pkg install -y rust
+          run: |
+            cargo build --all-features
+            cargo test --all-features -- --nocapture

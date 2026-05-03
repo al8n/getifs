@@ -36,12 +36,14 @@ macro_rules! cfg_bsd_multicast {
       #[cfg(any(
         target_vendor = "apple",
         target_os = "freebsd",
+        target_os = "dragonfly",
       ))]
       #[cfg_attr(
         docsrs,
         doc(cfg(any(
           target_vendor = "apple",
           target_os = "freebsd",
+          target_os = "dragonfly",
         )))
       )]
       $item
@@ -55,6 +57,7 @@ macro_rules! cfg_multicast {
       #[cfg(any(
         target_vendor = "apple",
         target_os = "freebsd",
+        target_os = "dragonfly",
         target_os = "linux",
         windows
       ))]
@@ -63,6 +66,7 @@ macro_rules! cfg_multicast {
         doc(cfg(any(
           target_vendor = "apple",
           target_os = "freebsd",
+          target_os = "dragonfly",
           target_os = "linux",
           windows
         )))

@@ -28,6 +28,7 @@ pub use name_to_iface::{ifname_to_iface, ifname_to_v4_iface, ifname_to_v6_iface}
 pub use os::Flags;
 pub use private_ip_addrs::*;
 pub use public_ip_addrs::*;
+pub use route::*;
 pub use smol_str::SmolStr;
 
 // #[cfg(feature = "serde")]
@@ -43,6 +44,7 @@ mod name_to_idx;
 mod name_to_iface;
 mod private_ip_addrs;
 mod public_ip_addrs;
+mod route;
 mod utils;
 
 #[cfg(linux_like)]

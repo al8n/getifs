@@ -4,12 +4,14 @@ use std::{
 };
 
 use hardware_address::xtoi2;
+use ipnet::{Ipv4Net, Ipv6Net};
 use rustix::net::AddressFamily;
 use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 
 use super::{
-  IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE,
+  IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net, Route, Routev4,
+  Routev6, MAC_ADDRESS_SIZE,
 };
 
 pub(super) use local_addr::*;
@@ -20,7 +22,7 @@ mod netlink;
 #[path = "linux/local_addr.rs"]
 mod local_addr;
 
-use netlink::{netlink_addr, netlink_interface};
+use netlink::{netlink_addr, netlink_interface, netlink_walk_routes};
 
 macro_rules! rt_generic_mod {
   ($($name:ident($rta:expr, $rtn:expr)), +$(,)?) => {
@@ -85,6 +87,113 @@ rt_generic_mod!(gateway(
   linux_raw_sys::netlink::rtattr_type_t::RTA_GATEWAY as u16,
   None
 ),);
+
+#[inline]
+fn route_v4_from_raw(
+  oif: u32,
+  dst_len: u8,
+  dst: Option<IpAddr>,
+  gw: Option<IpAddr>,
+) -> Option<Routev4> {
+  if dst_len > 32 {
+    return None;
+  }
+  let dst_ip = match dst {
+    Some(IpAddr::V4(ip)) => ip,
+    Some(_) => return None,
+    None => Ipv4Addr::UNSPECIFIED,
+  };
+  let net = Ipv4Net::new(dst_ip, dst_len).ok()?;
+  let gw = match gw {
+    Some(IpAddr::V4(ip)) => Some(ip),
+    Some(_) => return None,
+    None => None,
+  };
+  Some(Routev4::new(oif, net, gw))
+}
+
+#[inline]
+fn route_v6_from_raw(
+  oif: u32,
+  dst_len: u8,
+  dst: Option<IpAddr>,
+  gw: Option<IpAddr>,
+) -> Option<Routev6> {
+  if dst_len > 128 {
+    return None;
+  }
+  let dst_ip = match dst {
+    Some(IpAddr::V6(ip)) => ip,
+    Some(_) => return None,
+    None => Ipv6Addr::UNSPECIFIED,
+  };
+  let net = Ipv6Net::new(dst_ip, dst_len).ok()?;
+  let gw = match gw {
+    Some(IpAddr::V6(ip)) => Some(ip),
+    Some(_) => return None,
+    None => None,
+  };
+  Some(Routev6::new(oif, net, gw))
+}
+
+pub(super) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Route>>
+where
+  F: FnMut(&Route) -> bool,
+{
+  let mut out: SmallVec<Route> = SmallVec::new();
+  netlink_walk_routes(AddressFamily::UNSPEC, |fam, oif, dst_len, dst, gw| {
+    let route = if fam as u16 == AddressFamily::INET.as_raw() {
+      route_v4_from_raw(oif, dst_len, dst, gw).map(Route::V4)
+    } else if fam as u16 == AddressFamily::INET6.as_raw() {
+      route_v6_from_raw(oif, dst_len, dst, gw).map(Route::V6)
+    } else {
+      None
+    };
+
+    if let Some(r) = route {
+      if f(&r) {
+        out.push(r);
+      }
+    }
+  })?;
+  Ok(out)
+}
+
+pub(super) fn route_ipv4_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Routev4>>
+where
+  F: FnMut(&Routev4) -> bool,
+{
+  let mut out: SmallVec<Routev4> = SmallVec::new();
+  netlink_walk_routes(AddressFamily::INET, |fam, oif, dst_len, dst, gw| {
+    if fam as u16 != AddressFamily::INET.as_raw() {
+      return;
+    }
+    if let Some(r) = route_v4_from_raw(oif, dst_len, dst, gw) {
+      if f(&r) {
+        out.push(r);
+      }
+    }
+  })?;
+  Ok(out)
+}
+
+pub(super) fn route_ipv6_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Routev6>>
+where
+  F: FnMut(&Routev6) -> bool,
+{
+  let mut out: SmallVec<Routev6> = SmallVec::new();
+  netlink_walk_routes(AddressFamily::INET6, |fam, oif, dst_len, dst, gw| {
+    if fam as u16 != AddressFamily::INET6.as_raw() {
+      return;
+    }
+    if let Some(r) = route_v6_from_raw(oif, dst_len, dst, gw) {
+      if f(&r) {
+        out.push(r);
+      }
+    }
+  })?;
+  Ok(out)
+}
 
 impl Interface {
   #[inline]

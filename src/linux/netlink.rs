@@ -28,6 +28,8 @@ const RTM_NEWLINK: u32 = netlink::RTM_NEWLINK as u32;
 const RTM_NEWADDR: u32 = netlink::RTM_NEWADDR as u32;
 const RTM_NEWROUTE: u32 = netlink::RTM_NEWROUTE as u32;
 
+const RTA_DST: u16 = netlink::rtattr_type_t::RTA_DST as u16;
+const RTA_GATEWAY: u16 = netlink::rtattr_type_t::RTA_GATEWAY as u16;
 const RTA_OIF: u16 = netlink::rtattr_type_t::RTA_OIF as u16;
 const RTA_PRIORITY: u16 = netlink::rtattr_type_t::RTA_PRIORITY as u16;
 
@@ -471,6 +473,112 @@ where
       Some(idx) => netlink_addr(family, idx, local_ip_filter),
       None => Ok(SmallVec::new()),
     }
+  }
+}
+
+/// Yields one entry per `RTM_NEWROUTE` message: `(family, oif, dst_len, dst,
+/// gateway)`. `dst` is `None` when the kernel omits `RTA_DST` (default
+/// route). `gateway` is `None` when there is no `RTA_GATEWAY` (a directly
+/// attached / link-scope route). All other parsing is the caller's
+/// responsibility — this lets `route_table` / `route_ipv4_table` /
+/// `route_ipv6_table` build different concrete types from the same walk.
+pub(super) fn netlink_walk_routes<F>(family: AddressFamily, mut on_route: F) -> io::Result<()>
+where
+  F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
+{
+  unsafe {
+    let handle = Handle::new()?;
+
+    let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
+    handle.send(&req)?;
+
+    let lsa = handle.sock()?;
+    let page_size = rustix::param::page_size();
+    let mut rb = vec![0u8; page_size];
+
+    'outer: loop {
+      let nr = handle.recv(&mut rb)?;
+      let mut received = &rb[..nr];
+
+      while received.len() >= NLMSG_HDRLEN {
+        let h = decode_nlmsghdr(received);
+        let hlen = h.nlmsg_len as usize;
+        let l = nlm_align_of(hlen);
+        if hlen < NLMSG_HDRLEN || l > received.len() {
+          return Err(rustix::io::Errno::INVAL.into());
+        }
+        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.pid() {
+          return Err(rustix::io::Errno::INVAL.into());
+        }
+
+        match h.nlmsg_type as u32 {
+          NLMSG_DONE => break 'outer,
+          NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
+          val if val == RTM_NEWROUTE => {
+            let rtm = &received[NLMSG_HDRLEN..];
+            let rtm_header = RtmMessageHeader::parse(rtm)?;
+
+            let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
+            let mut oif: u32 = 0;
+            let mut dst: Option<IpAddr> = None;
+            let mut gw: Option<IpAddr> = None;
+
+            while rtattr_buf.len() >= RtAttr::SIZE {
+              let attr = RtAttr {
+                len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
+                ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
+              };
+              let attrlen = attr.len as usize;
+              if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
+                return Err(rustix::io::Errno::INVAL.into());
+              }
+              let data = &rtattr_buf[RtAttr::SIZE..attrlen];
+              let alen = rta_align_of(attrlen).min(rtattr_buf.len());
+
+              match attr.ty {
+                RTA_OIF if data.len() >= 4 => {
+                  oif = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                }
+                RTA_DST => {
+                  dst = parse_rta_ipaddr(rtm_header.rtm_family, data);
+                }
+                RTA_GATEWAY => {
+                  gw = parse_rta_ipaddr(rtm_header.rtm_family, data);
+                }
+                _ => {}
+              }
+
+              rtattr_buf = &rtattr_buf[alen..];
+            }
+
+            on_route(rtm_header.rtm_family, oif, rtm_header.rtm_dst_len, dst, gw);
+          }
+          _ => {}
+        }
+
+        received = &received[l..];
+      }
+    }
+
+    Ok(())
+  }
+}
+
+/// Decode an `RTA_DST` / `RTA_GATEWAY` attribute payload as the IP family
+/// declared by `rtm_family`. Netlink RTA address payloads are in network
+/// byte order regardless of host endianness.
+#[inline]
+fn parse_rta_ipaddr(rtm_family: u8, data: &[u8]) -> Option<IpAddr> {
+  match AddressFamily::from_raw(rtm_family as u16) {
+    AddressFamily::INET if data.len() >= 4 => {
+      let bytes: [u8; 4] = data[..4].try_into().unwrap();
+      Some(IpAddr::V4(bytes.into()))
+    }
+    AddressFamily::INET6 if data.len() >= 16 => {
+      let bytes: [u8; 16] = data[..16].try_into().unwrap();
+      Some(IpAddr::V6(bytes.into()))
+    }
+    _ => None,
   }
 }
 

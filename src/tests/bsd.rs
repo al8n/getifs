@@ -17,12 +17,17 @@ impl TestInterface {
     let ifconfig =
       which::which("ifconfig").map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
 
+    // `Command::new` already specifies the program; the previous code
+    // also pushed "ifconfig" as argv[1] (a port-from-Go thinko, since
+    // Go's `Cmd.Args` includes argv[0] but Rust's `args()` does not),
+    // so the resulting invocation was `ifconfig ifconfig <name> create`
+    // and ifconfig parsed "ifconfig" as the interface name.
     let mut setup_cmd = Command::new(&ifconfig);
-    setup_cmd.args(["ifconfig", &self.name, "create"]);
+    setup_cmd.arg(&self.name).arg("create");
     self.setup_cmds.push(setup_cmd);
 
     let mut teardown_cmd = Command::new(&ifconfig);
-    teardown_cmd.args(["ifconfig", &self.name, "destroy"]);
+    teardown_cmd.arg(&self.name).arg("destroy");
     self.teardown_cmds.push(teardown_cmd);
 
     Ok(())
@@ -35,21 +40,19 @@ impl TestInterface {
       which::which("ifconfig").map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
 
     let mut setup_cmd = Command::new(&ifconfig);
-    setup_cmd.args(["ifconfig", &self.name, "create"]);
+    setup_cmd.arg(&self.name).arg("create");
     self.setup_cmds.push(setup_cmd);
 
     let mut setup_addr_cmd = Command::new(&ifconfig);
-    setup_addr_cmd.args([
-      "ifconfig",
-      &self.name,
-      "inet",
-      &self.local.to_string(),
-      &self.remote.to_string(),
-    ]);
+    setup_addr_cmd
+      .arg(&self.name)
+      .arg("inet")
+      .arg(self.local.to_string())
+      .arg(self.remote.to_string());
     self.setup_cmds.push(setup_addr_cmd);
 
     let mut teardown_cmd = Command::new(&ifconfig);
-    teardown_cmd.args(["ifconfig", &self.name, "destroy"]);
+    teardown_cmd.arg(&self.name).arg("destroy");
     self.teardown_cmds.push(teardown_cmd);
 
     Ok(())

@@ -1,4 +1,4 @@
-use ipnet::ip_mask_to_prefix;
+use ipnet::{ip_mask_to_prefix, Ipv4Net, Ipv6Net};
 use libc::{
   c_void, if_msghdr, size_t, sysctl, AF_INET, AF_INET6, AF_LINK, AF_ROUTE, AF_UNSPEC, CTL_NET,
   NET_RT_IFLIST, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO, RTM_NEWADDR, RTM_VERSION,
@@ -17,17 +17,23 @@ use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 use std::{
   io, mem,
-  net::{IpAddr, Ipv6Addr},
+  net::{IpAddr, Ipv4Addr, Ipv6Addr},
   ptr::null_mut,
 };
 
-use super::{IfNet, Ifv4Net, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
+use super::{
+  IfNet, Ifv4Net, Ifv6Net, Interface, MacAddr, Net, Route, Routev4, Routev6, MAC_ADDRESS_SIZE,
+};
 
 // `Address` / `IfAddr` / `Ifv4Addr` / `Ifv6Addr` are only referenced
 // inside the `cfg_bsd_multicast!`-gated `interface_multiaddr_table`
-// impls, which only expand for Apple and FreeBSD. Gating the import
-// to the same cfg keeps NetBSD/OpenBSD/DragonFly builds warning-free.
-#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+// impls, which only expand for Apple, FreeBSD, and DragonFly. Gating
+// the import to the same cfg keeps NetBSD/OpenBSD builds warning-free.
+#[cfg(any(
+  target_vendor = "apple",
+  target_os = "freebsd",
+  target_os = "dragonfly"
+))]
 use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
 macro_rules! rt_generic_mod {
@@ -99,10 +105,126 @@ rt_generic_mod!(gateway(RTF_GATEWAY, RTA_GATEWAY),);
 
 pub(super) use local_addr::*;
 
+#[inline]
+fn build_routev4(
+  index: u32,
+  dst: IpAddr,
+  gateway: Option<IpAddr>,
+  netmask: Option<IpAddr>,
+) -> Option<Routev4> {
+  let dst_v4 = match dst {
+    IpAddr::V4(ip) => ip,
+    _ => return None,
+  };
+  // BSD encodes a default route's netmask as either an all-zero
+  // sockaddr or as the kernel-form length=0 entry, both of which come
+  // back from `parse_addrs` as 0.0.0.0 and yield prefix 0. A missing
+  // RTAX_NETMASK on a v4 route means the kernel is describing a host
+  // route — fall back to /32 in that case.
+  let prefix_len = match netmask {
+    Some(IpAddr::V4(m)) => ip_mask_to_prefix(IpAddr::V4(m)).ok()?,
+    Some(IpAddr::V6(_)) => return None,
+    None => 32,
+  };
+  let net = Ipv4Net::new(dst_v4, prefix_len).ok()?;
+  let gw = match gateway {
+    Some(IpAddr::V4(g)) if g != Ipv4Addr::UNSPECIFIED => Some(g),
+    _ => None,
+  };
+  Some(Routev4::new(index, net, gw))
+}
+
+#[inline]
+fn build_routev6(
+  index: u32,
+  dst: IpAddr,
+  gateway: Option<IpAddr>,
+  netmask: Option<IpAddr>,
+) -> Option<Routev6> {
+  let dst_v6 = match dst {
+    IpAddr::V6(ip) => ip,
+    _ => return None,
+  };
+  let prefix_len = match netmask {
+    Some(IpAddr::V6(m)) => ip_mask_to_prefix(IpAddr::V6(m)).ok()?,
+    Some(IpAddr::V4(_)) => return None,
+    None => 128,
+  };
+  let net = Ipv6Net::new(dst_v6, prefix_len).ok()?;
+  let gw = match gateway {
+    Some(IpAddr::V6(g)) if g != Ipv6Addr::UNSPECIFIED => Some(g),
+    _ => None,
+  };
+  Some(Routev6::new(index, net, gw))
+}
+
+pub(super) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Route>>
+where
+  F: FnMut(&Route) -> bool,
+{
+  let mut out: SmallVec<Route> = SmallVec::new();
+  route::walk_route_table(AF_UNSPEC, |index, dst, gw, mask| {
+    let dst = match dst {
+      Some(ip) => ip,
+      None => return,
+    };
+    let route = match dst {
+      IpAddr::V4(_) => build_routev4(index, dst, gw, mask).map(Route::V4),
+      IpAddr::V6(_) => build_routev6(index, dst, gw, mask).map(Route::V6),
+    };
+    if let Some(r) = route {
+      if f(&r) {
+        out.push(r);
+      }
+    }
+  })?;
+  Ok(out)
+}
+
+pub(super) fn route_ipv4_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Routev4>>
+where
+  F: FnMut(&Routev4) -> bool,
+{
+  let mut out: SmallVec<Routev4> = SmallVec::new();
+  route::walk_route_table(AF_INET, |index, dst, gw, mask| {
+    let dst = match dst {
+      Some(ip) => ip,
+      None => return,
+    };
+    if let Some(r) = build_routev4(index, dst, gw, mask) {
+      if f(&r) {
+        out.push(r);
+      }
+    }
+  })?;
+  Ok(out)
+}
+
+pub(super) fn route_ipv6_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Routev6>>
+where
+  F: FnMut(&Routev6) -> bool,
+{
+  let mut out: SmallVec<Routev6> = SmallVec::new();
+  route::walk_route_table(AF_INET6, |index, dst, gw, mask| {
+    let dst = match dst {
+      Some(ip) => ip,
+      None => return,
+    };
+    if let Some(r) = build_routev6(index, dst, gw, mask) {
+      if f(&r) {
+        out.push(r);
+      }
+    }
+  })?;
+  Ok(out)
+}
+
 #[path = "bsd_like/compat.rs"]
 mod compat;
 #[path = "bsd_like/local_addr.rs"]
 mod local_addr;
+#[path = "bsd_like/route.rs"]
+mod route;
 #[path = "bsd_like/rt_generic.rs"]
 mod rt_generic;
 
@@ -644,7 +766,13 @@ cfg_apple!(
   }
 );
 
-#[cfg(target_os = "freebsd")]
+// FreeBSD and DragonFly share the same `NET_RT_IFMALIST` sysctl ABI and
+// `ifma_msghdr` layout (DragonFly forked from FreeBSD before the
+// multicast group enumeration sysctl was added on either side and they
+// haven't diverged). The constant + struct just aren't exposed by
+// `libc` for DragonFly, so they are defined locally in
+// `bsd_like/compat.rs`.
+#[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
 pub(super) fn interface_multiaddr_table<T, F>(
   family: i32,
   idx: u32,
@@ -654,15 +782,17 @@ where
   T: Address,
   F: FnMut(&IpAddr) -> bool,
 {
-  const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr>();
+  use compat::{IfmaMsghdr, NET_RT_IFMALIST};
+
+  const HEADER_SIZE: usize = mem::size_of::<IfmaMsghdr>();
 
   unsafe {
-    let buf = fetch(family, libc::NET_RT_IFMALIST, idx as i32)?;
+    let buf = fetch(family, NET_RT_IFMALIST, idx as i32)?;
     let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {
-      let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr);
+      let ifam = &*(b.as_ptr() as *const IfmaMsghdr);
       let len = ifam.ifmam_msglen as usize;
 
       if ifam.ifmam_version as i32 != RTM_VERSION {

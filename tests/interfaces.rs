@@ -120,6 +120,18 @@ fn check_unicast_stats(ifstats: &IfStats, uni_stats: &RouteStats) -> std::io::Re
   Ok(())
 }
 
+// Multicast helpers and the `if_multicast_addrs` test below are gated
+// to the same platforms as `Interface::multicast_addrs` (see
+// `cfg_multicast!` in src/macros.rs). NetBSD / OpenBSD / DragonFly do
+// not expose multicast group enumeration today, so the test must not
+// reference `Interface::multicast_addrs` on those targets.
+#[cfg(any(
+  target_vendor = "apple",
+  target_os = "freebsd",
+  target_os = "dragonfly",
+  target_os = "linux",
+  windows,
+))]
 fn validate_interface_multicast_addrs(ifmat: &[IfAddr]) -> std::io::Result<RouteStats> {
   let mut stats = RouteStats::default();
   for ifa in ifmat.iter().map(|ifa| ifa.addr()) {
@@ -147,6 +159,13 @@ fn validate_interface_multicast_addrs(ifmat: &[IfAddr]) -> std::io::Result<Route
   Ok(stats)
 }
 
+#[cfg(any(
+  target_vendor = "apple",
+  target_os = "freebsd",
+  target_os = "dragonfly",
+  target_os = "linux",
+  windows,
+))]
 fn check_multicast_stats(
   ifstats: &IfStats,
   uni_stats: &RouteStats,
@@ -242,6 +261,13 @@ fn lc_addrs() {
   }
 }
 
+#[cfg(any(
+  target_vendor = "apple",
+  target_os = "freebsd",
+  target_os = "dragonfly",
+  target_os = "linux",
+  windows,
+))]
 #[test]
 fn if_multicast_addrs() {
   let ift = interfaces().unwrap();
