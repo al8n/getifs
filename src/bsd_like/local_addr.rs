@@ -57,10 +57,11 @@ fn best_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
       // `parse_inet_addr` — see comments there.
       let header_size = std::mem::size_of::<RtMsghdr>();
       if l < header_size {
-        // Message claims a length shorter than its own header type;
-        // skip rather than read past the message.
-        src = &src[l..];
-        continue;
+        // Message claims a length shorter than its own header type —
+        // a kernel-side bug or version skew. Surface it (consistent
+        // with `walk_route_table` / `rt_generic_addrs_in`) rather
+        // than reading past the message into the next entry.
+        return Err(message_too_short());
       }
       let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 

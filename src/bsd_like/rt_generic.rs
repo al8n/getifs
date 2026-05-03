@@ -50,6 +50,17 @@ where
         continue;
       }
 
+      let header_size = std::mem::size_of::<RtMsghdr>();
+      // The outer `src.len() < l` guard above only proves the message
+      // fits in the buffer. We *also* need `l >= header_size` so the
+      // upcoming `read_unaligned` doesn't read past this message into
+      // the next one when the kernel reports a short / version-skewed
+      // record. (Same defence the route walker has at
+      // `bsd_like/route.rs::walk_route_table`.)
+      if l < header_size {
+        return Err(message_too_short());
+      }
+
       // SAFETY: `src` is a `Vec<u8>` (u8-aligned), `read_unaligned`
       // copies into an aligned local before we read fields. Same
       // rationale as in `walk_route_table` / `parse_inet_addr`.
