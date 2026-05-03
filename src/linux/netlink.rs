@@ -385,6 +385,11 @@ where
     let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
     handle.send(&req)?;
 
+    // Snapshot the kernel-assigned address so we can reject any reply
+    // that doesn't belong to this socket — same defence the other
+    // netlink walkers use.
+    let lsa = handle.sock()?;
+
     let page_size = rustix::param::page_size();
     let mut rb = vec![0u8; page_size];
     let mut best_ifindex = None;
@@ -399,6 +404,17 @@ where
         let h = decode_nlmsghdr(received);
         let hlen = h.nlmsg_len as usize;
         let l = nlm_align_of(hlen);
+
+        // Validate the message length before slicing on `hlen` /
+        // advancing by `l`. Without these guards a malformed
+        // `RTM_NEWROUTE` would either panic the slice below or — if
+        // `l == 0` — keep the inner loop from advancing forever.
+        if hlen < NLMSG_HDRLEN || l > received.len() {
+          return Err(rustix::io::Errno::INVAL.into());
+        }
+        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.pid() {
+          return Err(rustix::io::Errno::INVAL.into());
+        }
 
         match h.nlmsg_type as u32 {
           NLMSG_DONE => break 'outer,
