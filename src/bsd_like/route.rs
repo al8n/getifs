@@ -13,16 +13,22 @@ use super::{compat::RtMsghdr, fetch, message_too_short, parse_addrs};
 /// `family` is forwarded to sysctl: `AF_UNSPEC` for both families,
 /// `AF_INET` / `AF_INET6` to limit the dump to one family.
 ///
-/// Errors propagate. We do *not* swallow `parse_addrs` failures: a
-/// silent skip would let `route_table_by_filter(|r| r.is_default())`
-/// return `Ok(empty)` even when the host has a default route the parser
-/// happened to choke on, and the caller has no way to detect the
-/// result is incomplete. With the `parse_inet_addr` alignment fix in
-/// place (`bsd_like.rs`), the only remaining failure mode is a
-/// genuinely malformed kernel message — which deserves an explicit
-/// `io::Error`. Trailing zero padding (`l == 0` / `src.len() < l`) is
-/// the kernel's normal end-of-stream sentinel and still terminates the
-/// loop cleanly.
+/// **Per-message parse failures are tolerated**, not propagated. The
+/// alternative (erroring out the whole walk on the first message that
+/// `parse_addrs` can't decode) makes `route_table` unusable on NetBSD
+/// and OpenBSD, where the kernel emits some sockaddr forms (notably
+/// AF_LINK gateways and short netmasks) that the FreeBSD/Apple-shaped
+/// `parse_addrs` doesn't yet decode — even though most other route
+/// entries on those hosts parse fine. Returning a partial table with
+/// the parseable entries is strictly more useful than returning
+/// nothing, but does mean callers on NetBSD/OpenBSD may not see every
+/// route the kernel knows about. Teaching `parse_addrs` the per-OS
+/// encodings is a follow-up.
+///
+/// Length-shorter-than-header (`l < size_of::<RtMsghdr>()`) is *not*
+/// tolerated — that's a real kernel-side bug. Trailing zero padding
+/// (`l == 0` or `src.len() < l`) is the kernel's normal end-of-stream
+/// sentinel and terminates the loop cleanly.
 pub(super) fn walk_route_table<F>(family: i32, mut on_route: F) -> io::Result<()>
 where
   F: FnMut(u32, Option<IpAddr>, Option<IpAddr>, Option<IpAddr>),
@@ -69,10 +75,16 @@ where
       // copies into a properly-aligned local without that assumption.
       let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 
-      // Propagate parse failures: silently dropping routes here would
-      // corrupt the caller's view of the routing table (e.g. lose the
-      // default route on multi-WAN hosts).
-      let addrs = parse_addrs(rtm.rtm_addrs as u32, &src[header_size..l])?;
+      // Tolerate per-message `parse_addrs` failures on NetBSD/OpenBSD
+      // (see the function-level doc comment). Skip the route, advance
+      // to the next message — don't fail the whole walk.
+      let addrs = match parse_addrs(rtm.rtm_addrs as u32, &src[header_size..l]) {
+        Ok(addrs) => addrs,
+        Err(_) => {
+          src = &src[l..];
+          continue;
+        }
+      };
 
       let dst = addrs[RTAX_DST as usize];
       let gateway = addrs[RTAX_GATEWAY as usize];

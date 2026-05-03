@@ -164,6 +164,15 @@ impl Route {
 
 /// Returns every entry in the kernel routing table (both IPv4 and IPv6).
 ///
+/// ## Platform notes
+///
+/// On NetBSD and OpenBSD this may return a partial table: the kernel
+/// emits some sockaddr forms in `NET_RT_DUMP` messages that the shared
+/// BSD parser doesn't yet decode (notably AF_LINK gateways and certain
+/// kernel-form netmasks), and unparseable entries are skipped rather
+/// than failing the whole call. Linux, macOS, FreeBSD, DragonFlyBSD,
+/// and Windows return a complete table.
+///
 /// ## Example
 ///
 /// ```rust
