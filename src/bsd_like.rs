@@ -434,13 +434,25 @@ fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
   const SOCK4: usize = size_of::<libc::sockaddr_in>();
   const SOCK6: usize = size_of::<libc::sockaddr_in6>();
 
+  // Sysctl returns a `Vec<u8>`, which only formally guarantees u8
+  // alignment for its data pointer. The kernel pads each routing
+  // message to KERNAL_ALIGN bytes (4 on Apple, 8 elsewhere), so the
+  // sockaddr offsets happen to land on a usable boundary in practice
+  // — but creating `&libc::sockaddr_in[6]` from `b.as_ptr()` is still
+  // UB by the language rules whenever `b` isn't aligned for the
+  // target type. `read_unaligned` copies into an aligned local
+  // without that assumption; the resulting load is the same on x86 /
+  // ARM, but defined behaviour everywhere (including strict-alignment
+  // targets like SPARC). All BSD callers — gateway, address, route,
+  // and multicast walkers — go through this function.
   match af {
     AF_INET => {
       if b.len() < SOCK4 {
         return Err(invalid_address());
       }
 
-      let sockaddr = unsafe { &*(b.as_ptr() as *const libc::sockaddr_in) };
+      let sockaddr: libc::sockaddr_in =
+        unsafe { core::ptr::read_unaligned(b.as_ptr() as *const libc::sockaddr_in) };
       Ok((
         SOCK4,
         IpAddr::V4(sockaddr.sin_addr.s_addr.to_ne_bytes().into()),
@@ -451,7 +463,8 @@ fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
         return Err(invalid_address());
       }
 
-      let sockaddr = unsafe { &*(b.as_ptr() as *const libc::sockaddr_in6) };
+      let sockaddr: libc::sockaddr_in6 =
+        unsafe { core::ptr::read_unaligned(b.as_ptr() as *const libc::sockaddr_in6) };
 
       let mut ip = sockaddr.sin6_addr.s6_addr;
       // TODO: create own Ipv6Addr

@@ -32,6 +32,11 @@ const RTA_DST: u16 = netlink::rtattr_type_t::RTA_DST as u16;
 const RTA_GATEWAY: u16 = netlink::rtattr_type_t::RTA_GATEWAY as u16;
 const RTA_OIF: u16 = netlink::rtattr_type_t::RTA_OIF as u16;
 const RTA_PRIORITY: u16 = netlink::rtattr_type_t::RTA_PRIORITY as u16;
+const RTA_MULTIPATH: u16 = netlink::rtattr_type_t::RTA_MULTIPATH as u16;
+
+// rtm_type values from <linux/rtnetlink.h> (stable kernel UAPI).
+const RTN_UNICAST: u8 = 1;
+const RTN_LOCAL: u8 = 2;
 
 const RT_TABLE_MAIN: u16 = netlink::rt_class_t::RT_TABLE_MAIN as u16;
 
@@ -518,10 +523,22 @@ where
             let rtm = &received[NLMSG_HDRLEN..];
             let rtm_header = RtmMessageHeader::parse(rtm)?;
 
+            // The `Route` model (destination + single gateway + single
+            // output interface) only meaningfully represents
+            // RTN_UNICAST and RTN_LOCAL routes. Skip everything else
+            // — broadcast, multicast, blackhole, unreachable, prohibit,
+            // nat, etc. don't have a usable single (oif, gw) tuple,
+            // and emitting them as if they did would mislead callers.
+            if rtm_header.rtm_type != RTN_UNICAST && rtm_header.rtm_type != RTN_LOCAL {
+              received = &received[l..];
+              continue;
+            }
+
             let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
             let mut oif: u32 = 0;
             let mut dst: Option<IpAddr> = None;
             let mut gw: Option<IpAddr> = None;
+            let mut has_multipath = false;
 
             while rtattr_buf.len() >= RtAttr::SIZE {
               let attr = RtAttr {
@@ -545,10 +562,29 @@ where
                 RTA_GATEWAY => {
                   gw = parse_rta_ipaddr(rtm_header.rtm_family, data);
                 }
+                RTA_MULTIPATH => {
+                  // ECMP routes carry their nexthops inside
+                  // RTA_MULTIPATH (one or more `struct rtnexthop` each
+                  // with its own RTA-encoded sub-attributes). The
+                  // single (oif, gw) tuple we'd emit otherwise would
+                  // ignore the real nexthops entirely. We don't decode
+                  // RTA_MULTIPATH yet, so flag the message and skip it
+                  // below. TODO: emit one Route per nexthop.
+                  has_multipath = true;
+                }
                 _ => {}
               }
 
               rtattr_buf = &rtattr_buf[alen..];
+            }
+
+            // Skip ECMP routes (handled above) and any other route the
+            // kernel emitted without RTA_OIF — emitting `oif=0` would
+            // mislead callers into thinking the route was usable on
+            // interface 0.
+            if has_multipath || oif == 0 {
+              received = &received[l..];
+              continue;
             }
 
             on_route(rtm_header.rtm_family, oif, rtm_header.rtm_dst_len, dst, gw);
