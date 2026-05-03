@@ -538,7 +538,12 @@ where
             let mut oif: u32 = 0;
             let mut dst: Option<IpAddr> = None;
             let mut gw: Option<IpAddr> = None;
-            let mut has_multipath = false;
+            // ECMP routes carry their nexthops inside RTA_MULTIPATH
+            // (one or more `struct rtnexthop` each with sub-attrs).
+            // We accumulate them and emit them after walking the
+            // top-level attribute list, so we know `dst` / `dst_len`
+            // before fanning out per-nexthop.
+            let mut multipath: Option<&[u8]> = None;
 
             while rtattr_buf.len() >= RtAttr::SIZE {
               let attr = RtAttr {
@@ -563,14 +568,7 @@ where
                   gw = parse_rta_ipaddr(rtm_header.rtm_family, data);
                 }
                 RTA_MULTIPATH => {
-                  // ECMP routes carry their nexthops inside
-                  // RTA_MULTIPATH (one or more `struct rtnexthop` each
-                  // with its own RTA-encoded sub-attributes). The
-                  // single (oif, gw) tuple we'd emit otherwise would
-                  // ignore the real nexthops entirely. We don't decode
-                  // RTA_MULTIPATH yet, so flag the message and skip it
-                  // below. TODO: emit one Route per nexthop.
-                  has_multipath = true;
+                  multipath = Some(data);
                 }
                 _ => {}
               }
@@ -578,11 +576,31 @@ where
               rtattr_buf = &rtattr_buf[alen..];
             }
 
-            // Skip ECMP routes (handled above) and any other route the
-            // kernel emitted without RTA_OIF — emitting `oif=0` would
-            // mislead callers into thinking the route was usable on
-            // interface 0.
-            if has_multipath || oif == 0 {
+            // For ECMP routes, decode `RTA_MULTIPATH` and emit one
+            // route per nexthop. The wire format of each nexthop is
+            // `struct rtnexthop { u16 rtnh_len; u8 rtnh_flags; u8
+            // rtnh_hops; s32 rtnh_ifindex; }` followed by RTA-encoded
+            // sub-attributes (typically RTA_GATEWAY). On a multi-WAN
+            // host where the kernel installs only `default nexthop
+            // via A dev e0 nexthop via B dev e1`, the previous "skip
+            // ECMP" behaviour caused `route_table_by_filter(|r|
+            // r.is_default())` to return *no* default route.
+            if let Some(mp) = multipath {
+              walk_multipath(
+                rtm_header.rtm_family,
+                rtm_header.rtm_dst_len,
+                dst,
+                mp,
+                &mut on_route,
+              );
+              received = &received[l..];
+              continue;
+            }
+
+            // Skip routes that arrived without RTA_OIF and weren't
+            // ECMP — emitting `oif=0` would mislead callers into
+            // thinking the route was usable on interface 0.
+            if oif == 0 {
               received = &received[l..];
               continue;
             }
@@ -597,6 +615,61 @@ where
     }
 
     Ok(())
+  }
+}
+
+/// Walk the contents of an `RTA_MULTIPATH` attribute payload and call
+/// `on_route(family, oif, dst_len, dst, gw)` for each nexthop. Each
+/// nexthop is a `struct rtnexthop` followed by RTA-encoded sub-attrs
+/// (typically `RTA_GATEWAY`). Aligns advance pointers like the kernel
+/// (4-byte `RTA_ALIGNTO`).
+fn walk_multipath<F>(
+  rtm_family: u8,
+  dst_len: u8,
+  dst: Option<IpAddr>,
+  mut buf: &[u8],
+  on_route: &mut F,
+) where
+  F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
+{
+  // sizeof(struct rtnexthop) = 8 (u16 + u8 + u8 + i32).
+  const RTNH_SIZE: usize = 8;
+
+  while buf.len() >= RTNH_SIZE {
+    let nh_len = u16::from_ne_bytes(buf[..2].try_into().unwrap()) as usize;
+    if nh_len < RTNH_SIZE || nh_len > buf.len() {
+      // Malformed nexthop; stop rather than risk reading off the end.
+      break;
+    }
+    // bytes 2-3 (rtnh_flags + rtnh_hops) are not used here.
+    let nh_ifindex = i32::from_ne_bytes(buf[4..8].try_into().unwrap()) as u32;
+
+    // Decode sub-attributes (only RTA_GATEWAY is interesting today).
+    let mut nh_gw: Option<IpAddr> = None;
+    let mut sub = &buf[RTNH_SIZE..nh_len];
+    while sub.len() >= RtAttr::SIZE {
+      let attr_len = u16::from_ne_bytes(sub[..2].try_into().unwrap()) as usize;
+      let attr_ty = u16::from_ne_bytes(sub[2..4].try_into().unwrap());
+      if attr_len < RtAttr::SIZE || attr_len > sub.len() {
+        break;
+      }
+      if attr_ty == RTA_GATEWAY {
+        nh_gw = parse_rta_ipaddr(rtm_family, &sub[RtAttr::SIZE..attr_len]);
+      }
+      let alen = rta_align_of(attr_len).min(sub.len());
+      sub = &sub[alen..];
+    }
+
+    if nh_ifindex != 0 {
+      on_route(rtm_family, nh_ifindex, dst_len, dst, nh_gw);
+    }
+
+    // Advance to the next nexthop, RTA-aligned.
+    let nh_aligned = rta_align_of(nh_len).min(buf.len());
+    if nh_aligned == 0 {
+      break;
+    }
+    buf = &buf[nh_aligned..];
   }
 }
 

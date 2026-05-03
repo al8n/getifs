@@ -50,8 +50,10 @@ where
         continue;
       }
 
-      // Cast the buffer to rt_msghdr to read the sa_len fields
-      let rtm = &*(src.as_ptr() as *const RtMsghdr);
+      // SAFETY: `src` is a `Vec<u8>` (u8-aligned), `read_unaligned`
+      // copies into an aligned local before we read fields. Same
+      // rationale as in `walk_route_table` / `parse_inet_addr`.
+      let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 
       // Only consider UP routes
       if (rtm.rtm_flags & (RTF_UP | rtf)) == 0 {
@@ -68,10 +70,16 @@ where
       let mut addrs = rtm.rtm_addrs;
       while addrs != 0 {
         if (addrs & 1) != 0 {
-          let sa = &*(addr_ptr as *const libc::sockaddr);
+          // SAFETY: kernel-emitted sockaddrs in this stream may sit
+          // at any 4-byte boundary (`KERNAL_ALIGN` of 4 on Apple);
+          // copy each header out before reading its fields. The
+          // following `addr_ptr.add(...)` for sa_len uses the same
+          // unaligned-copied `sa` value.
+          let sa: libc::sockaddr = std::ptr::read_unaligned(addr_ptr as *const libc::sockaddr);
           match (family, sa.sa_family as i32) {
             (AF_INET, AF_INET) | (AF_UNSPEC, AF_INET) if i == rta => {
-              let sa_in = &*(addr_ptr as *const libc::sockaddr_in);
+              let sa_in: libc::sockaddr_in =
+                std::ptr::read_unaligned(addr_ptr as *const libc::sockaddr_in);
               if sa_in.sin_addr.s_addr != 0 {
                 let ip = IpAddr::V4(Ipv4Addr::from(sa_in.sin_addr.s_addr.swap_bytes()));
                 if let Some(addr) =
@@ -84,7 +92,8 @@ where
               }
             }
             (AF_INET6, AF_INET6) | (AF_UNSPEC, AF_INET6) if i == rta => {
-              let sa_in6 = &*(addr_ptr as *const libc::sockaddr_in6);
+              let sa_in6: libc::sockaddr_in6 =
+                std::ptr::read_unaligned(addr_ptr as *const libc::sockaddr_in6);
               if !is_ipv6_unspecified(sa_in6.sin6_addr.s6_addr) {
                 let ip = IpAddr::V6(Ipv6Addr::from(sa_in6.sin6_addr.s6_addr));
                 if let Some(addr) =

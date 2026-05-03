@@ -603,7 +603,10 @@ pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
       }
 
       if src[3] as i32 == libc::RTM_IFINFO {
-        let ifm = &*(src.as_ptr() as *const if_msghdr);
+        // SAFETY: `src` is a `Vec<u8>` from sysctl which only
+        // formally guarantees u8 alignment; `read_unaligned` copies
+        // into an aligned local without that requirement.
+        let ifm: if_msghdr = core::ptr::read_unaligned(src.as_ptr() as *const if_msghdr);
         if ifm.ifm_type as i32 == RTM_IFINFO {
           let (name, mac) = parse(&src[size_of::<if_msghdr>()..l])?;
           let interface = Interface {
@@ -663,7 +666,8 @@ where
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {
-      let ifam = &*(b.as_ptr() as *const ifa_msghdr);
+      // SAFETY: u8-aligned sysctl buffer; copy header out before reading fields.
+      let ifam: ifa_msghdr = core::ptr::read_unaligned(b.as_ptr() as *const ifa_msghdr);
       let len = ifam.ifam_msglen as usize;
 
       if (ifam.ifam_version as i32 != RTM_VERSION) || (ifam.ifam_index as u32 != idx && idx != 0) {
@@ -752,7 +756,9 @@ cfg_apple!(
       let mut b = buf.as_slice();
 
       while b.len() > HEADER_SIZE {
-        let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr2);
+        // SAFETY: u8-aligned sysctl buffer; copy header out before reading fields.
+        let ifam: libc::ifma_msghdr2 =
+          core::ptr::read_unaligned(b.as_ptr() as *const libc::ifma_msghdr2);
         let len = ifam.ifmam_msglen as usize;
 
         if ifam.ifmam_version as i32 != RTM_VERSION {
@@ -805,7 +811,8 @@ where
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {
-      let ifam = &*(b.as_ptr() as *const IfmaMsghdr);
+      // SAFETY: u8-aligned sysctl buffer; copy header out before reading fields.
+      let ifam: IfmaMsghdr = core::ptr::read_unaligned(b.as_ptr() as *const IfmaMsghdr);
       let len = ifam.ifmam_msglen as usize;
 
       if ifam.ifmam_version as i32 != RTM_VERSION {
