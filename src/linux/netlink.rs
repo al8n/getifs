@@ -131,7 +131,13 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
           return Err(rustix::io::Errno::INVAL.into());
         }
 
-        let msg_buf = &received[NLMSG_HDRLEN..];
+        // Bound the per-message slice to `hlen` rather than the rest
+        // of the recv buffer. Netlink dumps routinely pack multiple
+        // messages into one recv() and an unbounded slice would let
+        // the attribute walker run past the current message into the
+        // next message's header — corrupting fields or returning
+        // EINVAL on healthy kernel output.
+        let msg_buf = &received[NLMSG_HDRLEN..hlen];
 
         match h.nlmsg_type as u32 {
           NLMSG_DONE => break 'outer,
@@ -278,7 +284,8 @@ where
           return Err(rustix::io::Errno::INVAL.into());
         }
 
-        let msg_buf = &received[NLMSG_HDRLEN..];
+        // See `netlink_interface` for why this is bounded to `hlen`.
+        let msg_buf = &received[NLMSG_HDRLEN..hlen];
 
         match h.nlmsg_type as u32 {
           NLMSG_DONE => break 'outer,
@@ -397,7 +404,8 @@ where
           NLMSG_DONE => break 'outer,
           NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
           val if val == RTM_NEWROUTE => {
-            let rtm = &received[NLMSG_HDRLEN..];
+            // See `netlink_interface` for why this is bounded to `hlen`.
+            let rtm = &received[NLMSG_HDRLEN..hlen];
             let rtm_header = RtmMessageHeader::parse(rtm)?;
 
             // Use the same gateway detection logic as netlink_gateway
@@ -520,7 +528,14 @@ where
           NLMSG_DONE => break 'outer,
           NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
           val if val == RTM_NEWROUTE => {
-            let rtm = &received[NLMSG_HDRLEN..];
+            // Bound the per-message slice to `hlen` rather than the
+            // rest of the recv buffer. Netlink dumps routinely pack
+            // multiple `RTM_NEWROUTE` messages into one recv(); an
+            // unbounded slice would let the attribute walker below
+            // run into the next message's header, mixing fields
+            // across routes (or returning EINVAL on healthy kernel
+            // output).
+            let rtm = &received[NLMSG_HDRLEN..hlen];
             let rtm_header = RtmMessageHeader::parse(rtm)?;
 
             // The `Route` model (destination + single gateway + single
@@ -743,7 +758,8 @@ where
           NLMSG_DONE => break 'outer,
           NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
           val if val == RTM_NEWROUTE => {
-            let rtm = &received[NLMSG_HDRLEN..];
+            // See `netlink_interface` for why this is bounded to `hlen`.
+            let rtm = &received[NLMSG_HDRLEN..hlen];
             let rtm_header = RtmMessageHeader::parse(rtm)?;
 
             // Ensure it's a address we want
