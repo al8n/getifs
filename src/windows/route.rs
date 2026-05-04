@@ -67,6 +67,14 @@ fn build_routev4(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv4Route> {
     IpAddr::V4(ip) => ip,
     _ => return None,
   };
+  // Match the public `route_table` contract (unicast/local routes).
+  // Windows' `GetIpForwardTable2` includes the on-link multicast cone
+  // `224.0.0.0/4` and the limited-broadcast row `255.255.255.255/32`
+  // alongside ordinary unicast routes; same filter as
+  // `bsd_like::build_routev4` so cross-platform behavior is consistent.
+  if dst_v4.is_multicast() || dst_v4.is_broadcast() {
+    return None;
+  }
   let net = Ipv4Net::new(dst_v4, row.DestinationPrefix.PrefixLength).ok()?;
 
   let gw_ip = sockaddr_to_ipaddr(AF_UNSPEC, &row.NextHop as *const _ as *const SOCKADDR);
@@ -86,6 +94,12 @@ fn build_routev6(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv6Route> {
     IpAddr::V6(ip) => ip,
     _ => return None,
   };
+  // Drop `ff00::/8` for the same reason `build_routev4` drops
+  // multicast/broadcast — keep `route_table` consistent with the
+  // documented unicast/local contract on Windows.
+  if dst_v6.is_multicast() {
+    return None;
+  }
   let net = Ipv6Net::new(dst_v6, row.DestinationPrefix.PrefixLength).ok()?;
 
   let gw_ip = sockaddr_to_ipaddr(AF_UNSPEC, &row.NextHop as *const _ as *const SOCKADDR);

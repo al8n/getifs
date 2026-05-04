@@ -108,6 +108,7 @@ pub(super) use local_addr::*;
 #[inline]
 fn build_routev4(
   index: u32,
+  rtm_flags: libc::c_int,
   dst: IpAddr,
   gateway: Option<IpAddr>,
   netmask: Option<IpAddr>,
@@ -116,15 +117,36 @@ fn build_routev4(
     IpAddr::V4(ip) => ip,
     _ => return None,
   };
-  // BSD encodes a default route's netmask as either an all-zero
-  // sockaddr or as the kernel-form length=0 entry, both of which come
-  // back from `parse_addrs` as 0.0.0.0 and yield prefix 0. A missing
-  // RTAX_NETMASK on a v4 route means the kernel is describing a host
-  // route — fall back to /32 in that case.
+  // The public `route_table` contract is unicast/local routes only.
+  // BSD's `NET_RT_DUMP` happily includes the kernel's multicast cone
+  // (e.g. `224.0.0/4` on macOS) and the limited-broadcast entry as
+  // ordinary `RTM_GET` records — drop them here so they don't leak
+  // through. `Ipv4Addr::is_multicast()` covers `224.0.0.0/4`,
+  // `is_broadcast()` covers `255.255.255.255`.
+  if dst_v4.is_multicast() || dst_v4.is_broadcast() {
+    return None;
+  }
+  // Resolving `prefix_len` from the kernel's encoding is fiddly:
+  //
+  // - `Some(IpAddr::V4(m))` with a v4 dst: real netmask, decode it.
+  // - Anything else (`None`, or family-mismatched `Some(IpAddr::V6(_))`
+  //   from `parse_kernel_inet_addr`'s AF_UNSPEC fallback when the
+  //   kernel sent the mask in short kernel-form): the kernel didn't
+  //   give us a decodable explicit mask, so fall back to the
+  //   per-route default below.
+  //
+  // Default rules when the explicit mask is unavailable:
+  // - `dst.is_unspecified()`: BSD encodes the default route's mask
+  //   as `0.0.0.0` (or omits it entirely); treat as `/0`.
+  // - `RTF_HOST` set: explicit host route, prefix is `/32`.
+  // - Otherwise: a network route whose mask we can't decode — skip
+  //   rather than fabricate `/32` (Codex round-13 caught this turning
+  //   `fe80::/64` into `fe80::/128` in the IPv6 path).
   let prefix_len = match netmask {
     Some(IpAddr::V4(m)) => ip_mask_to_prefix(IpAddr::V4(m)).ok()?,
-    Some(IpAddr::V6(_)) => return None,
-    None => 32,
+    _ if dst_v4.is_unspecified() => 0,
+    _ if (rtm_flags & libc::RTF_HOST) != 0 => 32,
+    _ => return None,
   };
   let net = Ipv4Net::new(dst_v4, prefix_len).ok()?;
   let gw = match gateway {
@@ -137,6 +159,7 @@ fn build_routev4(
 #[inline]
 fn build_routev6(
   index: u32,
+  rtm_flags: libc::c_int,
   dst: IpAddr,
   gateway: Option<IpAddr>,
   netmask: Option<IpAddr>,
@@ -145,10 +168,23 @@ fn build_routev6(
     IpAddr::V6(ip) => ip,
     _ => return None,
   };
+  // Same rationale as `build_routev4`: drop multicast destinations
+  // (`ff00::/8` on BSD/macOS) so the public `route_table` stays
+  // consistent with its unicast/local contract.
+  if dst_v6.is_multicast() {
+    return None;
+  }
+  // See `build_routev4` for the full per-arm rationale; the v6 case
+  // reads identically, with `/128` for host routes and `/0` for the
+  // unspecified destination. The `_` arm catches both `None` and the
+  // family-mismatched `Some(IpAddr::V4(_))` that
+  // `parse_kernel_inet_addr` produces when it can't decode the v6
+  // mask's short kernel-form encoding.
   let prefix_len = match netmask {
     Some(IpAddr::V6(m)) => ip_mask_to_prefix(IpAddr::V6(m)).ok()?,
-    Some(IpAddr::V4(_)) => return None,
-    None => 128,
+    _ if dst_v6.is_unspecified() => 0,
+    _ if (rtm_flags & libc::RTF_HOST) != 0 => 128,
+    _ => return None,
   };
   let net = Ipv6Net::new(dst_v6, prefix_len).ok()?;
   let gw = match gateway {
@@ -163,14 +199,17 @@ where
   F: FnMut(&IpRoute) -> bool,
 {
   let mut out: SmallVec<IpRoute> = SmallVec::new();
-  route::walk_route_table(AF_UNSPEC, |index, dst, gw, mask| {
+  route::walk_route_table(AF_UNSPEC, |index, flags, dst, gw, mask| {
+    // For the AF_UNSPEC walk we can't infer a missing dst's family
+    // from the message, so skip — only family-specific walks below
+    // can interpret `dst.is_none()` as the unspecified default route.
     let dst = match dst {
       Some(ip) => ip,
       None => return,
     };
     let route = match dst {
-      IpAddr::V4(_) => build_routev4(index, dst, gw, mask).map(IpRoute::V4),
-      IpAddr::V6(_) => build_routev6(index, dst, gw, mask).map(IpRoute::V6),
+      IpAddr::V4(_) => build_routev4(index, flags, dst, gw, mask).map(IpRoute::V4),
+      IpAddr::V6(_) => build_routev6(index, flags, dst, gw, mask).map(IpRoute::V6),
     };
     if let Some(r) = route {
       if f(&r) {
@@ -186,12 +225,12 @@ where
   F: FnMut(&Ipv4Route) -> bool,
 {
   let mut out: SmallVec<Ipv4Route> = SmallVec::new();
-  route::walk_route_table(AF_INET, |index, dst, gw, mask| {
-    let dst = match dst {
-      Some(ip) => ip,
-      None => return,
-    };
-    if let Some(r) = build_routev4(index, dst, gw, mask) {
+  route::walk_route_table(AF_INET, |index, flags, dst, gw, mask| {
+    // BSD sysctl can omit `RTAX_DST` for the default route — fold that
+    // case to `0.0.0.0` here so `build_routev4` can pair it with the
+    // implicit `/0` mask.
+    let dst = dst.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    if let Some(r) = build_routev4(index, flags, dst, gw, mask) {
       if f(&r) {
         out.push(r);
       }
@@ -205,12 +244,11 @@ where
   F: FnMut(&Ipv6Route) -> bool,
 {
   let mut out: SmallVec<Ipv6Route> = SmallVec::new();
-  route::walk_route_table(AF_INET6, |index, dst, gw, mask| {
-    let dst = match dst {
-      Some(ip) => ip,
-      None => return,
-    };
-    if let Some(r) = build_routev6(index, dst, gw, mask) {
+  route::walk_route_table(AF_INET6, |index, flags, dst, gw, mask| {
+    // Same as the v4 path — missing `RTAX_DST` on AF_INET6 is BSD's
+    // way of describing the `::/0` default route.
+    let dst = dst.unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    if let Some(r) = build_routev6(index, flags, dst, gw, mask) {
       if f(&r) {
         out.push(r);
       }

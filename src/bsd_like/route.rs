@@ -1,14 +1,17 @@
 use std::{io, net::IpAddr};
 
-use libc::{NET_RT_DUMP, RTAX_DST, RTAX_GATEWAY, RTAX_NETMASK, RTM_GET};
+use libc::{NET_RT_DUMP, RTAX_DST, RTAX_GATEWAY, RTAX_NETMASK, RTF_UP, RTM_GET};
 
 use super::{compat::RtMsghdr, fetch, message_too_short, parse_addrs};
 
 /// Walk every entry in the kernel routing-table sysctl dump (`NET_RT_DUMP`).
-/// Calls `on_route(index, destination, gateway, netmask)` for each
-/// `RTM_GET` message — all four come straight from `parse_addrs` so the
-/// caller decides how to merge the destination address with the netmask
-/// to form a CIDR.
+/// Calls `on_route(index, rtm_flags, destination, gateway, netmask)` for
+/// each `RTM_GET` message — all five come straight from the kernel
+/// header / `parse_addrs` so the caller decides how to merge them into a
+/// CIDR. `rtm_flags` is needed because BSD's "missing RTAX_NETMASK"
+/// means different things for host routes (`RTF_HOST` set, implicit
+/// `/max`) vs network routes (which must carry an explicit mask) — the
+/// builder decides per-route whether `/max` is the right default.
 ///
 /// `family` is forwarded to sysctl: `AF_UNSPEC` for both families,
 /// `AF_INET` / `AF_INET6` to limit the dump to one family.
@@ -31,7 +34,7 @@ use super::{compat::RtMsghdr, fetch, message_too_short, parse_addrs};
 /// sentinel and terminates the loop cleanly.
 pub(super) fn walk_route_table<F>(family: i32, mut on_route: F) -> io::Result<()>
 where
-  F: FnMut(u32, Option<IpAddr>, Option<IpAddr>, Option<IpAddr>),
+  F: FnMut(u32, libc::c_int, Option<IpAddr>, Option<IpAddr>, Option<IpAddr>),
 {
   let buf = fetch(family, NET_RT_DUMP, 0)?;
 
@@ -75,6 +78,17 @@ where
       // copies into a properly-aligned local without that assumption.
       let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 
+      // Match the public-API contract: `route_table` returns
+      // unicast/local routes, not every kernel routing entry. `RTF_UP`
+      // weeds out down/expired routes the kernel keeps for tracking;
+      // multicast destinations are filtered downstream in
+      // `bsd_like.rs::build_routev4` / `build_routev6` (where we know
+      // the parsed family).
+      if (rtm.rtm_flags & RTF_UP) == 0 {
+        src = &src[l..];
+        continue;
+      }
+
       // Tolerate per-message `parse_addrs` failures on NetBSD/OpenBSD
       // (see the function-level doc comment). Skip the route, advance
       // to the next message — don't fail the whole walk.
@@ -90,7 +104,7 @@ where
       let gateway = addrs[RTAX_GATEWAY as usize];
       let netmask = addrs[RTAX_NETMASK as usize];
 
-      on_route(rtm.rtm_index as u32, dst, gateway, netmask);
+      on_route(rtm.rtm_index as u32, rtm.rtm_flags, dst, gateway, netmask);
 
       src = &src[l..];
     }

@@ -14,5 +14,8 @@
 
 # Added by cargo
 
-/target
+**target/
 Cargo.lock
+**.claude/
+**target-review/
+

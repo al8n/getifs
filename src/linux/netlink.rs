@@ -1,5 +1,3 @@
-use core::slice;
-
 use linux_raw_sys::{
   if_arp::{self, ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6},
   netlink::{self, NLM_F_DUMP, NLM_F_REQUEST},
@@ -919,19 +917,28 @@ const fn rta_align_of(attrlen: usize) -> usize {
   (attrlen + RTA_ALIGNTO - 1) & !(RTA_ALIGNTO - 1)
 }
 
-#[repr(C)]
-struct RtGenMessage {
-  family: u8,
-}
-
-#[repr(C)]
+/// A pre-serialized RTM_GET* dump request. Stored as a byte array
+/// (rather than a `repr(C)` struct with a 16-byte `nlmsghdr` + 1-byte
+/// `rtgenmsg`) on purpose: the typed form has 3 trailing padding bytes
+/// after `family` for u32 alignment, and reading those padding bytes
+/// out via `as_bytes()` is UB by Rust's rules — typed field writes
+/// and by-value moves are allowed to leave padding uninitialized even
+/// if it was initially zeroed. With a `[u8; N]` body the padding
+/// concept doesn't exist; every byte we send is one we explicitly
+/// wrote.
 struct NetlinkRouteRequest {
-  header: MessageHeader,
-  data: RtGenMessage,
+  bytes: [u8; Self::SIZE],
 }
 
 impl NetlinkRouteRequest {
-  const SIZE: usize = mem::size_of::<Self>();
+  /// `nlmsghdr` (16 bytes) + `rtgenmsg` (1 byte) rounded up to
+  /// `NLMSG_ALIGNTO` (4 bytes) = 20. Matches what the previous
+  /// `repr(C)` typed struct used to serialize, so kernel-side parsing
+  /// is unchanged.
+  const SIZE: usize = (mem::size_of::<MessageHeader>()
+    + mem::size_of::<u8>() // rtgenmsg::family
+    + (NLMSG_ALIGNTO as usize - 1))
+    & !(NLMSG_ALIGNTO as usize - 1);
 
   #[inline]
   fn new(proto: u16, seq: u32, family: u8, _ifi: u32) -> Self {
@@ -941,39 +948,29 @@ impl NetlinkRouteRequest {
     // } else {
     //   libc::NLM_F_REQUEST as u16
     // };
-    //
-    // `MessageHeader` is 16 bytes and `RtGenMessage` is 1 byte, so
-    // `repr(C)` rounds `Self` up to 20 bytes for `u32` alignment —
-    // leaving 3 trailing padding bytes after `data.family`. The
-    // struct-literal form (`Self { header, data }`) doesn't define
-    // those padding bytes, and `as_bytes()` would then expose them to
-    // `sendto`. That's UB by Rust's rules (reading uninit memory) and
-    // also a tiny stack-data leak into the netlink request buffer.
-    //
-    // `MaybeUninit::zeroed().assume_init()` zero-fills the whole
-    // backing storage *including* trailing padding; subsequent field
-    // writes leave the padding zeroed. Safe because the resulting
-    // value is a valid `Self` (every named field is overwritten and
-    // every field type accepts an all-zero bit pattern).
-    let mut req: Self = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-    req.header = MessageHeader {
-      nlmsg_len: Self::SIZE as u32,
-      nlmsg_type: proto,
-      nlmsg_flags: (NLM_F_DUMP | NLM_F_REQUEST) as u16,
-      nlmsg_seq: seq,
-      nlmsg_pid: std::process::id(),
-    };
-    req.data = RtGenMessage { family };
-    req
+    let mut bytes = [0u8; Self::SIZE];
+    // `nlmsghdr` (offsets per the C layout):
+    //   bytes 0..4   nlmsg_len  : u32
+    //   bytes 4..6   nlmsg_type : u16
+    //   bytes 6..8   nlmsg_flags: u16
+    //   bytes 8..12  nlmsg_seq  : u32
+    //   bytes 12..16 nlmsg_pid  : u32
+    bytes[0..4].copy_from_slice(&(Self::SIZE as u32).to_ne_bytes());
+    bytes[4..6].copy_from_slice(&proto.to_ne_bytes());
+    bytes[6..8].copy_from_slice(&((NLM_F_DUMP | NLM_F_REQUEST) as u16).to_ne_bytes());
+    bytes[8..12].copy_from_slice(&seq.to_ne_bytes());
+    bytes[12..16].copy_from_slice(&std::process::id().to_ne_bytes());
+    // `rtgenmsg` body: a single u8 at offset 16. Bytes 17..20 are the
+    // NLMSG_ALIGNTO trailer; they were zeroed by the array
+    // initializer above and the kernel ignores them past the message
+    // body.
+    bytes[16] = family;
+    Self { bytes }
   }
 
   #[inline]
-  const fn as_bytes(&self) -> &[u8] {
-    // SAFETY: `Self` is `repr(C)` and its full `Self::SIZE` byte
-    // representation is initialized — the named fields are written by
-    // `new()` and the trailing repr(C) padding is zeroed via
-    // `MaybeUninit::zeroed`, so no byte read here is uninitialized.
-    unsafe { slice::from_raw_parts(self as *const _ as _, Self::SIZE) }
+  fn as_bytes(&self) -> &[u8] {
+    &self.bytes
   }
 }
 
