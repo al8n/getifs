@@ -582,12 +582,22 @@ pub(super) fn parse_addrs(
 
   #[allow(clippy::needless_range_loop)]
   for i in 0..RTAX_MAX as usize {
-    if b.len() < KERNAL_ALIGN {
-      break;
-    }
-
     if addrs & (1 << i) == 0 {
       continue;
+    }
+
+    // The kernel claimed slot `i` is present, so a sockaddr is
+    // expected. Bailing here on `b.len() < KERNAL_ALIGN` (the previous
+    // pre-loop break) silently turned a truncated message — for
+    // instance a route record advertising `RTAX_DST` with no body —
+    // into `as_[RTAX_DST] = None`, which the route_table builder then
+    // folded into a synthetic `0.0.0.0/0` / `::/0` default route.
+    // Surface as a malformed message instead of fabricating data.
+    if b.len() < KERNAL_ALIGN {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "message too short",
+      ));
     }
 
     if i <= RTAX_BRD as usize {

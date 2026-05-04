@@ -331,14 +331,7 @@ where
           NLMSG_DONE => break 'outer,
           NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
           val if val == RTM_NEWADDR => {
-            let ifam = IfNetMessageHeader {
-              family: msg_buf[0],
-              prefix_len: msg_buf[1],
-              flags: msg_buf[2],
-              scope: msg_buf[3],
-              index: u32::from_ne_bytes(msg_buf[4..8].try_into().unwrap()),
-            };
-
+            let ifam = IfNetMessageHeader::parse(msg_buf)?;
             let mut ifa_msg_data = &msg_buf[IfNetMessageHeader::SIZE..];
             let mut point_to_point = false;
             let mut attrs = SmallVec::new();
@@ -420,6 +413,14 @@ where
   N: Net,
 {
   unsafe {
+    // Dump nexthop objects up-front so we can resolve any default
+    // route that arrives with `RTA_NH_ID` (Linux 5.3+ `ip nexthop`).
+    // Without this, hosts whose only default route is nexthop-object
+    // based hand back `Ok([])` from `best_local_*` even though a
+    // perfectly usable default exists — `netlink_walk_routes`
+    // resolves these and `best_local_*` shouldn't diverge.
+    let nh_map = dump_nexthops(family.as_raw() as u8)?;
+
     let handle = Handle::new()?;
 
     let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
@@ -483,6 +484,15 @@ where
             let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
             let mut current_metric = None;
             let mut current_oif = None;
+            // `RTA_MULTIPATH` (ECMP) and `RTA_NH_ID` (nexthop-object)
+            // routes don't carry a top-level `RTA_OIF`. We capture the
+            // payload / id here and resolve them after the attribute
+            // walk so the best-interface selection covers the same
+            // route encodings `netlink_walk_routes` does — otherwise
+            // `best_local_*` returns empty on hosts whose only default
+            // is ECMP or `ip nexthop`-based.
+            let mut multipath: Option<&[u8]> = None;
+            let mut nh_id: Option<u32> = None;
 
             while rtattr_buf.len() >= RtAttr::SIZE {
               let attr = RtAttr {
@@ -510,10 +520,34 @@ where
                 RTA_OIF if data.len() >= 4 => {
                   current_oif = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
                 }
+                RTA_MULTIPATH => {
+                  multipath = Some(data);
+                }
+                RTA_NH_ID if data.len() >= 4 => {
+                  nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+                }
                 _ => {}
               }
 
               rtattr_buf = &rtattr_buf[alen..];
+            }
+
+            // Resolve oif from RTA_MULTIPATH or RTA_NH_ID when
+            // top-level RTA_OIF is absent. Multipath: pick the first
+            // usable nexthop. Nexthop-object: resolve through the
+            // up-front dump (`Some(non-empty)` → take the first
+            // resolution; `Some(empty)` → known-but-filtered, ignore;
+            // `None` → unresolved, ignore — best-local is best-effort
+            // and there's no meaningful retry path inside this single
+            // selection pass).
+            if current_oif.is_none() {
+              if let Some(mp) = multipath {
+                current_oif = first_multipath_oif(mp);
+              } else if let Some(id) = nh_id {
+                if let Some(resolved) = resolve_nh_id(&nh_map, id) {
+                  current_oif = resolved.first().map(|(oif, _)| *oif);
+                }
+              }
             }
 
             // Update best interface if this route has better metric
@@ -1174,6 +1208,34 @@ fn walk_multipath<F>(
   }
 }
 
+/// First usable nexthop's `oif` from an `RTA_MULTIPATH` attribute
+/// payload. Returns `None` if every nexthop is unusable
+/// (`RTNH_F_DEAD` / `RTNH_F_LINKDOWN` / `RTNH_F_UNRESOLVED`), has an
+/// `oif` of zero, or the buffer is malformed. Mirrors the skip-rules
+/// in `walk_multipath` but doesn't decode sub-attributes — best-local
+/// only needs an interface index.
+fn first_multipath_oif(mut buf: &[u8]) -> Option<u32> {
+  const RTNH_SIZE: usize = 8;
+  let unusable = RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_UNRESOLVED;
+  while buf.len() >= RTNH_SIZE {
+    let nh_len = u16::from_ne_bytes(buf[..2].try_into().unwrap()) as usize;
+    if nh_len < RTNH_SIZE || nh_len > buf.len() {
+      break;
+    }
+    let nh_flags = buf[2];
+    let nh_ifindex = i32::from_ne_bytes(buf[4..8].try_into().unwrap()) as u32;
+    if nh_flags & unusable == 0 && nh_ifindex != 0 {
+      return Some(nh_ifindex);
+    }
+    let nh_aligned = rta_align_of(nh_len).min(buf.len());
+    if nh_aligned == 0 {
+      break;
+    }
+    buf = &buf[nh_aligned..];
+  }
+  None
+}
+
 /// Decode an `RTA_DST` / `RTA_GATEWAY` attribute payload as the IP family
 /// declared by `rtm_family`. Netlink RTA address payloads are in network
 /// byte order regardless of host endianness.
@@ -1499,6 +1561,25 @@ struct IfNetMessageHeader {
 
 impl IfNetMessageHeader {
   const SIZE: usize = mem::size_of::<Self>();
+
+  /// Decode an `ifaddrmsg` header from the start of the netlink
+  /// message body. Returns `EINVAL` for short buffers — a malformed
+  /// `RTM_NEWADDR` with `nlmsg_len == NLMSG_HDRLEN` would otherwise
+  /// reach the field reads with an empty `msg_buf` and panic on the
+  /// raw index.
+  #[inline]
+  fn parse(src: &[u8]) -> io::Result<Self> {
+    if src.len() < Self::SIZE {
+      return Err(rustix::io::Errno::INVAL.into());
+    }
+    Ok(Self {
+      family: src[0],
+      prefix_len: src[1],
+      flags: src[2],
+      scope: src[3],
+      index: u32::from_ne_bytes(src[4..8].try_into().unwrap()),
+    })
+  }
 }
 
 #[inline]
