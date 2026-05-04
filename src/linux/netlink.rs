@@ -547,8 +547,15 @@ where
 
 /// One nexthop-object entry from a `RTM_GETNEXTHOP` dump. Either a
 /// "leaf" (single `oif` + optional gateway) or a `group` of member ids
-/// (each member resolves recursively against the same map). Blackhole
-/// nexthops are filtered out before the map is built.
+/// (each member resolves recursively against the same map).
+///
+/// Filtered nexthops (`NHA_BLACKHOLE` or `nh_flags` carrying
+/// `RTNH_F_DEAD` / `RTNH_F_LINKDOWN` / `RTNH_F_UNRESOLVED`) are still
+/// inserted into the map with `filtered = true`. The route walker
+/// needs that signal to tell "id present but unusable" (skip silently,
+/// no retry) apart from "id genuinely absent" (deferred for a single
+/// retry pass, then surfaced as EINTR). Without that distinction, one
+/// blackhole route would fail `route_table()` for the whole host.
 #[derive(Debug, Clone)]
 struct NexthopInfo {
   oif: u32,
@@ -557,6 +564,8 @@ struct NexthopInfo {
   /// group; we treat those as unusable. Single-leaf nexthops carry
   /// `None`.
   group: Option<SmallVec<u32>>,
+  /// Kernel-side "this nexthop won't deliver traffic" marker.
+  filtered: bool,
 }
 
 /// Build the wire bytes for `RTM_GETNEXTHOP` + `NLM_F_DUMP`. The body
@@ -725,11 +734,23 @@ fn dump_nexthops(family: u8) -> io::Result<std::collections::HashMap<u32, Nextho
               attr_buf = &attr_buf[alen..];
             }
 
-            // Drop nexthops the kernel marks unusable. Inserting them
-            // into the map would let `resolve_nh_id` emit them as if
-            // they were live; matches `walk_multipath`'s skip logic.
-            if id != 0 && !blackhole && !nh_unusable {
-              map.insert(id, NexthopInfo { oif, gw, group });
+            // Always insert known ids — even unusable ones. The route
+            // walker needs to tell `id absent from map` (potential
+            // race, retry / EINTR) apart from `id present but
+            // unusable` (skip the route silently). The `filtered`
+            // flag captures the latter without losing the
+            // "kernel-knows-this-id" signal.
+            if id != 0 {
+              let filtered = blackhole || nh_unusable;
+              map.insert(
+                id,
+                NexthopInfo {
+                  oif,
+                  gw,
+                  group,
+                  filtered,
+                },
+              );
             }
           }
           _ => {}
@@ -743,24 +764,40 @@ fn dump_nexthops(family: u8) -> io::Result<std::collections::HashMap<u32, Nextho
   }
 }
 
-/// Resolve an `RTA_NH_ID` reference to a list of `(oif, gw)` tuples.
-/// Singletons return one entry. Groups fan out to one entry per member,
-/// recursively resolving members that themselves point at single-leaf
-/// nexthops. Group-of-groups is rare and out of scope — those are
-/// skipped.
+/// Resolve an `RTA_NH_ID` reference.
+///
+/// Return value distinguishes three cases the caller has to handle
+/// differently:
+///
+/// - `None`: the id is **not** in the map. This is the "stale snapshot
+///   / race" case — a nexthop was likely added between our nexthop
+///   dump and the route dump. Caller defers for a retry pass; on the
+///   second miss, surfaces `EINTR`.
+/// - `Some(empty)`: the id **is** in the map but the kernel marked it
+///   unusable (`NHA_BLACKHOLE`, `RTNH_F_DEAD`, `RTNH_F_LINKDOWN`,
+///   `RTNH_F_UNRESOLVED`), or it's a group whose members are all
+///   filtered/missing/nested-group. The route can't deliver traffic;
+///   skip it silently — no retry, no error.
+/// - `Some(non-empty)`: one or more `(oif, gw)` pairs to emit.
+///
+/// Conflating the bottom two cases (the previous `SmallVec`-only API
+/// did) made `route_table()` fail with `EINTR` whenever any single
+/// route pointed at a downed nexthop.
 fn resolve_nh_id(
   map: &std::collections::HashMap<u32, NexthopInfo>,
   id: u32,
-) -> SmallVec<(u32, Option<IpAddr>)> {
+) -> Option<SmallVec<(u32, Option<IpAddr>)>> {
+  let nh = map.get(&id)?;
   let mut out: SmallVec<(u32, Option<IpAddr>)> = SmallVec::new();
-  let Some(nh) = map.get(&id) else {
-    return out;
-  };
+  if nh.filtered {
+    return Some(out);
+  }
   if let Some(members) = &nh.group {
     for member_id in members {
       if let Some(member) = map.get(member_id) {
         // Skip nested groups — keep the depth bounded.
-        if member.group.is_none() && member.oif != 0 {
+        // Skip filtered members — kernel marked them unusable.
+        if member.group.is_none() && !member.filtered && member.oif != 0 {
           out.push((member.oif, member.gw));
         }
       }
@@ -768,7 +805,7 @@ fn resolve_nh_id(
   } else if nh.oif != 0 {
     out.push((nh.oif, nh.gw));
   }
-  out
+  Some(out)
 }
 
 /// Yields one entry per `RTM_NEWROUTE` message: `(family, oif, dst_len, dst,
@@ -968,23 +1005,34 @@ where
             // Resolve nexthop-object references. The route had only an
             // RTA_NH_ID — look up the nexthop in the dump map. Single
             // leaves emit one route; groups fan out to one route per
-            // member (similar to RTA_MULTIPATH). If the id isn't in
-            // `nh_map`, defer the route for a single retry pass after
-            // the route walk finishes — covers the race where a
-            // nexthop was added between the two dumps.
+            // member (similar to RTA_MULTIPATH).
+            //
+            // Three outcomes from `resolve_nh_id`:
+            //   - `None`: id absent from map. Likely race (a nexthop
+            //     installed between our two dumps); defer for the
+            //     retry pass.
+            //   - `Some(empty)`: id present but the nexthop is
+            //     unusable (blackhole / dead / linkdown / unresolved,
+            //     or a group whose members are all filtered). The
+            //     route can't deliver traffic; skip silently rather
+            //     than fail the whole walk.
+            //   - `Some(non-empty)`: emit one route per resolved
+            //     `(oif, gw)`.
             if let Some(id) = nh_id {
-              let resolved = resolve_nh_id(&nh_map, id);
-              if resolved.is_empty() {
-                deferred_nh.push((rtm_header.rtm_family, rtm_header.rtm_dst_len, dst, id));
-              } else {
-                for (nh_oif, nh_gw) in resolved {
-                  on_route(
-                    rtm_header.rtm_family,
-                    nh_oif,
-                    rtm_header.rtm_dst_len,
-                    dst,
-                    nh_gw,
-                  );
+              match resolve_nh_id(&nh_map, id) {
+                None => {
+                  deferred_nh.push((rtm_header.rtm_family, rtm_header.rtm_dst_len, dst, id));
+                }
+                Some(resolved) => {
+                  for (nh_oif, nh_gw) in resolved {
+                    on_route(
+                      rtm_header.rtm_family,
+                      nh_oif,
+                      rtm_header.rtm_dst_len,
+                      dst,
+                      nh_gw,
+                    );
+                  }
                 }
               }
               received = &received[l..];
@@ -1029,20 +1077,24 @@ where
       }
     }
 
-    // Retry pass for routes whose RTA_NH_ID was unresolved against the
-    // first nexthop dump. Re-dump and try once more; persistent miss
-    // means the kernel state is racing faster than we can snapshot it,
-    // and surfacing EINTR is the honest answer (it lets the caller
-    // retry instead of silently losing routes).
+    // Retry pass for routes whose RTA_NH_ID was absent (`None`) from
+    // the first nexthop dump. Re-dump once and re-resolve. A second
+    // `None` is the "kernel state changed faster than we can
+    // snapshot" case — surface as EINTR so the caller can retry
+    // rather than silently lose the route. `Some(non-empty)` emits;
+    // `Some(empty)` means the nexthop arrived but is itself unusable
+    // (blackhole / down) — skip silently instead of erroring,
+    // matching the first-pass behaviour.
     if !deferred_nh.is_empty() {
       let nh_map_2 = dump_nexthops(family.as_raw() as u8)?;
       for (rfamily, dst_len, dst, id) in deferred_nh {
-        let resolved = resolve_nh_id(&nh_map_2, id);
-        if resolved.is_empty() {
-          return Err(rustix::io::Errno::INTR.into());
-        }
-        for (nh_oif, nh_gw) in resolved {
-          on_route(rfamily, nh_oif, dst_len, dst, nh_gw);
+        match resolve_nh_id(&nh_map_2, id) {
+          None => return Err(rustix::io::Errno::INTR.into()),
+          Some(resolved) => {
+            for (nh_oif, nh_gw) in resolved {
+              on_route(rfamily, nh_oif, dst_len, dst, nh_gw);
+            }
+          }
         }
       }
     }
