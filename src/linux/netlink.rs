@@ -32,6 +32,17 @@ const RTA_OIF: u16 = netlink::rtattr_type_t::RTA_OIF as u16;
 const RTA_PRIORITY: u16 = netlink::rtattr_type_t::RTA_PRIORITY as u16;
 const RTA_MULTIPATH: u16 = netlink::rtattr_type_t::RTA_MULTIPATH as u16;
 const RTA_SRC: u16 = netlink::rtattr_type_t::RTA_SRC as u16;
+// RTA_TABLE carries the full 32-bit table id when it doesn't fit in the
+// 8-bit `rtm_table` field (table > 255). Without parsing it we'd treat
+// custom policy tables as if they were the main table.
+const RTA_TABLE: u16 = netlink::rtattr_type_t::RTA_TABLE as u16;
+// RTA_NH_ID indicates the route is installed via an `ip nexthop`
+// nexthop-object (resolved by a separate netlink subsystem). The
+// current `IpRoute` model has no way to dereference it, so we skip
+// these routes deliberately rather than letting them fall through the
+// `oif == 0` guard. Decoding nexthop objects is documented as a
+// known gap in `route_table`.
+const RTA_NH_ID: u16 = netlink::rtattr_type_t::RTA_NH_ID as u16;
 
 // `struct rtnexthop` flag bits from <linux/rtnetlink.h>. Nexthops with
 // any of these set are not currently usable, so the multipath walker
@@ -45,6 +56,13 @@ const RTN_UNICAST: u8 = 1;
 const RTN_LOCAL: u8 = 2;
 
 const RT_TABLE_MAIN: u16 = netlink::rt_class_t::RT_TABLE_MAIN as u16;
+// `route_table` only emits routes from the main and local kernel
+// tables. Custom policy tables (selected via `ip rule` with fwmark,
+// iif, uid, etc.) carry constraints that aren't representable in
+// `IpRoute`, so surfacing them would mislead callers — the
+// route would look generally usable when the kernel only consults it
+// for matching policy rules.
+const RT_TABLE_LOCAL: u32 = netlink::rt_class_t::RT_TABLE_LOCAL as u32;
 
 const IFA_LOCAL: u32 = netlink::IFA_LOCAL as u32;
 const IFA_ADDRESS: u32 = netlink::IFA_ADDRESS as u32;
@@ -585,11 +603,33 @@ where
               continue;
             }
 
+            // TOS-specific routes only apply to packets whose IP ToS
+            // byte matches `rtm_tos`. Emitting them as ordinary routes
+            // would make a TOS-conditional route look usable for any
+            // traffic. `IpRoute` has no TOS field, so skip.
+            if rtm_header.rtm_tos != 0 {
+              received = &received[l..];
+              continue;
+            }
+
             let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
             let mut oif: u32 = 0;
             let mut dst: Option<IpAddr> = None;
             let mut gw: Option<IpAddr> = None;
             let mut has_src_constraint = false;
+            // Linux returns the full table id either inline in
+            // `rtm_table` (values 0..=255) or via an RTA_TABLE
+            // attribute when the id exceeds 255 — the kernel sets
+            // `rtm_table = RT_TABLE_UNSPEC (0)` in that case. Track
+            // the effective id so we can drop custom policy tables.
+            let mut table_id: u32 = rtm_header.rtm_table as u32;
+            // Routes installed via `ip nexthop` carry only an
+            // RTA_NH_ID and no top-level RTA_OIF / RTA_MULTIPATH. Track
+            // explicitly and skip — the nexthop object would have to be
+            // resolved through a separate netlink dump (RTM_GETNEXTHOP)
+            // before we could emit a meaningful route. Documented as a
+            // known limitation of `route_table`.
+            let mut has_nh_id = false;
             // ECMP routes carry their nexthops inside RTA_MULTIPATH
             // (one or more `struct rtnexthop` each with sub-attrs).
             // We accumulate them and emit them after walking the
@@ -627,6 +667,12 @@ where
                   // was zero — defence-in-depth flag.
                   has_src_constraint = true;
                 }
+                RTA_TABLE if data.len() >= 4 => {
+                  table_id = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                }
+                RTA_NH_ID => {
+                  has_nh_id = true;
+                }
                 _ => {}
               }
 
@@ -635,6 +681,22 @@ where
 
             // Skip if a source constraint snuck in via RTA_SRC.
             if has_src_constraint {
+              received = &received[l..];
+              continue;
+            }
+
+            // Skip nexthop-object routes — see `has_nh_id` declaration.
+            if has_nh_id {
+              received = &received[l..];
+              continue;
+            }
+
+            // Drop routes from custom policy tables. `RT_TABLE_MAIN`
+            // (254) and `RT_TABLE_LOCAL` (255) cover the unicast / local
+            // routes the public API contracts to expose; everything
+            // else (RT_TABLE_DEFAULT, custom tables selected by `ip
+            // rule`, etc.) carries constraints `IpRoute` can't express.
+            if table_id != RT_TABLE_MAIN as u32 && table_id != RT_TABLE_LOCAL {
               received = &received[l..];
               continue;
             }

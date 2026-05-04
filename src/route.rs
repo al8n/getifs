@@ -168,17 +168,22 @@ impl IpRoute {
 /// `gateway`, `index`) tuple, so route kinds without a usable
 /// next-hop interface are filtered out at the platform layer:
 ///
-/// - **Linux**: only `RTN_UNICAST` and `RTN_LOCAL` are emitted.
-///   Blackhole / unreachable / prohibit / broadcast / multicast / nat
-///   routes, and routes without `RTA_OIF`, are dropped because they
-///   can't be represented faithfully as a single (oif, gw) tuple.
-///   ECMP routes (`RTA_MULTIPATH`) are decoded into one [`IpRoute`]
-///   per nexthop. Routes that reference a separate nexthop object via
-///   `RTA_NH_ID` (the `ip nexthop`-managed indirection added in
-///   Linux 5.3) are *not* yet decoded — they appear without a
-///   top-level `RTA_OIF` and get filtered by the same `oif == 0`
-///   guard. Hosts that pin every default route through nexthop-object
-///   IDs will see those routes missing here.
+/// - **Linux**: only `RTN_UNICAST` and `RTN_LOCAL` rows from the
+///   `RT_TABLE_MAIN` and `RT_TABLE_LOCAL` tables are emitted. Routes
+///   from custom policy tables (selected via `ip rule` with fwmark,
+///   iif, uid, etc.), TOS-specific rows (`rtm_tos != 0`), source-
+///   constrained rows (`rtm_src_len != 0` or `RTA_SRC` set), and
+///   blackhole / unreachable / prohibit / broadcast / multicast / nat
+///   types are dropped — they can't be represented faithfully as a
+///   single (oif, gw) tuple, and surfacing them would mislead callers
+///   into using a route the kernel would not consult for ordinary
+///   traffic. ECMP routes (`RTA_MULTIPATH`) are decoded into one
+///   [`IpRoute`] per nexthop. Routes that reference a separate nexthop
+///   object via `RTA_NH_ID` (the `ip nexthop`-managed indirection
+///   added in Linux 5.3) are skipped explicitly — resolving them
+///   requires a separate `RTM_GETNEXTHOP` dump which is not yet
+///   wired up. Hosts that pin every default route through
+///   nexthop-object IDs will see those routes missing here.
 /// - **BSD-like / macOS**: only routes with `RTF_UP` and a usable
 ///   destination are emitted; AF_LINK gateways surface as
 ///   `gateway = None`.
