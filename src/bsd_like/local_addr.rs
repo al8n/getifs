@@ -3,16 +3,14 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_DUMP, RTA_DST, RTF_UP};
+use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_DUMP, RTAX_DST, RTF_UP};
 use smallvec_wrapper::SmallVec;
-
-use crate::is_ipv6_unspecified;
 
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
   compat::RtMsghdr,
   fetch, interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, invalid_message,
-  message_too_short, roundup, IfNet, Ifv4Net, Ifv6Net, Net,
+  message_too_short, parse_addrs, IfNet, Ifv4Net, Ifv6Net, Net,
 };
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
@@ -71,60 +69,28 @@ fn best_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
         continue;
       }
 
-      // Bounded address cursor — protects every read below from
-      // overflowing into the next route message or off the sysctl
-      // buffer if `sa_len` is malformed or the layout differs.
-      let mut cur = &src[header_size..l];
-      let mut addrs = rtm.rtm_addrs;
-      let mut i = 1;
-      let mut is_default = false;
-
-      while addrs != 0 {
-        if (addrs & 1) != 0 {
-          const SA_HEADER: usize = std::mem::size_of::<libc::sockaddr>();
-          if cur.len() < SA_HEADER {
-            break;
-          }
-          // SAFETY: bounds-checked above.
-          let sa: libc::sockaddr = std::ptr::read_unaligned(cur.as_ptr() as *const libc::sockaddr);
-          match (family, sa.sa_family as i32, i) {
-            (AF_INET, AF_INET, RTA_DST) | (AF_UNSPEC, AF_INET, RTA_DST) => {
-              const SA_IN: usize = std::mem::size_of::<libc::sockaddr_in>();
-              if cur.len() >= SA_IN {
-                let sa_in: libc::sockaddr_in =
-                  std::ptr::read_unaligned(cur.as_ptr() as *const libc::sockaddr_in);
-                if sa_in.sin_addr.s_addr == 0 {
-                  is_default = true;
-                }
-              }
-            }
-            (AF_INET6, AF_INET6, RTA_DST) | (AF_UNSPEC, AF_INET6, RTA_DST) => {
-              const SA_IN6: usize = std::mem::size_of::<libc::sockaddr_in6>();
-              if cur.len() >= SA_IN6 {
-                let sa_in6: libc::sockaddr_in6 =
-                  std::ptr::read_unaligned(cur.as_ptr() as *const libc::sockaddr_in6);
-                if is_ipv6_unspecified(sa_in6.sin6_addr.s6_addr) {
-                  is_default = true;
-                }
-              }
-            }
-            _ => {}
-          }
-
-          let sa_len = if sa.sa_len == 0 {
-            SA_HEADER
-          } else {
-            sa.sa_len as usize
-          };
-          let advance = roundup(sa_len);
-          if advance == 0 || advance > cur.len() {
-            break;
-          }
-          cur = &cur[advance..];
-        }
-        i += 1;
-        addrs >>= 1;
-      }
+      // Decode the address slots through the shared `parse_addrs`
+      // helper so default-route detection here matches the
+      // route-table walker. That helper:
+      //   - returns `None` for the dst slot when the kernel omits
+      //     `RTAX_DST` entirely (one BSD encoding of the default
+      //     route is "no destination, only a gateway");
+      //   - decodes the compact `sa_family = AF_INET[6]` short
+      //     sockaddrs that NetBSD/OpenBSD emit for netmasks and that
+      //     the previous inline decode here silently dropped, leaving
+      //     `is_default` false for valid default routes.
+      let addrs = parse_addrs(rtm.rtm_addrs as u32, &src[header_size..l])?;
+      let dst = addrs[RTAX_DST as usize];
+      let dst_present = (rtm.rtm_addrs as u32 & libc::RTA_DST as u32) != 0;
+      let is_default = match (family, dst) {
+        // Family-specific dump with no RTA_DST attribute at all → BSD's
+        // alternate encoding for "default route for this family".
+        (AF_INET, None) | (AF_INET6, None) if !dst_present => true,
+        // Explicit unspecified destination, regardless of dump family.
+        (_, Some(IpAddr::V4(v4))) if v4.is_unspecified() => true,
+        (_, Some(IpAddr::V6(v6))) if v6.is_unspecified() => true,
+        _ => false,
+      };
 
       // If this is a default route and has better metric, update best_ifindex
       let metric = rtm.rtm_rmx.rmx_recvpipe as u64;

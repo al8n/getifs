@@ -1,6 +1,6 @@
 use linux_raw_sys::{
   if_arp::{self, ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6},
-  netlink::{self, NLM_F_DUMP, NLM_F_REQUEST},
+  netlink::{self, NLM_F_DUMP, NLM_F_DUMP_INTR, NLM_F_REQUEST},
 };
 use rustix::net::{
   bind, getsockname, netlink::SocketAddrNetlink, recvfrom, sendto, socket, AddressFamily,
@@ -610,14 +610,47 @@ fn dump_nexthops(family: u8) -> io::Result<std::collections::HashMap<u32, Nextho
         }
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => break 'outer,
+          NLMSG_DONE => {
+            // The kernel sets `NLM_F_DUMP_INTR` on the closing
+            // NLMSG_DONE if the routing/nexthop table changed during
+            // the dump (e.g. an interface flap or a DHCP renewal mid-
+            // walk). Treating an interrupted snapshot as complete
+            // would silently return missing entries.
+            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
+              return Err(rustix::io::Errno::INTR.into());
+            }
+            break 'outer;
+          }
           NLMSG_ERROR => {
-            // The kernel returns ENOTSUP / EOPNOTSUPP when the nexthop
-            // subsystem isn't compiled in (very old kernels, custom
-            // builds). Treat that as "no nexthop objects exist" — the
-            // route walker's RTA_NH_ID skip then becomes a non-issue
-            // because no route can carry an id that doesn't exist.
-            return Ok(map);
+            // `nlmsgerr` body: 4-byte signed errno, then a copy of
+            // the failed message header. Only "subsystem not
+            // supported" surfaces as "no nexthop objects" — every
+            // other errno is a real failure that must propagate.
+            // Treating EPERM / ENOBUFS / EINVAL the same as missing
+            // subsystem would silently drop every RTA_NH_ID-managed
+            // route while `route_table()` still returned `Ok`.
+            if hlen < NLMSG_HDRLEN + 4 {
+              return Err(rustix::io::Errno::INVAL.into());
+            }
+            let errno =
+              i32::from_ne_bytes(received[NLMSG_HDRLEN..NLMSG_HDRLEN + 4].try_into().unwrap());
+            // errno == 0 is a plain ack — we didn't request one, but
+            // ignore if the kernel sends one anyway.
+            if errno == 0 {
+              received = &received[l..];
+              continue;
+            }
+            // Kernel returns negative errno values.
+            let raw = errno.unsigned_abs();
+            // EOPNOTSUPP (95) / ENOTSUP — pre-5.3 kernels without the
+            // nexthop subsystem compiled in. EPROTONOSUPPORT (93) —
+            // some build configs.
+            const EOPNOTSUPP: u32 = 95;
+            const EPROTONOSUPPORT: u32 = 93;
+            if raw == EOPNOTSUPP || raw == EPROTONOSUPPORT {
+              return Ok(map);
+            }
+            return Err(io::Error::from_raw_os_error(raw as i32));
           }
           val if val == RTM_NEWNEXTHOP => {
             // nhmsg occupies the first 8 bytes after the netlink
@@ -767,7 +800,19 @@ where
         }
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => break 'outer,
+          NLMSG_DONE => {
+            // The kernel marks the closing NLMSG_DONE with
+            // `NLM_F_DUMP_INTR` if the routing table changed during
+            // the dump (DHCP renewal, VPN connect/disconnect, an
+            // interface flap, container start, etc.). The snapshot
+            // we accumulated is silently incomplete in that case —
+            // surface as EINTR rather than treat it as success and
+            // hand back a half-walked table.
+            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
+              return Err(rustix::io::Errno::INTR.into());
+            }
+            break 'outer;
+          }
           NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
           val if val == RTM_NEWROUTE => {
             // Bound the per-message slice to `hlen` rather than the

@@ -574,7 +574,10 @@ fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
   }
 }
 
-fn parse_addrs(addrs: u32, mut b: &[u8]) -> io::Result<[Option<IpAddr>; RTAX_MAX as usize]> {
+pub(super) fn parse_addrs(
+  addrs: u32,
+  mut b: &[u8],
+) -> io::Result<[Option<IpAddr>; RTAX_MAX as usize]> {
   let mut as_ = [None; RTAX_MAX as usize];
 
   #[allow(clippy::needless_range_loop)]
