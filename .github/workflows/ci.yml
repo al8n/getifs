@@ -45,6 +45,29 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  # Verify the crate compiles at the advertised MSRV. Reads the floor
+  # from Cargo.toml so this job stays honest if the MSRV gets bumped
+  # again. Catches `let-else`, `core::mem::offset_of!`, and similar
+  # silent toolchain-version regressions before they reach a release.
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          msrv=$(awk -F\" '/^rust-version/ { print $2; exit }' Cargo.toml)
+          echo "version=$msrv" >> "$GITHUB_OUTPUT"
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal --no-self-update && rustup default ${{ steps.msrv.outputs.version }}
+      - name: cargo check at MSRV
+        # `--locked` would force the committed Cargo.lock; we don't ship
+        # one, so let cargo resolve normally. If a transitive dep
+        # raises its MSRV above ours, this step fails with a clear
+        # rustc error and the fix is either bumping `rust-version` or
+        # pinning the dep.
+        run: cargo check --all-targets
 
   # Apply clippy lints
   clippy:

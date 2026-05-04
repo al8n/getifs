@@ -655,13 +655,24 @@ fn dump_nexthops(family: u8) -> io::Result<std::collections::HashMap<u32, Nextho
           val if val == RTM_NEWNEXTHOP => {
             // nhmsg occupies the first 8 bytes after the netlink
             // header: family (u8), scope (u8), protocol (u8), resvd
-            // (u8), flags (u32). We only need `family` for decoding
-            // gateway addresses.
+            // (u8), flags (u32). The flags field uses the same
+            // RTNH_F_* bits as `struct rtnexthop` — we use it to skip
+            // dead / linkdown / unresolved nexthops, matching the
+            // multipath walker's behaviour. Without this filter, a
+            // route pointing at a downed nexthop would be reported as
+            // live by `route_table()`.
             if hlen < NLMSG_HDRLEN + 8 {
               received = &received[l..];
               continue;
             }
             let nh_family = received[NLMSG_HDRLEN];
+            let nh_flags = u32::from_ne_bytes(
+              received[NLMSG_HDRLEN + 4..NLMSG_HDRLEN + 8]
+                .try_into()
+                .unwrap(),
+            );
+            let unusable = (RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_UNRESOLVED) as u32;
+            let nh_unusable = nh_flags & unusable != 0;
             let mut attr_buf = &received[NLMSG_HDRLEN + 8..hlen];
 
             let mut id: u32 = 0;
@@ -714,7 +725,10 @@ fn dump_nexthops(family: u8) -> io::Result<std::collections::HashMap<u32, Nextho
               attr_buf = &attr_buf[alen..];
             }
 
-            if id != 0 && !blackhole {
+            // Drop nexthops the kernel marks unusable. Inserting them
+            // into the map would let `resolve_nh_id` emit them as if
+            // they were live; matches `walk_multipath`'s skip logic.
+            if id != 0 && !blackhole && !nh_unusable {
               map.insert(id, NexthopInfo { oif, gw, group });
             }
           }
@@ -774,6 +788,14 @@ where
     // no nexthop objects — the dump returns an empty map cheaply, and
     // we still want to call `RTM_GETROUTE` afterward.
     let nh_map = dump_nexthops(family.as_raw() as u8)?;
+
+    // Stale-snapshot recovery: if a route added between the nexthop
+    // dump and the route dump references an id our map doesn't know
+    // about, we record it here and re-resolve after the route walk
+    // completes. `NLM_F_DUMP_INTR` only catches changes *during* the
+    // route dump — it can't see the nexthop arriving in the gap
+    // between our two requests.
+    let mut deferred_nh: Vec<(u8, u8, Option<IpAddr>, u32)> = Vec::new();
 
     let handle = Handle::new()?;
 
@@ -946,19 +968,24 @@ where
             // Resolve nexthop-object references. The route had only an
             // RTA_NH_ID — look up the nexthop in the dump map. Single
             // leaves emit one route; groups fan out to one route per
-            // member (similar to RTA_MULTIPATH). Unresolved ids (kernel
-            // raced with the route walk, or nexthop subsystem not
-            // available) yield zero routes for that entry — same
-            // outcome as a multipath route whose nexthops are all dead.
+            // member (similar to RTA_MULTIPATH). If the id isn't in
+            // `nh_map`, defer the route for a single retry pass after
+            // the route walk finishes — covers the race where a
+            // nexthop was added between the two dumps.
             if let Some(id) = nh_id {
-              for (nh_oif, nh_gw) in resolve_nh_id(&nh_map, id) {
-                on_route(
-                  rtm_header.rtm_family,
-                  nh_oif,
-                  rtm_header.rtm_dst_len,
-                  dst,
-                  nh_gw,
-                );
+              let resolved = resolve_nh_id(&nh_map, id);
+              if resolved.is_empty() {
+                deferred_nh.push((rtm_header.rtm_family, rtm_header.rtm_dst_len, dst, id));
+              } else {
+                for (nh_oif, nh_gw) in resolved {
+                  on_route(
+                    rtm_header.rtm_family,
+                    nh_oif,
+                    rtm_header.rtm_dst_len,
+                    dst,
+                    nh_gw,
+                  );
+                }
               }
               received = &received[l..];
               continue;
@@ -999,6 +1026,24 @@ where
         }
 
         received = &received[l..];
+      }
+    }
+
+    // Retry pass for routes whose RTA_NH_ID was unresolved against the
+    // first nexthop dump. Re-dump and try once more; persistent miss
+    // means the kernel state is racing faster than we can snapshot it,
+    // and surfacing EINTR is the honest answer (it lets the caller
+    // retry instead of silently losing routes).
+    if !deferred_nh.is_empty() {
+      let nh_map_2 = dump_nexthops(family.as_raw() as u8)?;
+      for (rfamily, dst_len, dst, id) in deferred_nh {
+        let resolved = resolve_nh_id(&nh_map_2, id);
+        if resolved.is_empty() {
+          return Err(rustix::io::Errno::INTR.into());
+        }
+        for (nh_oif, nh_gw) in resolved {
+          on_route(rfamily, nh_oif, dst_len, dst, nh_gw);
+        }
       }
     }
 
