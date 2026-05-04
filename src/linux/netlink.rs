@@ -465,6 +465,29 @@ where
             let rtm = &received[NLMSG_HDRLEN..hlen];
             let rtm_header = RtmMessageHeader::parse(rtm)?;
 
+            // Same eligibility checks as `netlink_walk_routes`. Without
+            // these a low-metric `blackhole default`, an `unreachable
+            // default`, or a TOS / source-constrained default could win
+            // `best_ifindex` and steer `best_local_*` at an interface
+            // the kernel would never use for ordinary traffic.
+            //
+            //   - rtm_type ∈ {RTN_UNICAST, RTN_LOCAL}: filters
+            //     blackhole / unreachable / prohibit / multicast / nat /
+            //     broadcast types.
+            //   - rtm_tos == 0: skip TOS-conditional routes.
+            //   - rtm_src_len == 0: skip source-prefix-constrained
+            //     policy routes.
+            // RTA_TABLE override (for table id > 255) and RTA_SRC are
+            // applied after the attribute walk below.
+            if rtm_header.rtm_type != RTN_UNICAST && rtm_header.rtm_type != RTN_LOCAL {
+              received = &received[l..];
+              continue;
+            }
+            if rtm_header.rtm_tos != 0 || rtm_header.rtm_src_len != 0 {
+              received = &received[l..];
+              continue;
+            }
+
             // Use the same gateway detection logic as netlink_gateway
             let mut has_gateway = false;
             let old_kernel_gw = (rtm_header.rtm_flags & (RTF_UP as u32 | RTF_GATEWAY as u32))
@@ -493,6 +516,11 @@ where
             // is ECMP or `ip nexthop`-based.
             let mut multipath: Option<&[u8]> = None;
             let mut nh_id: Option<u32> = None;
+            // Effective table id (RTA_TABLE override for > 255) and
+            // source-constraint detection — shared with
+            // `netlink_walk_routes`.
+            let mut table_id: u32 = rtm_header.rtm_table as u32;
+            let mut has_src_constraint = false;
 
             while rtattr_buf.len() >= RtAttr::SIZE {
               let attr = RtAttr {
@@ -526,10 +554,29 @@ where
                 RTA_NH_ID if data.len() >= 4 => {
                   nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
                 }
+                RTA_TABLE if data.len() >= 4 => {
+                  table_id = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                }
+                RTA_SRC => {
+                  // Source constraint via attribute (rtm_src_len was
+                  // zero but kernel still emitted RTA_SRC) — defence
+                  // in depth.
+                  has_src_constraint = true;
+                }
                 _ => {}
               }
 
               rtattr_buf = &rtattr_buf[alen..];
+            }
+
+            // Drop routes from custom policy tables and any
+            // post-walk-discovered source constraints. Same filter
+            // `netlink_walk_routes` applies.
+            if has_src_constraint
+              || (table_id != RT_TABLE_MAIN as u32 && table_id != RT_TABLE_LOCAL)
+            {
+              received = &received[l..];
+              continue;
             }
 
             // Resolve oif from RTA_MULTIPATH or RTA_NH_ID when

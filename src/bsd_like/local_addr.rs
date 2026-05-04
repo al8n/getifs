@@ -3,7 +3,7 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_DUMP, RTAX_DST, RTF_UP};
+use libc::{AF_INET, AF_INET6, NET_RT_DUMP, RTAX_DST, RTF_UP};
 use smallvec_wrapper::SmallVec;
 
 use super::{
@@ -22,7 +22,24 @@ pub(crate) fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 }
 
 pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
-  best_local_addrs_in(AF_UNSPEC)
+  // Walk AF_INET and AF_INET6 separately rather than one AF_UNSPEC
+  // dump. The kernel encodes "default route" by omitting `RTAX_DST`
+  // entirely, and `best_local_addrs_in` only treats absent dst as
+  // default in family-specific dumps (we'd otherwise have no way to
+  // attribute the default to the right address family). With a single
+  // AF_UNSPEC walk, hosts whose only default route uses that encoding
+  // would silently get `Ok([])` from this call. Same tradeoff as
+  // `route_table_by_filter` — two sysctl calls, one consistent answer.
+  let mut out: SmallVec<IfNet> = SmallVec::new();
+  let v4 = best_local_addrs_in::<Ifv4Net>(AF_INET)?;
+  let v6 = best_local_addrs_in::<Ifv6Net>(AF_INET6)?;
+  for r in v4 {
+    out.push(IfNet::V4(r));
+  }
+  for r in v6 {
+    out.push(IfNet::V6(r));
+  }
+  Ok(out)
 }
 
 fn best_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
