@@ -554,7 +554,7 @@ where
             let rtm = &received[NLMSG_HDRLEN..hlen];
             let rtm_header = RtmMessageHeader::parse(rtm)?;
 
-            // The `Route` model (destination + single gateway + single
+            // The `IpRoute` model (destination + single gateway + single
             // output interface) only meaningfully represents
             // RTN_UNICAST and RTN_LOCAL routes. Skip everything else
             // — broadcast, multicast, blackhole, unreachable, prohibit,

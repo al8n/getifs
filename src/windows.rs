@@ -13,8 +13,8 @@ use windows_sys::{
 };
 
 use super::{
-  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, MacAddr, Net, Route,
-  Routev4, Routev6, MAC_ADDRESS_SIZE,
+  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, IpRoute, Ipv4Route,
+  Ipv6Route, MacAddr, Net, MAC_ADDRESS_SIZE,
 };
 
 pub(super) use gateway::*;

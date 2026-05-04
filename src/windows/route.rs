@@ -6,7 +6,7 @@ use smallvec_wrapper::SmallVec;
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
 use windows_sys::Win32::Networking::WinSock::*;
 
-use super::{sockaddr_to_ipaddr, Route, Routev4, Routev6, NO_ERROR};
+use super::{sockaddr_to_ipaddr, IpRoute, Ipv4Route, Ipv6Route, NO_ERROR};
 
 /// `GetIpForwardTable2` returns this when the requested family has no
 /// route entries (e.g. IPv6 stack present but no IPv6 routes
@@ -60,7 +60,7 @@ impl Drop for ForwardTable {
 }
 
 #[inline]
-fn build_routev4(row: &MIB_IPFORWARD_ROW2) -> Option<Routev4> {
+fn build_routev4(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv4Route> {
   let prefix = row.DestinationPrefix.Prefix;
   let dst_ip = sockaddr_to_ipaddr(AF_UNSPEC, &prefix as *const _ as *const SOCKADDR)?;
   let dst_v4 = match dst_ip {
@@ -75,11 +75,11 @@ fn build_routev4(row: &MIB_IPFORWARD_ROW2) -> Option<Routev4> {
     _ => None,
   };
 
-  Some(Routev4::new(row.InterfaceIndex, net, gw))
+  Some(Ipv4Route::new(row.InterfaceIndex, net, gw))
 }
 
 #[inline]
-fn build_routev6(row: &MIB_IPFORWARD_ROW2) -> Option<Routev6> {
+fn build_routev6(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv6Route> {
   let prefix = row.DestinationPrefix.Prefix;
   let dst_ip = sockaddr_to_ipaddr(AF_UNSPEC, &prefix as *const _ as *const SOCKADDR)?;
   let dst_v6 = match dst_ip {
@@ -94,7 +94,7 @@ fn build_routev6(row: &MIB_IPFORWARD_ROW2) -> Option<Routev6> {
     _ => None,
   };
 
-  Some(Routev6::new(row.InterfaceIndex, net, gw))
+  Some(Ipv6Route::new(row.InterfaceIndex, net, gw))
 }
 
 /// `Ok(Some(table))` for a populated family, `Ok(None)` for "no
@@ -110,11 +110,11 @@ fn fetch_family(family: u16) -> io::Result<Option<ForwardTable>> {
   }
 }
 
-pub(crate) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Route>>
+pub(crate) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<IpRoute>>
 where
-  F: FnMut(&Route) -> bool,
+  F: FnMut(&IpRoute) -> bool,
 {
-  let mut out: SmallVec<Route> = SmallVec::new();
+  let mut out: SmallVec<IpRoute> = SmallVec::new();
 
   // Fetch each family independently. Suppress *only* `ERROR_NOT_FOUND`
   // (interpreted as "this family has no routes installed", e.g. on a
@@ -126,7 +126,7 @@ where
   if let Some(table_v4) = fetch_family(AF_INET)? {
     for row in table_v4.rows() {
       if let Some(r) = build_routev4(row) {
-        let r = Route::V4(r);
+        let r = IpRoute::V4(r);
         if f(&r) {
           out.push(r);
         }
@@ -136,7 +136,7 @@ where
   if let Some(table_v6) = fetch_family(AF_INET6)? {
     for row in table_v6.rows() {
       if let Some(r) = build_routev6(row) {
-        let r = Route::V6(r);
+        let r = IpRoute::V6(r);
         if f(&r) {
           out.push(r);
         }
@@ -146,16 +146,16 @@ where
   Ok(out)
 }
 
-pub(crate) fn route_ipv4_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Routev4>>
+pub(crate) fn route_ipv4_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ipv4Route>>
 where
-  F: FnMut(&Routev4) -> bool,
+  F: FnMut(&Ipv4Route) -> bool,
 {
   // Use `fetch_family` rather than `ForwardTable::fetch` directly so
   // `ERROR_NOT_FOUND` (the kernel's "this family has no route entries"
   // signal — common on a single-stack host) maps to an empty
   // `SmallVec` rather than `Err`. Real syscall failures still
   // propagate.
-  let mut out: SmallVec<Routev4> = SmallVec::new();
+  let mut out: SmallVec<Ipv4Route> = SmallVec::new();
   if let Some(table) = fetch_family(AF_INET)? {
     for row in table.rows() {
       if let Some(r) = build_routev4(row) {
@@ -168,13 +168,13 @@ where
   Ok(out)
 }
 
-pub(crate) fn route_ipv6_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Routev6>>
+pub(crate) fn route_ipv6_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ipv6Route>>
 where
-  F: FnMut(&Routev6) -> bool,
+  F: FnMut(&Ipv6Route) -> bool,
 {
   // Same rationale as `route_ipv4_table_by_filter`: empty IPv6 route
   // table on a v4-only host is `Ok([])`, not `Err(ERROR_NOT_FOUND)`.
-  let mut out: SmallVec<Routev6> = SmallVec::new();
+  let mut out: SmallVec<Ipv6Route> = SmallVec::new();
   if let Some(table) = fetch_family(AF_INET6)? {
     for row in table.rows() {
       if let Some(r) = build_routev6(row) {

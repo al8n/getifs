@@ -12,13 +12,13 @@ macro_rules! routev_impl {
     paste::paste! {
       #[doc = "An IP" $kind " entry from the kernel routing table."]
       #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-      pub struct [<Route $kind>] {
+      pub struct [<Ip $kind Route>] {
         index: u32,
         destination: [<Ip $kind Net>],
         gateway: Option<[<Ip $kind Addr>]>,
       }
 
-      impl core::fmt::Display for [<Route $kind>] {
+      impl core::fmt::Display for [<Ip $kind Route>] {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
           match self.gateway {
             Some(gw) => write!(f, "{} via {} ({})", self.destination, gw, self.index),
@@ -27,7 +27,7 @@ macro_rules! routev_impl {
         }
       }
 
-      impl [<Route $kind>] {
+      impl [<Ip $kind Route>] {
         #[doc = "Creates a new IP" $kind " route entry."]
         #[inline]
         pub const fn new(
@@ -79,30 +79,30 @@ macro_rules! routev_impl {
 routev_impl!("v4");
 routev_impl!("v6");
 
-impl From<Routev4> for Route {
+impl From<Ipv4Route> for IpRoute {
   #[inline]
-  fn from(value: Routev4) -> Self {
+  fn from(value: Ipv4Route) -> Self {
     Self::V4(value)
   }
 }
 
-impl From<Routev6> for Route {
+impl From<Ipv6Route> for IpRoute {
   #[inline]
-  fn from(value: Routev6) -> Self {
+  fn from(value: Ipv6Route) -> Self {
     Self::V6(value)
   }
 }
 
 /// An entry from the kernel routing table.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum Route {
+pub enum IpRoute {
   /// An IPv4 route.
-  V4(Routev4),
+  V4(Ipv4Route),
   /// An IPv6 route.
-  V6(Routev6),
+  V6(Ipv6Route),
 }
 
-impl core::fmt::Display for Route {
+impl core::fmt::Display for IpRoute {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     match self {
       Self::V4(r) => write!(f, "{r}"),
@@ -111,7 +111,7 @@ impl core::fmt::Display for Route {
   }
 }
 
-impl Route {
+impl IpRoute {
   /// Returns the output interface index.
   #[inline]
   pub const fn index(&self) -> u32 {
@@ -164,7 +164,7 @@ impl Route {
 
 /// Returns the **unicast and local** entries from the kernel routing
 /// table (both IPv4 and IPv6). Other route classes are intentionally
-/// excluded — the [`Route`] type only models a single (`destination`,
+/// excluded — the [`IpRoute`] type only models a single (`destination`,
 /// `gateway`, `index`) tuple, so route kinds without a usable
 /// next-hop interface are filtered out at the platform layer:
 ///
@@ -172,7 +172,7 @@ impl Route {
 ///   Blackhole / unreachable / prohibit / broadcast / multicast / nat
 ///   routes, and routes without `RTA_OIF`, are dropped because they
 ///   can't be represented faithfully as a single (oif, gw) tuple.
-///   ECMP routes (`RTA_MULTIPATH`) are decoded into one [`Route`]
+///   ECMP routes (`RTA_MULTIPATH`) are decoded into one [`IpRoute`]
 ///   per nexthop.
 /// - **BSD-like / macOS**: only routes with `RTF_UP` and a usable
 ///   destination are emitted; AF_LINK gateways surface as
@@ -203,7 +203,7 @@ impl Route {
 ///   println!("{route}");
 /// }
 /// ```
-pub fn route_table() -> io::Result<SmallVec<Route>> {
+pub fn route_table() -> io::Result<SmallVec<IpRoute>> {
   os::route_table_by_filter(|_| true)
 }
 
@@ -220,7 +220,7 @@ pub fn route_table() -> io::Result<SmallVec<Route>> {
 ///   println!("{route}");
 /// }
 /// ```
-pub fn route_ipv4_table() -> io::Result<SmallVec<Routev4>> {
+pub fn route_ipv4_table() -> io::Result<SmallVec<Ipv4Route>> {
   os::route_ipv4_table_by_filter(|_| true)
 }
 
@@ -237,7 +237,7 @@ pub fn route_ipv4_table() -> io::Result<SmallVec<Routev4>> {
 ///   println!("{route}");
 /// }
 /// ```
-pub fn route_ipv6_table() -> io::Result<SmallVec<Routev6>> {
+pub fn route_ipv6_table() -> io::Result<SmallVec<Ipv6Route>> {
   os::route_ipv6_table_by_filter(|_| true)
 }
 
@@ -249,7 +249,7 @@ pub fn route_ipv6_table() -> io::Result<SmallVec<Routev6>> {
 /// ## Example
 ///
 /// ```rust
-/// use getifs::{route_table_by_filter, Route};
+/// use getifs::{route_table_by_filter, IpRoute};
 ///
 /// // Only default routes
 /// let defaults = route_table_by_filter(|r| r.is_default()).unwrap();
@@ -257,9 +257,9 @@ pub fn route_ipv6_table() -> io::Result<SmallVec<Routev6>> {
 ///   println!("{route}");
 /// }
 /// ```
-pub fn route_table_by_filter<F>(f: F) -> io::Result<SmallVec<Route>>
+pub fn route_table_by_filter<F>(f: F) -> io::Result<SmallVec<IpRoute>>
 where
-  F: FnMut(&Route) -> bool,
+  F: FnMut(&IpRoute) -> bool,
 {
   os::route_table_by_filter(f)
 }
@@ -277,9 +277,9 @@ where
 ///   println!("{route}");
 /// }
 /// ```
-pub fn route_ipv4_table_by_filter<F>(f: F) -> io::Result<SmallVec<Routev4>>
+pub fn route_ipv4_table_by_filter<F>(f: F) -> io::Result<SmallVec<Ipv4Route>>
 where
-  F: FnMut(&Routev4) -> bool,
+  F: FnMut(&Ipv4Route) -> bool,
 {
   os::route_ipv4_table_by_filter(f)
 }
@@ -296,9 +296,9 @@ where
 ///   println!("{route}");
 /// }
 /// ```
-pub fn route_ipv6_table_by_filter<F>(f: F) -> io::Result<SmallVec<Routev6>>
+pub fn route_ipv6_table_by_filter<F>(f: F) -> io::Result<SmallVec<Ipv6Route>>
 where
-  F: FnMut(&Routev6) -> bool,
+  F: FnMut(&Ipv6Route) -> bool,
 {
   os::route_ipv6_table_by_filter(f)
 }
@@ -311,14 +311,14 @@ mod tests {
   fn route_v4_basic() {
     let dst = Ipv4Net::new(Ipv4Addr::new(10, 0, 0, 0), 8).unwrap();
     let gw = Some(Ipv4Addr::new(10, 0, 0, 1));
-    let r = Routev4::new(2, dst, gw);
+    let r = Ipv4Route::new(2, dst, gw);
     assert_eq!(r.index(), 2);
     assert_eq!(r.destination(), &dst);
     assert_eq!(r.gateway(), gw);
     assert!(!r.is_default());
     assert!(r.name().is_ok());
 
-    let default = Routev4::new(0, Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(), None);
+    let default = Ipv4Route::new(0, Ipv4Net::new(Ipv4Addr::UNSPECIFIED, 0).unwrap(), None);
     assert!(default.is_default());
     assert!(default.gateway().is_none());
   }
@@ -327,7 +327,7 @@ mod tests {
   fn route_v6_basic() {
     let dst = Ipv6Net::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32).unwrap();
     let gw = Some(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1));
-    let r = Routev6::new(3, dst, gw);
+    let r = Ipv6Route::new(3, dst, gw);
     assert_eq!(r.index(), 3);
     assert_eq!(r.destination(), &dst);
     assert_eq!(r.gateway(), gw);
@@ -336,23 +336,23 @@ mod tests {
 
   #[test]
   fn route_enum_dispatch() {
-    let v4 = Routev4::new(
+    let v4 = Ipv4Route::new(
       1,
       Ipv4Net::new(Ipv4Addr::new(192, 168, 1, 0), 24).unwrap(),
       None,
     );
-    let r: Route = v4.into();
+    let r: IpRoute = v4.into();
     assert_eq!(r.index(), 1);
     assert!(r.gateway().is_none());
     assert!(matches!(r.destination(), IpNet::V4(_)));
     assert!(!r.is_default());
 
-    let v6 = Routev6::new(
+    let v6 = Ipv6Route::new(
       1,
       Ipv6Net::new(Ipv6Addr::UNSPECIFIED, 0).unwrap(),
       Some(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
     );
-    let r: Route = v6.into();
+    let r: IpRoute = v6.into();
     assert!(r.is_default());
     assert!(matches!(r.destination(), IpNet::V6(_)));
     assert_eq!(
