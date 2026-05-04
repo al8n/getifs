@@ -162,7 +162,24 @@ impl Route {
   }
 }
 
-/// Returns every entry in the kernel routing table (both IPv4 and IPv6).
+/// Returns the **unicast and local** entries from the kernel routing
+/// table (both IPv4 and IPv6). Other route classes are intentionally
+/// excluded — the [`Route`] type only models a single (`destination`,
+/// `gateway`, `index`) tuple, so route kinds without a usable
+/// next-hop interface are filtered out at the platform layer:
+///
+/// - **Linux**: only `RTN_UNICAST` and `RTN_LOCAL` are emitted.
+///   Blackhole / unreachable / prohibit / broadcast / multicast / nat
+///   routes, and routes without `RTA_OIF`, are dropped because they
+///   can't be represented faithfully as a single (oif, gw) tuple.
+///   ECMP routes (`RTA_MULTIPATH`) are decoded into one [`Route`]
+///   per nexthop.
+/// - **BSD-like / macOS**: only routes with `RTF_UP` and a usable
+///   destination are emitted; AF_LINK gateways surface as
+///   `gateway = None`.
+/// - **Windows**: only families whose `GetIpForwardTable2` call
+///   succeeds are included; an `ERROR_NOT_FOUND` for one family is
+///   treated as an empty table for that family rather than a failure.
 ///
 /// ## Platform notes
 ///
@@ -175,7 +192,7 @@ impl Route {
 /// unparseable." Code that needs an authoritative table on NetBSD or
 /// OpenBSD should cross-check against the OS routing tool until the
 /// per-OS sockaddr decoders land. Linux, macOS, FreeBSD, DragonFlyBSD,
-/// and Windows return a complete table.
+/// and Windows return a complete unicast/local table.
 ///
 /// ## Example
 ///
@@ -190,7 +207,9 @@ pub fn route_table() -> io::Result<SmallVec<Route>> {
   os::route_table_by_filter(|_| true)
 }
 
-/// Returns every IPv4 entry in the kernel routing table.
+/// Returns the IPv4 unicast/local entries from the kernel routing
+/// table. See [`route_table`] for the exact set of route kinds
+/// included and the platform notes.
 ///
 /// ## Example
 ///
@@ -205,7 +224,9 @@ pub fn route_ipv4_table() -> io::Result<SmallVec<Routev4>> {
   os::route_ipv4_table_by_filter(|_| true)
 }
 
-/// Returns every IPv6 entry in the kernel routing table.
+/// Returns the IPv6 unicast/local entries from the kernel routing
+/// table. See [`route_table`] for the exact set of route kinds
+/// included and the platform notes.
 ///
 /// ## Example
 ///
@@ -220,7 +241,10 @@ pub fn route_ipv6_table() -> io::Result<SmallVec<Routev6>> {
   os::route_ipv6_table_by_filter(|_| true)
 }
 
-/// Returns routing-table entries that match the given filter.
+/// Returns routing-table entries that match the given filter. Only
+/// the unicast/local route classes (see [`route_table`]) are visible
+/// to the filter; non-unicast kinds are excluded at the platform
+/// layer before `f` runs.
 ///
 /// ## Example
 ///

@@ -941,20 +941,38 @@ impl NetlinkRouteRequest {
     // } else {
     //   libc::NLM_F_REQUEST as u16
     // };
-    Self {
-      header: MessageHeader {
-        nlmsg_len: Self::SIZE as u32,
-        nlmsg_type: proto,
-        nlmsg_flags: (NLM_F_DUMP | NLM_F_REQUEST) as u16,
-        nlmsg_seq: seq,
-        nlmsg_pid: std::process::id(),
-      },
-      data: RtGenMessage { family },
-    }
+    //
+    // `MessageHeader` is 16 bytes and `RtGenMessage` is 1 byte, so
+    // `repr(C)` rounds `Self` up to 20 bytes for `u32` alignment —
+    // leaving 3 trailing padding bytes after `data.family`. The
+    // struct-literal form (`Self { header, data }`) doesn't define
+    // those padding bytes, and `as_bytes()` would then expose them to
+    // `sendto`. That's UB by Rust's rules (reading uninit memory) and
+    // also a tiny stack-data leak into the netlink request buffer.
+    //
+    // `MaybeUninit::zeroed().assume_init()` zero-fills the whole
+    // backing storage *including* trailing padding; subsequent field
+    // writes leave the padding zeroed. Safe because the resulting
+    // value is a valid `Self` (every named field is overwritten and
+    // every field type accepts an all-zero bit pattern).
+    let mut req: Self = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+    req.header = MessageHeader {
+      nlmsg_len: Self::SIZE as u32,
+      nlmsg_type: proto,
+      nlmsg_flags: (NLM_F_DUMP | NLM_F_REQUEST) as u16,
+      nlmsg_seq: seq,
+      nlmsg_pid: std::process::id(),
+    };
+    req.data = RtGenMessage { family };
+    req
   }
 
   #[inline]
   const fn as_bytes(&self) -> &[u8] {
+    // SAFETY: `Self` is `repr(C)` and its full `Self::SIZE` byte
+    // representation is initialized — the named fields are written by
+    // `new()` and the trailing repr(C) padding is zeroed via
+    // `MaybeUninit::zeroed`, so no byte read here is uninitialized.
     unsafe { slice::from_raw_parts(self as *const _ as _, Self::SIZE) }
   }
 }
