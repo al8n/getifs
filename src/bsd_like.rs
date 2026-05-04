@@ -198,20 +198,29 @@ pub(super) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<IpRoute>
 where
   F: FnMut(&IpRoute) -> bool,
 {
+  // Walk AF_INET and AF_INET6 separately rather than one AF_UNSPEC
+  // dump. BSD sysctl can omit `RTAX_DST` for the default-route entry
+  // (encoding the destination as "unspecified") — with a single
+  // AF_UNSPEC walk we can't recover the family from a message that
+  // omits dst, so a default route would silently disappear from the
+  // union API while the family-specific APIs (`route_ipv4_table_by_filter`
+  // / `route_ipv6_table_by_filter`) would still surface it. Two
+  // sysctl calls is the right tradeoff for keeping the union API
+  // consistent with its single-family counterparts.
   let mut out: SmallVec<IpRoute> = SmallVec::new();
-  route::walk_route_table(AF_UNSPEC, |index, flags, dst, gw, mask| {
-    // For the AF_UNSPEC walk we can't infer a missing dst's family
-    // from the message, so skip — only family-specific walks below
-    // can interpret `dst.is_none()` as the unspecified default route.
-    let dst = match dst {
-      Some(ip) => ip,
-      None => return,
-    };
-    let route = match dst {
-      IpAddr::V4(_) => build_routev4(index, flags, dst, gw, mask).map(IpRoute::V4),
-      IpAddr::V6(_) => build_routev6(index, flags, dst, gw, mask).map(IpRoute::V6),
-    };
-    if let Some(r) = route {
+  route::walk_route_table(AF_INET, |index, flags, dst, gw, mask| {
+    let dst = dst.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    if let Some(r) = build_routev4(index, flags, dst, gw, mask) {
+      let r = IpRoute::V4(r);
+      if f(&r) {
+        out.push(r);
+      }
+    }
+  })?;
+  route::walk_route_table(AF_INET6, |index, flags, dst, gw, mask| {
+    let dst = dst.unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    if let Some(r) = build_routev6(index, flags, dst, gw, mask) {
+      let r = IpRoute::V6(r);
       if f(&r) {
         out.push(r);
       }

@@ -173,7 +173,12 @@ impl IpRoute {
 ///   routes, and routes without `RTA_OIF`, are dropped because they
 ///   can't be represented faithfully as a single (oif, gw) tuple.
 ///   ECMP routes (`RTA_MULTIPATH`) are decoded into one [`IpRoute`]
-///   per nexthop.
+///   per nexthop. Routes that reference a separate nexthop object via
+///   `RTA_NH_ID` (the `ip nexthop`-managed indirection added in
+///   Linux 5.3) are *not* yet decoded — they appear without a
+///   top-level `RTA_OIF` and get filtered by the same `oif == 0`
+///   guard. Hosts that pin every default route through nexthop-object
+///   IDs will see those routes missing here.
 /// - **BSD-like / macOS**: only routes with `RTF_UP` and a usable
 ///   destination are emitted; AF_LINK gateways surface as
 ///   `gateway = None`.
