@@ -25,6 +25,18 @@ const RTM_GETROUTE: u32 = netlink::RTM_GETROUTE as u32;
 const RTM_NEWLINK: u32 = netlink::RTM_NEWLINK as u32;
 const RTM_NEWADDR: u32 = netlink::RTM_NEWADDR as u32;
 const RTM_NEWROUTE: u32 = netlink::RTM_NEWROUTE as u32;
+// Nexthop subsystem (Linux 5.3+). Used to resolve RTA_NH_ID on route
+// entries that reference an `ip nexthop`-managed indirection.
+const RTM_GETNEXTHOP: u32 = netlink::RTM_GETNEXTHOP as u32;
+const RTM_NEWNEXTHOP: u32 = netlink::RTM_NEWNEXTHOP as u32;
+
+// `enum` from <linux/nexthop.h> (stable kernel UAPI). linux-raw-sys
+// 0.12 doesn't expose these as named constants yet, so spell them out.
+const NHA_ID: u16 = 1;
+const NHA_GROUP: u16 = 2;
+const NHA_BLACKHOLE: u16 = 4;
+const NHA_OIF: u16 = 5;
+const NHA_GATEWAY: u16 = 6;
 
 const RTA_DST: u16 = netlink::rtattr_type_t::RTA_DST as u16;
 const RTA_GATEWAY: u16 = netlink::rtattr_type_t::RTA_GATEWAY as u16;
@@ -101,7 +113,11 @@ impl Handle {
   }
 
   unsafe fn send(&self, req: &NetlinkRouteRequest) -> io::Result<usize> {
-    sendto(&self.fd, req.as_bytes(), SendFlags::empty(), &self.sa).map_err(Into::into)
+    self.send_bytes(req.as_bytes())
+  }
+
+  unsafe fn send_bytes(&self, bytes: &[u8]) -> io::Result<usize> {
+    sendto(&self.fd, bytes, SendFlags::empty(), &self.sa).map_err(Into::into)
   }
 
   unsafe fn sock(&self) -> io::Result<SocketAddrNetlink> {
@@ -529,6 +545,185 @@ where
   }
 }
 
+/// One nexthop-object entry from a `RTM_GETNEXTHOP` dump. Either a
+/// "leaf" (single `oif` + optional gateway) or a `group` of member ids
+/// (each member resolves recursively against the same map). Blackhole
+/// nexthops are filtered out before the map is built.
+#[derive(Debug, Clone)]
+struct NexthopInfo {
+  oif: u32,
+  gw: Option<IpAddr>,
+  /// `Some(member_ids)` for `NHA_GROUP`. Empty list means a malformed
+  /// group; we treat those as unusable. Single-leaf nexthops carry
+  /// `None`.
+  group: Option<SmallVec<u32>>,
+}
+
+/// Build the wire bytes for `RTM_GETNEXTHOP` + `NLM_F_DUMP`. The body
+/// is `struct nhmsg` (8 bytes); leaving every field zero requests an
+/// unfiltered dump of all nexthops the kernel knows about.
+fn build_nh_dump_request(seq: u32, family: u8) -> [u8; 24] {
+  let mut bytes = [0u8; 24];
+  // nlmsghdr (16 bytes)
+  bytes[0..4].copy_from_slice(&24u32.to_ne_bytes());
+  bytes[4..6].copy_from_slice(&(RTM_GETNEXTHOP as u16).to_ne_bytes());
+  bytes[6..8].copy_from_slice(&((NLM_F_DUMP | NLM_F_REQUEST) as u16).to_ne_bytes());
+  bytes[8..12].copy_from_slice(&seq.to_ne_bytes());
+  bytes[12..16].copy_from_slice(&std::process::id().to_ne_bytes());
+  // nhmsg body (8 bytes): nh_family, nh_scope, nh_protocol, resvd, nh_flags
+  bytes[16] = family;
+  // bytes[17..24] left zero: scope=0, protocol=0, resvd=0, flags=0
+  bytes
+}
+
+/// Dump every `RTM_NEWNEXTHOP` entry for `family` (use `AF_UNSPEC` to
+/// get both v4 and v6) and return them as a map keyed by nexthop id.
+/// Used by `netlink_walk_routes` to resolve routes that arrive with an
+/// `RTA_NH_ID` reference rather than an inline `RTA_OIF` / `RTA_GATEWAY`.
+fn dump_nexthops(family: u8) -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
+  use std::collections::HashMap;
+  unsafe {
+    let handle = Handle::new()?;
+
+    let req = build_nh_dump_request(1, family);
+    handle.send_bytes(&req)?;
+
+    let lsa = handle.sock()?;
+    let page_size = rustix::param::page_size();
+    let mut rb = vec![0u8; page_size];
+
+    let mut map: HashMap<u32, NexthopInfo> = HashMap::new();
+
+    'outer: loop {
+      let nr = handle.recv(&mut rb)?;
+      let mut received = &rb[..nr];
+
+      while received.len() >= NLMSG_HDRLEN {
+        let h = decode_nlmsghdr(received);
+        let hlen = h.nlmsg_len as usize;
+        let l = nlm_align_of(hlen);
+        if hlen < NLMSG_HDRLEN || l > received.len() {
+          return Err(rustix::io::Errno::INVAL.into());
+        }
+        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.pid() {
+          return Err(rustix::io::Errno::INVAL.into());
+        }
+
+        match h.nlmsg_type as u32 {
+          NLMSG_DONE => break 'outer,
+          NLMSG_ERROR => {
+            // The kernel returns ENOTSUP / EOPNOTSUPP when the nexthop
+            // subsystem isn't compiled in (very old kernels, custom
+            // builds). Treat that as "no nexthop objects exist" — the
+            // route walker's RTA_NH_ID skip then becomes a non-issue
+            // because no route can carry an id that doesn't exist.
+            return Ok(map);
+          }
+          val if val == RTM_NEWNEXTHOP => {
+            // nhmsg occupies the first 8 bytes after the netlink
+            // header: family (u8), scope (u8), protocol (u8), resvd
+            // (u8), flags (u32). We only need `family` for decoding
+            // gateway addresses.
+            if hlen < NLMSG_HDRLEN + 8 {
+              received = &received[l..];
+              continue;
+            }
+            let nh_family = received[NLMSG_HDRLEN];
+            let mut attr_buf = &received[NLMSG_HDRLEN + 8..hlen];
+
+            let mut id: u32 = 0;
+            let mut oif: u32 = 0;
+            let mut gw: Option<IpAddr> = None;
+            let mut group: Option<SmallVec<u32>> = None;
+            let mut blackhole = false;
+
+            while attr_buf.len() >= RtAttr::SIZE {
+              let attr = RtAttr {
+                len: u16::from_ne_bytes(attr_buf[..2].try_into().unwrap()),
+                ty: u16::from_ne_bytes(attr_buf[2..4].try_into().unwrap()),
+              };
+              let attrlen = attr.len as usize;
+              if attrlen < RtAttr::SIZE || attrlen > attr_buf.len() {
+                break;
+              }
+              let data = &attr_buf[RtAttr::SIZE..attrlen];
+              let alen = rta_align_of(attrlen).min(attr_buf.len());
+
+              match attr.ty {
+                NHA_ID if data.len() >= 4 => {
+                  id = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                }
+                NHA_OIF if data.len() >= 4 => {
+                  oif = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                }
+                NHA_GATEWAY => {
+                  gw = parse_rta_ipaddr(nh_family, data);
+                }
+                NHA_GROUP => {
+                  // Payload is an array of `struct nexthop_grp`:
+                  // `{ u32 id; u8 weight; u8 weight_high/resvd1;
+                  //    u16 resvd2 }` = 8 bytes per member. We only
+                  // need the `id` field; weights and reserved bytes
+                  // are ignored.
+                  let mut members: SmallVec<u32> = SmallVec::new();
+                  let mut p = data;
+                  while p.len() >= 8 {
+                    members.push(u32::from_ne_bytes(p[..4].try_into().unwrap()));
+                    p = &p[8..];
+                  }
+                  group = Some(members);
+                }
+                NHA_BLACKHOLE => {
+                  blackhole = true;
+                }
+                _ => {}
+              }
+              attr_buf = &attr_buf[alen..];
+            }
+
+            if id != 0 && !blackhole {
+              map.insert(id, NexthopInfo { oif, gw, group });
+            }
+          }
+          _ => {}
+        }
+
+        received = &received[l..];
+      }
+    }
+
+    Ok(map)
+  }
+}
+
+/// Resolve an `RTA_NH_ID` reference to a list of `(oif, gw)` tuples.
+/// Singletons return one entry. Groups fan out to one entry per member,
+/// recursively resolving members that themselves point at single-leaf
+/// nexthops. Group-of-groups is rare and out of scope — those are
+/// skipped.
+fn resolve_nh_id(
+  map: &std::collections::HashMap<u32, NexthopInfo>,
+  id: u32,
+) -> SmallVec<(u32, Option<IpAddr>)> {
+  let mut out: SmallVec<(u32, Option<IpAddr>)> = SmallVec::new();
+  let Some(nh) = map.get(&id) else {
+    return out;
+  };
+  if let Some(members) = &nh.group {
+    for member_id in members {
+      if let Some(member) = map.get(member_id) {
+        // Skip nested groups — keep the depth bounded.
+        if member.group.is_none() && member.oif != 0 {
+          out.push((member.oif, member.gw));
+        }
+      }
+    }
+  } else if nh.oif != 0 {
+    out.push((nh.oif, nh.gw));
+  }
+  out
+}
+
 /// Yields one entry per `RTM_NEWROUTE` message: `(family, oif, dst_len, dst,
 /// gateway)`. `dst` is `None` when the kernel omits `RTA_DST` (default
 /// route). `gateway` is `None` when there is no `RTA_GATEWAY` (a directly
@@ -540,6 +735,13 @@ where
   F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
 {
   unsafe {
+    // Dump nexthop objects up-front. Routes that arrive with
+    // `RTA_NH_ID` (Linux 5.3+ `ip nexthop`-managed indirection) are
+    // resolved against this map below. We dump even when the host has
+    // no nexthop objects — the dump returns an empty map cheaply, and
+    // we still want to call `RTM_GETROUTE` afterward.
+    let nh_map = dump_nexthops(family.as_raw() as u8)?;
+
     let handle = Handle::new()?;
 
     let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
@@ -624,12 +826,13 @@ where
             // the effective id so we can drop custom policy tables.
             let mut table_id: u32 = rtm_header.rtm_table as u32;
             // Routes installed via `ip nexthop` carry only an
-            // RTA_NH_ID and no top-level RTA_OIF / RTA_MULTIPATH. Track
-            // explicitly and skip — the nexthop object would have to be
-            // resolved through a separate netlink dump (RTM_GETNEXTHOP)
-            // before we could emit a meaningful route. Documented as a
-            // known limitation of `route_table`.
-            let mut has_nh_id = false;
+            // RTA_NH_ID and no top-level RTA_OIF / RTA_MULTIPATH. We
+            // capture the id and resolve it against the up-front
+            // RTM_GETNEXTHOP dump (`nh_map`) — this lets `route_table`
+            // surface default routes installed through nexthop objects
+            // (Linux 5.3+) that would otherwise be silently dropped by
+            // the `oif == 0` guard.
+            let mut nh_id: Option<u32> = None;
             // ECMP routes carry their nexthops inside RTA_MULTIPATH
             // (one or more `struct rtnexthop` each with sub-attrs).
             // We accumulate them and emit them after walking the
@@ -670,8 +873,8 @@ where
                 RTA_TABLE if data.len() >= 4 => {
                   table_id = u32::from_ne_bytes(data[..4].try_into().unwrap());
                 }
-                RTA_NH_ID => {
-                  has_nh_id = true;
+                RTA_NH_ID if data.len() >= 4 => {
+                  nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
                 }
                 _ => {}
               }
@@ -685,18 +888,33 @@ where
               continue;
             }
 
-            // Skip nexthop-object routes — see `has_nh_id` declaration.
-            if has_nh_id {
-              received = &received[l..];
-              continue;
-            }
-
             // Drop routes from custom policy tables. `RT_TABLE_MAIN`
             // (254) and `RT_TABLE_LOCAL` (255) cover the unicast / local
             // routes the public API contracts to expose; everything
             // else (RT_TABLE_DEFAULT, custom tables selected by `ip
             // rule`, etc.) carries constraints `IpRoute` can't express.
             if table_id != RT_TABLE_MAIN as u32 && table_id != RT_TABLE_LOCAL {
+              received = &received[l..];
+              continue;
+            }
+
+            // Resolve nexthop-object references. The route had only an
+            // RTA_NH_ID — look up the nexthop in the dump map. Single
+            // leaves emit one route; groups fan out to one route per
+            // member (similar to RTA_MULTIPATH). Unresolved ids (kernel
+            // raced with the route walk, or nexthop subsystem not
+            // available) yield zero routes for that entry — same
+            // outcome as a multipath route whose nexthops are all dead.
+            if let Some(id) = nh_id {
+              for (nh_oif, nh_gw) in resolve_nh_id(&nh_map, id) {
+                on_route(
+                  rtm_header.rtm_family,
+                  nh_oif,
+                  rtm_header.rtm_dst_len,
+                  dst,
+                  nh_gw,
+                );
+              }
               received = &received[l..];
               continue;
             }

@@ -180,10 +180,10 @@ impl IpRoute {
 ///   traffic. ECMP routes (`RTA_MULTIPATH`) are decoded into one
 ///   [`IpRoute`] per nexthop. Routes that reference a separate nexthop
 ///   object via `RTA_NH_ID` (the `ip nexthop`-managed indirection
-///   added in Linux 5.3) are skipped explicitly — resolving them
-///   requires a separate `RTM_GETNEXTHOP` dump which is not yet
-///   wired up. Hosts that pin every default route through
-///   nexthop-object IDs will see those routes missing here.
+///   added in Linux 5.3) are resolved against an up-front
+///   `RTM_GETNEXTHOP` dump: leaves emit one route, groups fan out to
+///   one route per member (group-of-groups is rare and skipped).
+///   Blackhole nexthops are filtered.
 /// - **BSD-like / macOS**: only routes with `RTF_UP` and a usable
 ///   destination are emitted; AF_LINK gateways surface as
 ///   `gateway = None`.
@@ -193,16 +193,12 @@ impl IpRoute {
 ///
 /// ## Platform notes
 ///
-/// **NetBSD and OpenBSD: result may be incomplete.** The kernel emits
-/// some sockaddr forms in `NET_RT_DUMP` messages that the shared BSD
-/// parser doesn't yet decode (notably AF_LINK gateways and certain
-/// kernel-form netmasks). Those routes are silently skipped rather
-/// than failing the whole call, and there is no signal in the return
-/// value to distinguish "no such route" from "route present but
-/// unparseable." Code that needs an authoritative table on NetBSD or
-/// OpenBSD should cross-check against the OS routing tool until the
-/// per-OS sockaddr decoders land. Linux, macOS, FreeBSD, DragonFlyBSD,
-/// and Windows return a complete unicast/local table.
+/// `parse_addrs` decodes both the full `sockaddr_in[6]` form and the
+/// BSD compact form (`sa_family = AF_INET[6]` but `sa_len <
+/// size_of::<sockaddr_in[6]>()`) that NetBSD and OpenBSD emit for
+/// netmasks. AF_LINK gateways (no IP equivalent) decode to
+/// `gateway = None`. A `parse_addrs` error is treated as a malformed
+/// message and surfaced to the caller rather than being swallowed.
 ///
 /// ## Example
 ///

@@ -477,10 +477,46 @@ const fn roundup(l: usize) -> usize {
   (l + KERNAL_ALIGN - 1) & !(KERNAL_ALIGN - 1)
 }
 
-fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
-  const SOCK4: usize = size_of::<libc::sockaddr_in>();
-  const SOCK6: usize = size_of::<libc::sockaddr_in6>();
+const SOCK4: usize = size_of::<libc::sockaddr_in>();
+const SOCK6: usize = size_of::<libc::sockaddr_in6>();
 
+/// Decode a BSD route-message sockaddr whose `sa_len` is shorter than
+/// the full `sockaddr_in[6]` size. The kernel emits this compact form
+/// for netmasks where trailing zero bytes are omitted — e.g., a /24
+/// IPv4 netmask carries `sa_len = 8` (1 sa_len + 1 sa_family + 2 port +
+/// 4 sin_addr) but only the three significant bytes of the mask. We
+/// zero-pad to the full struct shape and then read the address bytes
+/// at the same offset the full-length decoder would.
+///
+/// `sa` is the slice covering exactly `sa_len` bytes; the caller has
+/// already verified `b.len() >= sa_len`.
+fn parse_short_inet_addr(af: i32, sa: &[u8]) -> io::Result<IpAddr> {
+  match af {
+    AF_INET => {
+      // sockaddr_in layout: sa_len, sa_family, sin_port (2), sin_addr (4), sin_zero (8)
+      const OFF: usize = 4;
+      let mut ip = [0u8; 4];
+      if sa.len() > OFF {
+        let n = (sa.len() - OFF).min(4);
+        ip[..n].copy_from_slice(&sa[OFF..OFF + n]);
+      }
+      Ok(IpAddr::V4(ip.into()))
+    }
+    AF_INET6 => {
+      // sockaddr_in6 layout: sa_len, sa_family, sin6_port (2), sin6_flowinfo (4), sin6_addr (16), sin6_scope_id (4)
+      const OFF: usize = 8;
+      let mut ip = [0u8; 16];
+      if sa.len() > OFF {
+        let n = (sa.len() - OFF).min(16);
+        ip[..n].copy_from_slice(&sa[OFF..OFF + n]);
+      }
+      Ok(IpAddr::V6(Ipv6Addr::from(ip)))
+    }
+    _ => Err(invalid_address()),
+  }
+}
+
+fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
   // Sysctl returns a `Vec<u8>`, which only formally guarantees u8
   // alignment for its data pointer. The kernel pads each routing
   // message to KERNAL_ALIGN bytes (4 on Apple, 8 elsewhere), so the
@@ -564,15 +600,33 @@ fn parse_addrs(addrs: u32, mut b: &[u8]) -> io::Result<[Option<IpAddr>; RTAX_MAX
           b = &b[l..];
         }
         AF_INET | AF_INET6 => {
-          let (_, addr) = parse_inet_addr(b[1] as i32, b)?;
-          as_[i] = Some(addr);
-          let l = roundup(b[0] as usize);
-          if b.len() < l {
+          let af = b[1] as i32;
+          let sa_len = b[0] as usize;
+          let needed = if af == AF_INET { SOCK4 } else { SOCK6 };
+          let l = roundup(sa_len);
+          if b.len() < l || b.len() < sa_len {
             return Err(io::Error::new(
               io::ErrorKind::InvalidData,
               "message too short",
             ));
           }
+          // BSD's NET_RT_DUMP encodes netmasks as truncated sockaddrs:
+          // `sa_family = AF_INET[6]` but `sa_len` is short and only the
+          // leading address bytes that differ from zero are present.
+          // The full-length `parse_inet_addr` rejects those because it
+          // requires `b.len() >= size_of::<sockaddr_in[6]>()`. Decode
+          // both forms — full-length via `parse_inet_addr`, short via
+          // `parse_short_inet_addr` (zero-extends the trailing bytes).
+          // Without this branch, NetBSD/OpenBSD route dumps fail at the
+          // first netmask, the walker swallowed the error and silently
+          // dropped the route.
+          let addr = if sa_len >= needed {
+            let (_, a) = parse_inet_addr(af, b)?;
+            a
+          } else {
+            parse_short_inet_addr(af, &b[..sa_len])?
+          };
+          as_[i] = Some(addr);
           b = &b[l..];
         }
         _ => {

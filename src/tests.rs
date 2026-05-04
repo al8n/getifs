@@ -30,64 +30,71 @@ impl TestInterface {
   }
 
   fn setup(&mut self) -> std::io::Result<()> {
+    // Run each command exactly once. The previous version invoked
+    // both `cmd.status()` and `cmd.output()` per command, which
+    // re-spawned the same process twice — for setup commands like
+    // `ip link add` or `ifconfig <name> create` the first invocation
+    // succeeds (creating the device) and the second fails with
+    // "RTNETLINK answers: File exists" / "Device or resource busy",
+    // surfacing as a generic error string that the call sites'
+    // skip-on-environmental-failure branch could match. That bypassed
+    // teardown and leaked devices in privileged CI.
     for cmd in &mut self.setup_cmds {
-      let status = cmd.status()?;
-      if !status.success() {
-        return Err(std::io::Error::new(
-          std::io::ErrorKind::Other,
-          format!("command failed: {cmd:?}"),
-        ));
-      }
-      match cmd.output() {
-        Ok(output) => {
-          if !output.status.success() {
-            return Err(std::io::Error::new(
-              std::io::ErrorKind::Other,
-              format!("command failed: {cmd:?}"),
-            ));
-          }
-        }
-        Err(e) => {
-          return Err(std::io::Error::new(
-            e.kind(),
-            format!("args={:?} err={e}", cmd.get_args()),
-          ));
-        }
-      }
+      run_once(cmd)?;
     }
-
     Ok(())
   }
 
   fn teardown(&mut self) -> std::io::Result<()> {
     for cmd in &mut self.teardown_cmds {
-      let status = cmd.status()?;
-      if !status.success() {
-        return Err(std::io::Error::new(
-          std::io::ErrorKind::Other,
-          format!("command failed: {cmd:?}"),
-        ));
-      }
-      match cmd.output() {
-        Ok(output) => {
-          if !output.status.success() {
-            return Err(std::io::Error::new(
-              std::io::ErrorKind::Other,
-              format!("command failed: {cmd:?}"),
-            ));
-          }
-        }
-        Err(e) => {
-          return Err(std::io::Error::new(
-            e.kind(),
-            format!("args={:?} err={e}", cmd.get_args()),
-          ));
-        }
-      }
+      run_once(cmd)?;
     }
-
     Ok(())
   }
+
+  /// Best-effort cleanup. Used in error paths after a partial setup —
+  /// we want to take the device down regardless of whether some
+  /// teardown step's precondition is missing.
+  fn try_teardown(&mut self) {
+    for cmd in &mut self.teardown_cmds {
+      let _ = cmd.output();
+    }
+  }
+}
+
+/// Run a `Command` exactly once. On non-success, the returned error
+/// includes the command's stderr so call sites can pattern-match on
+/// the actual diagnostic ("No such device", BSD ifconfig SIOCIFCREATE
+/// failures, etc.) rather than a generic "command failed".
+fn run_once(cmd: &mut Command) -> std::io::Result<()> {
+  let output = cmd.output()?;
+  if output.status.success() {
+    return Ok(());
+  }
+  let args: Vec<_> = cmd.get_args().collect();
+  Err(std::io::Error::new(
+    std::io::ErrorKind::Other,
+    format!(
+      "{:?} failed (status={:?}): {}",
+      args,
+      output.status.code(),
+      String::from_utf8_lossy(&output.stderr).trim()
+    ),
+  ))
+}
+
+/// Treat as "host doesn't support this" rather than a library bug.
+/// Pattern-matches the actual stderr text from `ip(8)` / `ifconfig(8)`
+/// for the missing-kernel-module / missing-device errors we hit on
+/// container CI runners. Anything else is a real failure and panics.
+fn is_environmental_skip(msg: &str) -> bool {
+  msg.contains("No such device")
+    || msg.contains("Cannot find device")
+    || msg.contains("SIOCIFCREATE")
+    || msg.contains("SIOCSIFFLAGS")
+    || msg.contains("not supported")
+    || msg.contains("Operation not supported")
+    || msg.contains("module")
 }
 
 #[test]
@@ -117,19 +124,21 @@ fn point_to_point_interface() {
         std::thread::sleep(Duration::from_millis(3));
       }
       Err(e) => {
+        // Always attempt to undo any partial setup before deciding
+        // whether to skip or fail — leaking interfaces in privileged
+        // CI causes the next test in the loop to collide on the same
+        // name.
+        ti.try_teardown();
         let err_msg = e.to_string();
-        // The various reasons interface creation can fail in CI VMs:
-        //   - Linux containers don't ship a `gre0` device.
+        // Reasons interface creation can fail in CI VMs we treat as
+        // environmental:
+        //   - Linux containers don't ship a `gre0` device → "No such
+        //     device" / "Cannot find device".
         //   - FreeBSD/NetBSD/OpenBSD CI VMs typically don't load the
-        //     `if_gif`/`if_vlan` kernel modules, so `ifconfig <name>
-        //     create` exits non-zero and our helper reports a generic
-        //     "command failed: ..." error.
-        // Treat any such environmental failure as a skip rather than a
-        // test failure — the unit under test is the libgetifs lookup
-        // path, not the host's tunnel-stack configuration.
-        if (err_msg.contains("No such device") && err_msg.contains("gre0"))
-          || err_msg.contains("command failed")
-        {
+        //     `if_gif` / `if_vlan` kernel modules → ifconfig surfaces
+        //     `SIOCIFCREATE` / "Operation not supported" / similar.
+        // Anything else is a real bug and should panic.
+        if is_environmental_skip(&err_msg) {
           println!(
             "skipping test; interface creation failed (likely missing kernel module): {err_msg}"
           );
@@ -202,11 +211,15 @@ fn test_interface_arrival_and_departure() {
     }
 
     if let Err(e) = ti.setup() {
+      // Always attempt to undo any partial setup. See
+      // `point_to_point_interface` for the rationale.
+      ti.try_teardown();
       let err_msg = e.to_string();
       // Same rationale as `point_to_point_interface`: BSD CI VMs often
       // lack the `if_vlan` kernel module, so the `ifconfig <vlan>
-      // create` command exits non-zero. Skip rather than fail.
-      if err_msg.contains("command failed") {
+      // create` command exits non-zero. Skip rather than fail when the
+      // diagnostic matches a recognised missing-module pattern.
+      if is_environmental_skip(&err_msg) {
         println!(
           "skipping test; interface creation failed (likely missing kernel module): {err_msg}"
         );

@@ -16,17 +16,14 @@ use super::{compat::RtMsghdr, fetch, message_too_short, parse_addrs};
 /// `family` is forwarded to sysctl: `AF_UNSPEC` for both families,
 /// `AF_INET` / `AF_INET6` to limit the dump to one family.
 ///
-/// **Per-message parse failures are tolerated**, not propagated. The
-/// alternative (erroring out the whole walk on the first message that
-/// `parse_addrs` can't decode) makes `route_table` unusable on NetBSD
-/// and OpenBSD, where the kernel emits some sockaddr forms (notably
-/// AF_LINK gateways and short netmasks) that the FreeBSD/Apple-shaped
-/// `parse_addrs` doesn't yet decode — even though most other route
-/// entries on those hosts parse fine. Returning a partial table with
-/// the parseable entries is strictly more useful than returning
-/// nothing, but does mean callers on NetBSD/OpenBSD may not see every
-/// route the kernel knows about. Teaching `parse_addrs` the per-OS
-/// encodings is a follow-up.
+/// **Per-message parse failures are propagated**, not swallowed.
+/// Earlier revisions tolerated `parse_addrs` errors so NetBSD and
+/// OpenBSD's compact-form netmask sockaddrs (where `sa_family =
+/// AF_INET[6]` but `sa_len < size_of::<sockaddr_in[6]>()`) wouldn't
+/// fail the whole dump — at the cost of returning a successful but
+/// silently incomplete routing table. The decoder now handles those
+/// short forms via `parse_short_inet_addr`, so a `parse_addrs` failure
+/// here is a real malformed message and surfaces to the caller.
 ///
 /// Length-shorter-than-header (`l < size_of::<RtMsghdr>()`) is *not*
 /// tolerated — that's a real kernel-side bug. Trailing zero padding
@@ -95,16 +92,8 @@ where
         continue;
       }
 
-      // Tolerate per-message `parse_addrs` failures on NetBSD/OpenBSD
-      // (see the function-level doc comment). Skip the route, advance
-      // to the next message — don't fail the whole walk.
-      let addrs = match parse_addrs(rtm.rtm_addrs as u32, &src[header_size..l]) {
-        Ok(addrs) => addrs,
-        Err(_) => {
-          src = &src[l..];
-          continue;
-        }
-      };
+      // Per-message parse errors propagate — see function doc.
+      let addrs = parse_addrs(rtm.rtm_addrs as u32, &src[header_size..l])?;
 
       let dst = addrs[RTAX_DST as usize];
       let gateway = addrs[RTAX_GATEWAY as usize];
