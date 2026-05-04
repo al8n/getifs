@@ -31,6 +31,14 @@ const RTA_GATEWAY: u16 = netlink::rtattr_type_t::RTA_GATEWAY as u16;
 const RTA_OIF: u16 = netlink::rtattr_type_t::RTA_OIF as u16;
 const RTA_PRIORITY: u16 = netlink::rtattr_type_t::RTA_PRIORITY as u16;
 const RTA_MULTIPATH: u16 = netlink::rtattr_type_t::RTA_MULTIPATH as u16;
+const RTA_SRC: u16 = netlink::rtattr_type_t::RTA_SRC as u16;
+
+// `struct rtnexthop` flag bits from <linux/rtnetlink.h>. Nexthops with
+// any of these set are not currently usable, so the multipath walker
+// skips them rather than emit them as if they were live.
+const RTNH_F_DEAD: u8 = 1;
+const RTNH_F_LINKDOWN: u8 = 16;
+const RTNH_F_UNRESOLVED: u8 = 32;
 
 // rtm_type values from <linux/rtnetlink.h> (stable kernel UAPI).
 const RTN_UNICAST: u8 = 1;
@@ -563,10 +571,25 @@ where
               continue;
             }
 
+            // Source-constrained policy routes (`rtm_src_len != 0` or
+            // an `RTA_SRC` attribute present) only apply when the
+            // packet's source matches that prefix. The current
+            // `IpRoute` model has no field for the source constraint,
+            // so emitting these rows would make a constrained route
+            // look generally usable. Skip until the model carries
+            // source prefixes (the `RTA_SRC` check happens during the
+            // attribute walk below — flagged via `has_src_constraint`
+            // and applied before the final on_route call).
+            if rtm_header.rtm_src_len != 0 {
+              received = &received[l..];
+              continue;
+            }
+
             let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
             let mut oif: u32 = 0;
             let mut dst: Option<IpAddr> = None;
             let mut gw: Option<IpAddr> = None;
+            let mut has_src_constraint = false;
             // ECMP routes carry their nexthops inside RTA_MULTIPATH
             // (one or more `struct rtnexthop` each with sub-attrs).
             // We accumulate them and emit them after walking the
@@ -599,10 +622,21 @@ where
                 RTA_MULTIPATH => {
                   multipath = Some(data);
                 }
+                RTA_SRC => {
+                  // Source constraint present even though `rtm_src_len`
+                  // was zero — defence-in-depth flag.
+                  has_src_constraint = true;
+                }
                 _ => {}
               }
 
               rtattr_buf = &rtattr_buf[alen..];
+            }
+
+            // Skip if a source constraint snuck in via RTA_SRC.
+            if has_src_constraint {
+              received = &received[l..];
+              continue;
             }
 
             // For ECMP routes, decode `RTA_MULTIPATH` and emit one
@@ -670,8 +704,24 @@ fn walk_multipath<F>(
       // Malformed nexthop; stop rather than risk reading off the end.
       break;
     }
-    // bytes 2-3 (rtnh_flags + rtnh_hops) are not used here.
+    let nh_flags = buf[2];
+    // byte 3 is `rtnh_hops` (weight), not used here.
     let nh_ifindex = i32::from_ne_bytes(buf[4..8].try_into().unwrap()) as u32;
+
+    // Skip nexthops the kernel keeps in the dump but marks unusable
+    // (`RTNH_F_DEAD` / `RTNH_F_LINKDOWN` / `RTNH_F_UNRESOLVED`).
+    // Surfacing those as ordinary `IpRoute` entries would lie about
+    // reachability: e.g. an ECMP default with one nexthop's carrier
+    // dropped would still appear as two live routes.
+    let unusable = RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_UNRESOLVED;
+    if nh_flags & unusable != 0 {
+      let nh_aligned = rta_align_of(nh_len).min(buf.len());
+      if nh_aligned == 0 {
+        break;
+      }
+      buf = &buf[nh_aligned..];
+      continue;
+    }
 
     // Decode sub-attributes (only RTA_GATEWAY is interesting today).
     let mut nh_gw: Option<IpAddr> = None;

@@ -45,11 +45,17 @@ where
       let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
 
       // `l == 0` only happens for residual zero-padding past the last
-      // valid message. `src.len() < l` means the kernel told us the
-      // next message would extend past the buffer it just handed us —
-      // either way, treat as end-of-stream rather than an error.
-      if l == 0 || src.len() < l {
+      // valid message — terminate cleanly.
+      if l == 0 {
         break;
+      }
+      // `src.len() < l` is *not* end-of-stream. The kernel just told
+      // us "next message is `l` bytes" while only handing us fewer —
+      // that's truncation (size-race / kernel-bug / buffer-too-small)
+      // and silently breaking would surface as a partial routing
+      // table with no signal to the caller.
+      if src.len() < l {
+        return Err(message_too_short());
       }
 
       if src[2] as i32 != libc::RTM_VERSION {
