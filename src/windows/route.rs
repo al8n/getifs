@@ -69,6 +69,18 @@ impl Drop for ForwardTable {
 
 #[inline]
 fn build_routev4(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv4Route> {
+  // `ValidLifetime` is the kernel's "seconds this row is still
+  // usable" counter; `0xffffffff` means "infinite" (statically
+  // configured / never expires), `0` means the entry is past its
+  // expiry and the kernel will not use it for forwarding. The
+  // existing gateway path (`windows/gateway.rs`) already filters
+  // `ValidLifetime > 0`; mirror that here so `route_table*()` does
+  // not surface a stale row as a live route. `> 0` correctly admits
+  // both finite-valid (e.g. 3600s DHCP lease) and infinite
+  // (`0xffffffff`) entries.
+  if row.ValidLifetime == 0 {
+    return None;
+  }
   let prefix = row.DestinationPrefix.Prefix;
   let dst_ip = sockaddr_to_ipaddr(AF_UNSPEC, &prefix as *const _ as *const SOCKADDR)?;
   let dst_v4 = match dst_ip {
@@ -96,6 +108,11 @@ fn build_routev4(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv4Route> {
 
 #[inline]
 fn build_routev6(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv6Route> {
+  // Same `ValidLifetime > 0` guard as `build_routev4` — drop
+  // expired rows the kernel itself would not use.
+  if row.ValidLifetime == 0 {
+    return None;
+  }
   let prefix = row.DestinationPrefix.Prefix;
   let dst_ip = sockaddr_to_ipaddr(AF_UNSPEC, &prefix as *const _ as *const SOCKADDR)?;
   let dst_v6 = match dst_ip {

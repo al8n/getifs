@@ -960,6 +960,17 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
             let mut gw_malformed = false;
             let mut group: Option<SmallVec<u32>> = None;
             let mut blackhole = false;
+            // A malformed attribute length means the rest of this
+            // nexthop's attribute stream is unrecoverable: we may
+            // have already parsed `NHA_ID` and `NHA_OIF`, while a
+            // truncated `NHA_GATEWAY` / `NHA_GROUP` we never got to
+            // would have changed the result. Don't trust the partial
+            // parse: mark the nexthop filtered so `resolve_nh_id`
+            // skips it instead of emitting a synthetic on-link
+            // entry. (We still record the id — the route walker's
+            // "id present but unusable" path is the safe place to
+            // land here, vs. "id absent → potential race → EINTR".)
+            let mut attr_malformed = false;
 
             while attr_buf.len() >= RtAttr::SIZE {
               let attr = RtAttr {
@@ -968,6 +979,7 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
               };
               let attrlen = attr.len as usize;
               if attrlen < RtAttr::SIZE || attrlen > attr_buf.len() {
+                attr_malformed = true;
                 break;
               }
               let data = &attr_buf[RtAttr::SIZE..attrlen];
@@ -1015,7 +1027,7 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
             // flag captures the latter without losing the
             // "kernel-knows-this-id" signal.
             if id != 0 {
-              let filtered = blackhole || nh_unusable || gw_malformed;
+              let filtered = blackhole || nh_unusable || gw_malformed || attr_malformed;
               map.insert(
                 id,
                 NexthopInfo {
