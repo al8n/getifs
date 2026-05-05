@@ -448,6 +448,16 @@ where
     // resolves these and `best_local_*` shouldn't diverge.
     let nh_map = dump_nexthops(family.as_raw() as u8)?;
 
+    // Stale-snapshot recovery. If a default route references an
+    // `RTA_NH_ID` missing from `nh_map` (e.g. a nexthop installed
+    // between our two dumps during VPN/DHCP/interface churn), we
+    // record `(metric, id)` here and re-resolve after the route walk
+    // finishes. Mirrors the deferred-retry pattern in
+    // `netlink_walk_routes`. A persistent miss surfaces as `EINTR` so
+    // the caller can retry rather than getting a silently wrong
+    // best-interface selection.
+    let mut deferred_best: Vec<(u32, u32)> = Vec::new();
+
     let handle = Handle::new()?;
 
     let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
@@ -496,7 +506,17 @@ where
             }
             break 'outer;
           }
-          NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
+          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
+            NlmsgErrOutcome::Ack => {
+              received = &received[l..];
+              continue;
+            }
+            // No stack for this family — surface as "no best route"
+            // instead of `Err`. Lets `best_local_addrs()` keep the
+            // populated v4 result on a v6-disabled host (and vice
+            // versa).
+            NlmsgErrOutcome::FamilyUnavailable => return Ok(()),
+          },
           val if val == RTM_NEWROUTE => {
             // See `netlink_interface` for why this is bounded to `hlen`.
             let rtm = &received[NLMSG_HDRLEN..hlen];
@@ -618,32 +638,49 @@ where
 
             // Resolve oif from RTA_MULTIPATH or RTA_NH_ID when
             // top-level RTA_OIF is absent. Multipath: pick the first
-            // usable nexthop. Nexthop-object: resolve through the
-            // up-front dump (`Some(non-empty)` → take the first
-            // resolution; `Some(empty)` → known-but-filtered, ignore;
-            // `None` → unresolved, ignore — best-local is best-effort
-            // and there's no meaningful retry path inside this single
-            // selection pass).
+            // usable nexthop. Nexthop-object: look up against the
+            // up-front dump.
+            //
+            //   - `Some(non-empty)`: take the first resolution.
+            //   - `Some(empty)`: id present but kernel-marked
+            //     unusable (blackhole / linkdown / ...) — skip
+            //     silently, no retry.
+            //   - `None`: id absent from the snapshot. Defer to a
+            //     post-walk retry pass so a nexthop installed
+            //     between our two dumps doesn't silently misroute
+            //     `best_local_*`.
             if current_oif.is_none() {
               if let Some(mp) = multipath {
                 current_oif = first_multipath_oif(mp);
               } else if let Some(id) = nh_id {
-                if let Some(resolved) = resolve_nh_id(&nh_map, id) {
-                  current_oif = resolved.first().map(|(oif, _)| *oif);
+                match resolve_nh_id(&nh_map, id) {
+                  Some(resolved) => {
+                    current_oif = resolved.first().map(|(oif, _)| *oif);
+                  }
+                  None => {
+                    let metric = current_metric.unwrap_or(0);
+                    deferred_best.push((metric, id));
+                    received = &received[l..];
+                    continue;
+                  }
                 }
               }
             }
 
-            // Update best interface if this route has better metric
-            if let (Some(metric), Some(oif)) = (current_metric, current_oif) {
+            // Update best interface if this route has a better
+            // effective metric. A missing `RTA_PRIORITY` is the
+            // kernel's convention for "this route's metric is 0";
+            // collapse the missing/explicit branches into a single
+            // comparison so a metric-less default can correctly
+            // replace an earlier explicit higher-metric default
+            // regardless of dump order. The previous two-branch form
+            // only accepted a metric-less route when no candidate had
+            // been seen yet, which silently lost route 0 to whichever
+            // route the dump emitted first.
+            if let Some(oif) = current_oif {
+              let metric = current_metric.unwrap_or(0);
               if metric < best_metric {
                 best_metric = metric;
-                best_ifindex = Some(oif);
-              }
-            } else if let Some(oif) = current_oif {
-              // If no metric is provided, treat it as best metric
-              if best_metric == u32::MAX {
-                best_metric = 0;
                 best_ifindex = Some(oif);
               }
             }
@@ -652,6 +689,30 @@ where
         }
 
         received = &received[l..];
+      }
+    }
+
+    // Retry pass for routes whose RTA_NH_ID was absent (`None`) from
+    // the first nexthop dump. Re-dump and re-resolve once. A second
+    // `None` is "kernel state changing faster than we can snapshot
+    // it" → surface as EINTR so the caller can retry rather than
+    // silently lose the route. `Some(empty)` means the nexthop now
+    // exists but is itself unusable (blackhole / down) — skip
+    // silently, matching the first-pass behaviour.
+    if !deferred_best.is_empty() {
+      let nh_map_2 = dump_nexthops(family.as_raw() as u8)?;
+      for (metric, id) in deferred_best {
+        match resolve_nh_id(&nh_map_2, id) {
+          None => return Err(rustix::io::Errno::INTR.into()),
+          Some(resolved) => {
+            if let Some(&(oif, _)) = resolved.first() {
+              if metric < best_metric {
+                best_metric = metric;
+                best_ifindex = Some(oif);
+              }
+            }
+          }
+        }
       }
     }
 
@@ -749,37 +810,16 @@ fn dump_nexthops(family: u8) -> io::Result<std::collections::HashMap<u32, Nextho
             }
             break 'outer;
           }
-          NLMSG_ERROR => {
-            // `nlmsgerr` body: 4-byte signed errno, then a copy of
-            // the failed message header. Only "subsystem not
-            // supported" surfaces as "no nexthop objects" — every
-            // other errno is a real failure that must propagate.
-            // Treating EPERM / ENOBUFS / EINVAL the same as missing
-            // subsystem would silently drop every RTA_NH_ID-managed
-            // route while `route_table()` still returned `Ok`.
-            if hlen < NLMSG_HDRLEN + 4 {
-              return Err(rustix::io::Errno::INVAL.into());
-            }
-            let errno =
-              i32::from_ne_bytes(received[NLMSG_HDRLEN..NLMSG_HDRLEN + 4].try_into().unwrap());
-            // errno == 0 is a plain ack — we didn't request one, but
-            // ignore if the kernel sends one anyway.
-            if errno == 0 {
+          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
+            NlmsgErrOutcome::Ack => {
               received = &received[l..];
               continue;
             }
-            // Kernel returns negative errno values.
-            let raw = errno.unsigned_abs();
-            // EOPNOTSUPP (95) / ENOTSUP — pre-5.3 kernels without the
-            // nexthop subsystem compiled in. EPROTONOSUPPORT (93) —
-            // some build configs.
-            const EOPNOTSUPP: u32 = 95;
-            const EPROTONOSUPPORT: u32 = 93;
-            if raw == EOPNOTSUPP || raw == EPROTONOSUPPORT {
-              return Ok(map);
-            }
-            return Err(io::Error::from_raw_os_error(raw as i32));
-          }
+            // Pre-5.3 kernels without the nexthop subsystem return
+            // EOPNOTSUPP / EPROTONOSUPPORT here; we surface those as
+            // an empty map so the route walker can proceed.
+            NlmsgErrOutcome::FamilyUnavailable => return Ok(map),
+          },
           val if val == RTM_NEWNEXTHOP => {
             // nhmsg occupies the first 8 bytes after the netlink
             // header: family (u8), scope (u8), protocol (u8), resvd
@@ -991,7 +1031,18 @@ where
             }
             break 'outer;
           }
-          NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
+          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
+            NlmsgErrOutcome::Ack => {
+              received = &received[l..];
+              continue;
+            }
+            // The requested family has no stack — surface as "no
+            // routes" so callers of `route_ipv6_table()` on a
+            // v4-only host get `Ok([])` instead of `Err`, and the
+            // union `route_table()` keeps whichever family is
+            // populated.
+            NlmsgErrOutcome::FamilyUnavailable => return Ok(()),
+          },
           val if val == RTM_NEWROUTE => {
             // Bound the per-message slice to `hlen` rather than the
             // rest of the recv buffer. Netlink dumps routinely pack
@@ -1291,6 +1342,50 @@ fn walk_multipath<F>(
     }
     buf = &buf[nh_aligned..];
   }
+}
+
+/// What to do with a netlink `NLMSG_ERROR` reply.
+#[derive(Debug)]
+enum NlmsgErrOutcome {
+  /// `errno == 0`: a plain ack the kernel emitted unsolicited; the
+  /// caller should keep iterating.
+  Ack,
+  /// `errno` indicates the requested address family or subsystem
+  /// isn't installed on this host (`EOPNOTSUPP`, `EPROTONOSUPPORT`,
+  /// `EAFNOSUPPORT`). The caller should short-circuit and return an
+  /// empty result for this dump rather than fail. Keeps single-stack
+  /// hosts from turning a populated v4 result into `Err` when the v6
+  /// dump fails because there is no v6 stack.
+  FamilyUnavailable,
+}
+
+/// Decode the `nlmsgerr` body of an `NLMSG_ERROR` reply. The wire
+/// format is a 4-byte signed errno (negative on failure, 0 on ack)
+/// followed by a copy of the offending request header. Real syscall
+/// errors propagate as `Err`; family-unavailable errnos are surfaced
+/// to the caller via [`NlmsgErrOutcome::FamilyUnavailable`] so each
+/// walker can decide how to represent "this family is empty".
+fn decode_nlmsgerr(received: &[u8], hlen: usize) -> io::Result<NlmsgErrOutcome> {
+  if hlen < NLMSG_HDRLEN + 4 {
+    return Err(rustix::io::Errno::INVAL.into());
+  }
+  let errno = i32::from_ne_bytes(received[NLMSG_HDRLEN..NLMSG_HDRLEN + 4].try_into().unwrap());
+  if errno == 0 {
+    return Ok(NlmsgErrOutcome::Ack);
+  }
+  // The kernel reports negative errno values in `nlmsgerr.error`.
+  let raw = errno.unsigned_abs();
+  const EOPNOTSUPP: u32 = 95;
+  const EPROTONOSUPPORT: u32 = 93;
+  // EAFNOSUPPORT (97) — kernel signal for "this AF has no stack".
+  // Some kernels surface a v6-disabled host through this errno on
+  // RTM_GETROUTE; without whitelisting it the union APIs would
+  // discard a valid v4 result on v4-only hosts.
+  const EAFNOSUPPORT: u32 = 97;
+  if matches!(raw, EOPNOTSUPP | EPROTONOSUPPORT | EAFNOSUPPORT) {
+    return Ok(NlmsgErrOutcome::FamilyUnavailable);
+  }
+  Err(io::Error::from_raw_os_error(raw as i32))
 }
 
 /// First usable nexthop's `oif` from an `RTA_MULTIPATH` attribute
