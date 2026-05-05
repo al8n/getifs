@@ -159,6 +159,11 @@ where
 /// Returns the IPv4 addresses from the interface with the best default route.
 /// The "best" interface is determined by the routing metrics of default routes (`0.0.0.0`).
 ///
+/// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
+/// `default`) are consulted; hosts with unconstrained custom `ip rule`
+/// policies ahead of `main` may have outbound traffic routed via a
+/// custom table this call does not see.
+///
 /// See also [`local_ipv4_addrs`].
 ///
 /// ## Example
@@ -177,6 +182,11 @@ pub fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 
 /// Returns the IPv6 addresses from the interface with the best default route.
 /// The "best" interface is determined by the routing metrics of default routes (`::`).
+///
+/// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
+/// `default`) are consulted; hosts with unconstrained custom `ip rule`
+/// policies ahead of `main` may have outbound traffic routed via a
+/// custom table this call does not see.
 ///
 /// See also [`local_ipv6_addrs`].
 ///
@@ -197,6 +207,11 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 
 /// Returns both IPv4 and IPv6 addresses from the interfaces with the best default routes.
 /// The "best" interfaces are determined by the routing metrics of default routes.
+///
+/// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
+/// `default`) are consulted; hosts with unconstrained custom `ip rule`
+/// policies ahead of `main` may have outbound traffic routed via a
+/// custom table this call does not see.
 ///
 /// See also [`local_addrs`].
 ///

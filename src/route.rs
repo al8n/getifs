@@ -169,14 +169,15 @@ impl IpRoute {
 /// next-hop interface are filtered out at the platform layer:
 ///
 /// - **Linux**: only `RTN_UNICAST` and `RTN_LOCAL` rows from the
-///   `RT_TABLE_MAIN` and `RT_TABLE_LOCAL` tables are emitted. Routes
-///   from custom policy tables (selected via `ip rule` with fwmark,
-///   iif, uid, etc.), TOS-specific rows (`rtm_tos != 0`), source-
-///   constrained rows (`rtm_src_len != 0` or `RTA_SRC` set), and
-///   blackhole / unreachable / prohibit / broadcast / multicast / nat
-///   types are dropped — they can't be represented faithfully as a
-///   single (oif, gw) tuple, and surfacing them would mislead callers
-///   into using a route the kernel would not consult for ordinary
+///   three built-in RPDB tables — `RT_TABLE_MAIN`, `RT_TABLE_LOCAL`,
+///   and `RT_TABLE_DEFAULT` — are emitted. Routes from custom policy
+///   tables (selected via `ip rule` with fwmark, iif, uid, etc.),
+///   TOS-specific rows (`rtm_tos != 0`), source-constrained rows
+///   (`rtm_src_len != 0` or `RTA_SRC` set), and blackhole /
+///   unreachable / prohibit / broadcast / multicast / nat types are
+///   dropped — they can't be represented faithfully as a single
+///   (oif, gw) tuple, and surfacing them would mislead callers into
+///   using a route the kernel would not consult for ordinary
 ///   traffic. ECMP routes (`RTA_MULTIPATH`) are decoded into one
 ///   [`IpRoute`] per nexthop. Routes that reference a separate nexthop
 ///   object via `RTA_NH_ID` (the `ip nexthop`-managed indirection
@@ -184,6 +185,13 @@ impl IpRoute {
 ///   `RTM_GETNEXTHOP` dump: leaves emit one route, groups fan out to
 ///   one route per member (group-of-groups is rare and skipped).
 ///   Blackhole nexthops are filtered.
+///
+///   Best-effort: hosts running unconstrained custom `ip rule`
+///   policies ahead of `main` (multi-WAN / mwan3 / advanced VPN
+///   setups) may have outbound traffic routed through a custom table
+///   that this API does not enumerate — do not use this output to
+///   predict the kernel's actual forwarding decision on policy-routed
+///   hosts; reach for `rtnetlink` and `RTM_GETRULE` directly there.
 /// - **BSD-like / macOS**: only routes with `RTF_UP` and a usable
 ///   destination are emitted; AF_LINK gateways surface as
 ///   `gateway = None`.
