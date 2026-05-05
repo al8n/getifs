@@ -99,6 +99,35 @@ const RT_TABLE_LOCAL: u32 = netlink::rt_class_t::RT_TABLE_LOCAL as u32;
 // the route the kernel would actually use.
 const RT_TABLE_DEFAULT: u32 = netlink::rt_class_t::RT_TABLE_DEFAULT as u32;
 
+/// RPDB precedence rank for the three built-in tables `route_table`
+/// admits. Lower rank = consulted first by the kernel rule chain
+/// (`0: lookup local; 32766: lookup main; 32767: lookup default`)
+/// = wins regardless of numeric metric. Used by
+/// `netlink_best_local_addrs_into` so a `RT_TABLE_DEFAULT` fallback
+/// can never beat a `RT_TABLE_MAIN` default with worse metric — the
+/// kernel itself wouldn't select the fallback in that situation.
+///
+/// `RT_TABLE_LOCAL` is ranked first for completeness; in practice it
+/// holds broadcast / address-owning routes, not transit defaults, so
+/// `dst_len == 0` candidates never come from there.
+///
+/// Any other table (`local` / `main` / `default` are the only ones
+/// upstream code admits — see the table allow-list at the
+/// `route_table` walker filter) returns `u8::MAX`, which is
+/// unreachable in normal flow but keeps the function total.
+#[inline]
+fn table_rank_for(table_id: u32) -> u8 {
+  if table_id == RT_TABLE_LOCAL {
+    0
+  } else if table_id == RT_TABLE_MAIN as u32 {
+    1
+  } else if table_id == RT_TABLE_DEFAULT {
+    2
+  } else {
+    u8::MAX
+  }
+}
+
 const IFA_LOCAL: u32 = netlink::IFA_LOCAL as u32;
 const IFA_ADDRESS: u32 = netlink::IFA_ADDRESS as u32;
 
@@ -476,7 +505,12 @@ where
     // `netlink_walk_routes`. A persistent miss surfaces as `EINTR` so
     // the caller can retry rather than getting a silently wrong
     // best-interface selection.
-    let mut deferred_best: Vec<(u32, u32)> = Vec::new();
+    // `(table_rank, metric, nh_id)`. `table_rank` carries Linux RPDB
+    // precedence (`local` first, then `main`, then `default`), so a
+    // deferred-retry candidate from the `default` table can never
+    // beat a `main` candidate even with a lower numeric metric. See
+    // `table_rank_for` below.
+    let mut deferred_best: Vec<(u8, u32, u32)> = Vec::new();
 
     let handle = Handle::new()?;
 
@@ -498,7 +532,17 @@ where
     // past the first, returning an order-dependent partial address
     // set on multi-WAN hosts.
     let mut best_oifs: SmallVec<u32> = SmallVec::new();
-    let mut best_metric = u32::MAX;
+    // Lex key for "best default": `(table_rank, metric)`. The kernel
+    // walks the RPDB rule chain in order — `0: lookup local`,
+    // `32766: lookup main`, `32767: lookup default` — so a
+    // higher-ranked table is queried first and any route there will
+    // be picked before the kernel ever consults a lower-ranked
+    // table, *regardless of metric*. Comparing on metric alone made
+    // a low-metric `RT_TABLE_DEFAULT` fallback beat a higher-metric
+    // `RT_TABLE_MAIN` default — even though the kernel would never
+    // do that. The lex key matches kernel selection exactly.
+    let mut best_rank: u8 = u8::MAX;
+    let mut best_metric: u32 = u32::MAX;
 
     'outer: loop {
       let nr = handle.recv(&mut rb)?;
@@ -745,7 +789,8 @@ where
                   }
                   None => {
                     let metric = current_metric.unwrap_or(0);
-                    deferred_best.push((metric, id));
+                    let rank = table_rank_for(table_id);
+                    deferred_best.push((rank, metric, id));
                     received = &received[l..];
                     continue;
                   }
@@ -753,24 +798,36 @@ where
               }
             }
 
-            // Update the candidate set if this route's metric ties or
-            // beats the running best. `< best_metric` resets the set
-            // (a strictly better default supersedes whatever we'd
-            // collected); `== best_metric` extends it (equal-cost
-            // ECMP across separate route entries).
+            // Update the candidate set on `(table_rank, metric)` lex
+            // order. A strictly better key resets the set (the new
+            // route supersedes everything collected so far); an
+            // equal key extends it (equal-cost ECMP across separate
+            // route entries, including the same destination listed
+            // in two route messages).
             //
-            // A missing `RTA_PRIORITY` is the kernel's convention for
-            // "metric 0"; collapse missing/explicit into one
-            // comparison so a metric-less default can correctly beat
-            // an earlier explicit-metric default regardless of dump
-            // order.
+            // Comparing on metric alone made a low-metric
+            // `RT_TABLE_DEFAULT` fallback beat a higher-metric
+            // `RT_TABLE_MAIN` default — kernel-incorrect. Lex
+            // comparison matches the kernel's rule-chain semantics:
+            // `local < main < default`, with metric only as a
+            // tie-breaker within the same table.
+            //
+            // A missing `RTA_PRIORITY` is the kernel's convention
+            // for "metric 0"; collapse missing/explicit into one
+            // comparison so a metric-less default can correctly
+            // beat an earlier explicit-metric default in the same
+            // table regardless of dump order.
             if !current_oifs.is_empty() {
               let metric = current_metric.unwrap_or(0);
-              if metric < best_metric {
+              let rank = table_rank_for(table_id);
+              let cur_key = (rank, metric);
+              let best_key = (best_rank, best_metric);
+              if cur_key < best_key {
+                best_rank = rank;
                 best_metric = metric;
                 best_oifs.clear();
                 best_oifs.extend(current_oifs.iter().copied());
-              } else if metric == best_metric {
+              } else if cur_key == best_key {
                 best_oifs.extend(current_oifs.iter().copied());
               }
             }
@@ -792,7 +849,7 @@ where
     // pass we collect every resolved oif, not just the first.
     if !deferred_best.is_empty() {
       let nh_map_2 = dump_nexthops()?;
-      for (metric, id) in deferred_best {
+      for (rank, metric, id) in deferred_best {
         match resolve_nh_id(&nh_map_2, id) {
           None => return Err(rustix::io::Errno::INTR.into()),
           Some(resolved) => {
@@ -803,11 +860,14 @@ where
             if oifs.is_empty() {
               continue;
             }
-            if metric < best_metric {
+            let cur_key = (rank, metric);
+            let best_key = (best_rank, best_metric);
+            if cur_key < best_key {
+              best_rank = rank;
               best_metric = metric;
               best_oifs.clear();
               best_oifs.extend(oifs);
-            } else if metric == best_metric {
+            } else if cur_key == best_key {
               best_oifs.extend(oifs);
             }
           }
