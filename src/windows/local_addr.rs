@@ -61,10 +61,23 @@ fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
       // caller deserves to see; collapsing it to `Ok(None)` would
       // make `best_local_*` indistinguishable from "host has no
       // default route", which can mask real platform failures.
+      //
+      //   - `ERROR_NOT_FOUND` (1168): no default route for the
+      //     requested family on this host.
+      //   - `ERROR_NETWORK_UNREACHABLE` (1231): destination
+      //     unreachable through any installed route.
+      //   - `ERROR_NOT_SUPPORTED` (50): the IP stack for the
+      //     requested family isn't installed at all (per Microsoft's
+      //     `GetBestRoute2` documentation). Without this whitelist,
+      //     `best_local_addrs()` would discard a perfectly-good IPv4
+      //     result if the v6 probe failed because there's no v6
+      //     stack — the union API has to accept that absence.
+      const ERROR_NOT_SUPPORTED: i32 = 50;
       const ERROR_NOT_FOUND: i32 = 1168;
       const ERROR_NETWORK_UNREACHABLE: i32 = 1231;
       let code = result as i32;
-      if code == ERROR_NOT_FOUND || code == ERROR_NETWORK_UNREACHABLE {
+      if code == ERROR_NOT_FOUND || code == ERROR_NETWORK_UNREACHABLE || code == ERROR_NOT_SUPPORTED
+      {
         return Ok(None);
       }
       return Err(io::Error::from_raw_os_error(code));

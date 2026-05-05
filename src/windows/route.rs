@@ -14,6 +14,14 @@ use super::{sockaddr_to_ipaddr, IpRoute, Ipv4Route, Ipv6Route, NO_ERROR};
 /// treat as "this family is just empty" in the union API; everything
 /// else propagates so allocation/parameter failures aren't masked.
 const ERROR_NOT_FOUND: i32 = 1168;
+// `GetIpForwardTable2` returns `ERROR_NOT_SUPPORTED` (50) when the
+// requested IPv4 / IPv6 stack isn't installed on the host — a v4-only
+// box configured without an IPv6 stack, for example. Per Microsoft
+// docs that's the same "no entries for this family" state we already
+// surface for `ERROR_NOT_FOUND`, just signalled differently. Without
+// this whitelist, `route_ipv6_table()` would return a hard error and
+// the union `route_table()` would lose the populated v4 routes.
+const ERROR_NOT_SUPPORTED: i32 = 50;
 
 /// Owned wrapper around `MIB_IPFORWARD_TABLE2` that frees the table on
 /// drop. `GetIpForwardTable2` allocates the buffer; the caller must
@@ -112,14 +120,23 @@ fn build_routev6(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv6Route> {
 }
 
 /// `Ok(Some(table))` for a populated family, `Ok(None)` for "no
-/// entries for this family" (kernel returned `ERROR_NOT_FOUND`),
-/// `Err(_)` for any other failure (allocation, invalid parameter,
-/// etc.) — those propagate so the union API can't silently turn
-/// genuine syscall failures into empty results.
+/// entries for this family" (kernel returned `ERROR_NOT_FOUND` —
+/// stack present but empty — or `ERROR_NOT_SUPPORTED` — stack absent
+/// entirely, e.g. an IPv6-disabled host). `Err(_)` for any other
+/// failure (allocation, invalid parameter, etc.) — those propagate so
+/// the union API can't silently turn genuine syscall failures into
+/// empty results.
 fn fetch_family(family: u16) -> io::Result<Option<ForwardTable>> {
   match ForwardTable::fetch(family) {
     Ok(table) => Ok(Some(table)),
-    Err(e) if e.raw_os_error() == Some(ERROR_NOT_FOUND) => Ok(None),
+    Err(e)
+      if matches!(
+        e.raw_os_error(),
+        Some(ERROR_NOT_FOUND) | Some(ERROR_NOT_SUPPORTED)
+      ) =>
+    {
+      Ok(None)
+    }
     Err(e) => Err(e),
   }
 }
