@@ -469,7 +469,14 @@ where
 
     let page_size = rustix::param::page_size();
     let mut rb = vec![0u8; page_size];
-    let mut best_ifindex = None;
+    // Set of interfaces tied at `best_metric`. ECMP / nexthop-object
+    // groups can list multiple usable nexthops behind a single route,
+    // and equal-metric default routes on different interfaces are
+    // also valid; both should contribute their addresses. The
+    // previous `Option<u32>` form silently dropped every nexthop
+    // past the first, returning an order-dependent partial address
+    // set on multi-WAN hosts.
+    let mut best_oifs: SmallVec<u32> = SmallVec::new();
     let mut best_metric = u32::MAX;
 
     'outer: loop {
@@ -568,7 +575,14 @@ where
 
             let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
             let mut current_metric = None;
-            let mut current_oif = None;
+            // Output interfaces this route targets — populated from
+            // `RTA_OIF` (one entry), or from the resolved nexthop set
+            // for `RTA_MULTIPATH` / `RTA_NH_ID` routes (multiple).
+            let mut current_oifs: SmallVec<u32> = SmallVec::new();
+            // Track whether we found a top-level `RTA_OIF` so the
+            // post-walk multipath / nh_id resolution doesn't override
+            // an explicit oif.
+            let mut have_top_oif = false;
             // `RTA_MULTIPATH` (ECMP) and `RTA_NH_ID` (nexthop-object)
             // routes don't carry a top-level `RTA_OIF`. We capture the
             // payload / id here and resolve them after the attribute
@@ -615,7 +629,11 @@ where
                   current_metric = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
                 }
                 RTA_OIF if data.len() >= 4 => {
-                  current_oif = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+                  let idx = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                  if idx != 0 {
+                    current_oifs.push(idx);
+                  }
+                  have_top_oif = true;
                 }
                 RTA_DST => {
                   if let Some(addr) = parse_rta_ipaddr(rtm_header.rtm_family, data) {
@@ -656,26 +674,32 @@ where
               continue;
             }
 
-            // Resolve oif from RTA_MULTIPATH or RTA_NH_ID when
-            // top-level RTA_OIF is absent. Multipath: pick the first
-            // usable nexthop. Nexthop-object: look up against the
-            // up-front dump.
+            // Resolve oifs from RTA_MULTIPATH or RTA_NH_ID when
+            // top-level RTA_OIF is absent. Both encodings can list
+            // multiple usable nexthops on different interfaces — for
+            // a multi-WAN ECMP default we want addresses from *all*
+            // of them, not just the first. The previous "first only"
+            // form silently dropped the rest.
             //
-            //   - `Some(non-empty)`: take the first resolution.
-            //   - `Some(empty)`: id present but kernel-marked
-            //     unusable (blackhole / linkdown / ...) — skip
-            //     silently, no retry.
-            //   - `None`: id absent from the snapshot. Defer to a
-            //     post-walk retry pass so a nexthop installed
-            //     between our two dumps doesn't silently misroute
-            //     `best_local_*`.
-            if current_oif.is_none() {
+            // For RTA_NH_ID:
+            //   - `Some(non-empty)`: collect every resolved oif.
+            //   - `Some(empty)`: id known but kernel-marked unusable
+            //     (blackhole / linkdown / ...) — skip silently, no
+            //     retry.
+            //   - `None`: id absent from snapshot. Defer to a
+            //     post-walk retry pass so a nexthop installed between
+            //     our two dumps doesn't silently misroute.
+            if !have_top_oif {
               if let Some(mp) = multipath {
-                current_oif = first_multipath_oif(mp);
+                multipath_oifs_into(mp, &mut current_oifs);
               } else if let Some(id) = nh_id {
                 match resolve_nh_id(&nh_map, id) {
                   Some(resolved) => {
-                    current_oif = resolved.first().map(|(oif, _)| *oif);
+                    for (oif, _) in resolved {
+                      if oif != 0 {
+                        current_oifs.push(oif);
+                      }
+                    }
                   }
                   None => {
                     let metric = current_metric.unwrap_or(0);
@@ -687,21 +711,25 @@ where
               }
             }
 
-            // Update best interface if this route has a better
-            // effective metric. A missing `RTA_PRIORITY` is the
-            // kernel's convention for "this route's metric is 0";
-            // collapse the missing/explicit branches into a single
-            // comparison so a metric-less default can correctly
-            // replace an earlier explicit higher-metric default
-            // regardless of dump order. The previous two-branch form
-            // only accepted a metric-less route when no candidate had
-            // been seen yet, which silently lost route 0 to whichever
-            // route the dump emitted first.
-            if let Some(oif) = current_oif {
+            // Update the candidate set if this route's metric ties or
+            // beats the running best. `< best_metric` resets the set
+            // (a strictly better default supersedes whatever we'd
+            // collected); `== best_metric` extends it (equal-cost
+            // ECMP across separate route entries).
+            //
+            // A missing `RTA_PRIORITY` is the kernel's convention for
+            // "metric 0"; collapse missing/explicit into one
+            // comparison so a metric-less default can correctly beat
+            // an earlier explicit-metric default regardless of dump
+            // order.
+            if !current_oifs.is_empty() {
               let metric = current_metric.unwrap_or(0);
               if metric < best_metric {
                 best_metric = metric;
-                best_ifindex = Some(oif);
+                best_oifs.clear();
+                best_oifs.extend(current_oifs.iter().copied());
+              } else if metric == best_metric {
+                best_oifs.extend(current_oifs.iter().copied());
               }
             }
           }
@@ -718,30 +746,48 @@ where
     // it" → surface as EINTR so the caller can retry rather than
     // silently lose the route. `Some(empty)` means the nexthop now
     // exists but is itself unusable (blackhole / down) — skip
-    // silently, matching the first-pass behaviour.
+    // silently, matching the first-pass behaviour. Like the first
+    // pass we collect every resolved oif, not just the first.
     if !deferred_best.is_empty() {
       let nh_map_2 = dump_nexthops(family.as_raw() as u8)?;
       for (metric, id) in deferred_best {
         match resolve_nh_id(&nh_map_2, id) {
           None => return Err(rustix::io::Errno::INTR.into()),
           Some(resolved) => {
-            if let Some(&(oif, _)) = resolved.first() {
-              if metric < best_metric {
-                best_metric = metric;
-                best_ifindex = Some(oif);
-              }
+            let oifs: SmallVec<u32> = resolved
+              .iter()
+              .filter_map(|(oif, _)| if *oif != 0 { Some(*oif) } else { None })
+              .collect();
+            if oifs.is_empty() {
+              continue;
+            }
+            if metric < best_metric {
+              best_metric = metric;
+              best_oifs.clear();
+              best_oifs.extend(oifs);
+            } else if metric == best_metric {
+              best_oifs.extend(oifs);
             }
           }
         }
       }
     }
 
-    // Get addresses only from the best interface, pushing into the
-    // caller-provided buffer.
-    match best_ifindex {
-      Some(idx) => netlink_addr_into(family, idx, local_ip_filter, out),
-      None => Ok(()),
+    // Sort + dedup so a multipath route that lists the same
+    // interface twice (or two separate routes that share an
+    // interface) doesn't make us walk the address dump twice for
+    // the same ifindex.
+    best_oifs.sort_unstable();
+    best_oifs.dedup();
+
+    // Fetch addresses for every selected interface, appending into
+    // the caller-provided buffer. Returns immediately on the first
+    // syscall failure; partial results stay in `out` (consistent with
+    // every other walker that pushes into a sink).
+    for idx in best_oifs {
+      netlink_addr_into(family, idx, local_ip_filter, out)?;
     }
+    Ok(())
   }
 }
 
@@ -1455,13 +1501,16 @@ fn decode_nlmsgerr(received: &[u8], hlen: usize) -> io::Result<NlmsgErrOutcome> 
   Err(io::Error::from_raw_os_error(raw))
 }
 
-/// First usable nexthop's `oif` from an `RTA_MULTIPATH` attribute
-/// payload. Returns `None` if every nexthop is unusable
-/// (`RTNH_F_DEAD` / `RTNH_F_LINKDOWN` / `RTNH_F_UNRESOLVED`), has an
-/// `oif` of zero, or the buffer is malformed. Mirrors the skip-rules
-/// in `walk_multipath` but doesn't decode sub-attributes — best-local
-/// only needs an interface index.
-fn first_multipath_oif(mut buf: &[u8]) -> Option<u32> {
+/// Push every usable nexthop's `oif` from an `RTA_MULTIPATH`
+/// attribute payload into `out`. Same skip-rules as `walk_multipath`
+/// (`RTNH_F_DEAD` / `RTNH_F_LINKDOWN` / `RTNH_F_UNRESOLVED`, and
+/// `oif == 0`) but only collects interface indices — best-local
+/// doesn't need to decode gateway sub-attrs.
+///
+/// Used by `netlink_best_local_addrs_into` so an ECMP default with N
+/// usable nexthops contributes addresses from all N interfaces, not
+/// just the first one the kernel listed.
+fn multipath_oifs_into(mut buf: &[u8], out: &mut SmallVec<u32>) {
   const RTNH_SIZE: usize = 8;
   let unusable = RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_UNRESOLVED;
   while buf.len() >= RTNH_SIZE {
@@ -1472,7 +1521,7 @@ fn first_multipath_oif(mut buf: &[u8]) -> Option<u32> {
     let nh_flags = buf[2];
     let nh_ifindex = i32::from_ne_bytes(buf[4..8].try_into().unwrap()) as u32;
     if nh_flags & unusable == 0 && nh_ifindex != 0 {
-      return Some(nh_ifindex);
+      out.push(nh_ifindex);
     }
     let nh_aligned = rta_align_of(nh_len).min(buf.len());
     if nh_aligned == 0 {
@@ -1480,7 +1529,6 @@ fn first_multipath_oif(mut buf: &[u8]) -> Option<u32> {
     }
     buf = &buf[nh_aligned..];
   }
-  None
 }
 
 /// Decode an `RTA_DST` / `RTA_GATEWAY` attribute payload as the IP family
