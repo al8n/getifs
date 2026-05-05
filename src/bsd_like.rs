@@ -27,11 +27,13 @@ use super::{
 
 // `Address` / `IfAddr` / `Ifv4Addr` / `Ifv6Addr` are only referenced
 // inside the `cfg_bsd_multicast!`-gated `interface_multiaddr_table`
-// impls, which expand only for Apple and FreeBSD. (DragonFly was
-// removed from this gate alongside the bogus `NET_RT_IFMALIST`
-// constant — see `compat.rs`.) Gating the import to the same cfg
-// keeps NetBSD / OpenBSD / DragonFly builds warning-free.
-#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+// impls. Keep this gate in lock-step with `cfg_bsd_multicast!`
+// (src/macros.rs) so NetBSD / OpenBSD builds stay warning-free.
+#[cfg(any(
+  target_vendor = "apple",
+  target_os = "freebsd",
+  target_os = "dragonfly"
+))]
 use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
 macro_rules! rt_generic_mod {
@@ -936,11 +938,10 @@ cfg_apple!(
   }
 );
 
-// FreeBSD only. DragonFly's libc bindings don't expose
-// `NET_RT_IFMALIST` and the `ifma_msghdr` layout we'd hand-roll
-// hasn't been runtime-verified against the kernel; multicast on
-// DragonFly is disabled at the `cfg_bsd_multicast` macro until that
-// is proven on a real DragonFly system.
+// FreeBSD has both `NET_RT_IFMALIST` and the `ifma_msghdr` struct
+// exported via libc, so this is the real walker. DragonFly has a
+// separate stub below — its kernel doesn't expose multicast group
+// enumeration via sysctl at all.
 #[cfg(target_os = "freebsd")]
 pub(super) fn interface_multiaddr_table<T, F>(
   family: i32,
@@ -990,4 +991,25 @@ where
 
     Ok(results)
   }
+}
+
+// DragonFly stub: the kernel does not expose multicast group
+// enumeration via sysctl. `<sys/socket.h>` defines only four route
+// selectors (`NET_RT_DUMP` / `NET_RT_FLAGS` / `NET_RT_IFLIST` /
+// `NET_RT_MAXID = 4`); there is no `NET_RT_IFMALIST` to call. The
+// public API surfaces on DragonFly so cross-platform callers can
+// compile and link, but the call returns an empty list rather than
+// faking entries or returning `ENOTSUP`. Documented in `route.rs` /
+// `interfaces.rs` doc strings.
+#[cfg(target_os = "dragonfly")]
+pub(super) fn interface_multiaddr_table<T, F>(
+  _family: i32,
+  _idx: u32,
+  _f: F,
+) -> io::Result<SmallVec<T>>
+where
+  T: Address,
+  F: FnMut(&IpAddr) -> bool,
+{
+  Ok(SmallVec::new())
 }

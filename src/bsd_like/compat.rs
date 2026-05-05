@@ -265,14 +265,15 @@ const _: () = assert!(core::mem::size_of::<RtMsghdr>() == 96);
 // =====================================================================
 //
 // Apple / FreeBSD: `libc` exports the struct + `NET_RT_IFMALIST`
-// directly. DragonFly was previously rolled in here with a hand-defined
-// `IfmaMsghdr` and a hard-coded `NET_RT_IFMALIST = 4` — but DragonFly's
-// libc bindings actually define `NET_RT_MAXID = 4` and don't expose
-// `NET_RT_IFMALIST`, so the constant we picked was the kernel's
-// max-id sentinel rather than a real selector. Multicast support on
-// DragonFly is now disabled at the cfg_bsd_multicast / cfg_multicast
-// macros until a runtime test on DragonFly proves the correct
-// selector and `IfmaMsghdr` layout.
+// directly.
+//
+// DragonFly: the kernel does not expose multicast group enumeration
+// via sysctl at all — `<sys/socket.h>` only defines four selectors
+// (`NET_RT_DUMP`, `NET_RT_FLAGS`, `NET_RT_IFLIST`, `NET_RT_MAXID`),
+// no `NET_RT_IFMALIST`. The DragonFly impl of
+// `interface_multiaddr_table` is therefore a stub that returns
+// `Ok([])` (see `bsd_like.rs`). It does not need an `IfmaMsghdr` or
+// a sysctl selector, so we don't define them here.
 
 #[cfg(target_os = "freebsd")]
 pub(super) use libc::ifma_msghdr as IfmaMsghdr;
@@ -284,11 +285,39 @@ pub(super) use libc::NET_RT_IFMALIST;
 // ifa_msghdr
 // =====================================================================
 //
-// Apple / FreeBSD / DragonFly: `libc` exports the struct directly.
-// NetBSD / OpenBSD: absent from libc, define locally.
+// Apple / FreeBSD: `libc` exports the struct directly.
+// DragonFly: the kernel's `struct ifa_msghdr` matches FreeBSD's (the
+//   two share most of the route socket ABI since DragonFly forked
+//   from FreeBSD 4.x), but the libc crate's DragonFly bindings don't
+//   expose the type — define it locally with the FreeBSD layout.
+// NetBSD / OpenBSD: absent from libc, define locally further down.
 
-#[cfg(any(apple, target_os = "freebsd", target_os = "dragonfly"))]
+#[cfg(any(apple, target_os = "freebsd"))]
 pub(super) use libc::ifa_msghdr as IfaMsghdr;
+
+// DragonFly `<net/if.h>` `struct ifa_msghdr` (matches FreeBSD):
+//
+//     struct ifa_msghdr {
+//         u_short ifam_msglen;
+//         u_char  ifam_version;
+//         u_char  ifam_type;
+//         int     ifam_addrs;
+//         int     ifam_flags;
+//         u_short ifam_index;
+//         int     ifam_metric;
+//     };
+#[cfg(target_os = "dragonfly")]
+#[repr(C)]
+pub(super) struct IfaMsghdr {
+  pub ifam_msglen: u16,
+  pub ifam_version: u8,
+  pub ifam_type: u8,
+  pub ifam_addrs: libc::c_int,
+  pub ifam_flags: libc::c_int,
+  pub ifam_index: u16,
+  _pad: u16,
+  pub ifam_metric: libc::c_int,
+}
 
 // NetBSD `<net/if.h>` (modern — NetBSD 8+):
 //

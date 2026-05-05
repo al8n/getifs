@@ -290,11 +290,16 @@ jobs:
             cargo test --all-features -- --nocapture
 
   # DragonFlyBSD's `pkg` ships rust 1.85.x (as of 2026-05), which is
-  # below the MSRV of several transitive dependencies (e.g. smol_str
-  # 0.3.6 requires 1.89). Until the pkg version catches up the build
-  # will fail with `error: rustc 1.85.x is not supported by ...`.
-  # `continue-on-error` keeps the run green while still surfacing the
-  # failure in the run summary.
+  # below this crate's advertised MSRV (1.89, driven by smol_str
+  # 0.3.6). We install rust via rustup-init in the VM prepare step
+  # to pick up a current toolchain; that bypasses the pkg-version
+  # ceiling so `cargo build` / `cargo test` actually run.
+  #
+  # The multicast surface on DragonFly is intentionally a stub
+  # (returns `Ok([])`) because the kernel doesn't expose
+  # `NET_RT_IFMALIST`. The `if_multicast_addrs` test compiles and
+  # runs on DragonFly but skips the "v6 multi must be > 0" count
+  # assertion — see tests/interfaces.rs.
   test-dragonflybsd:
     name: test (dragonflybsd)
     runs-on: ubuntu-latest
@@ -308,7 +313,9 @@ jobs:
           usesh: true
           copyback: false
           prepare: |
-            pkg install -y rust
+            pkg install -y curl gcc
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
           run: |
+            . "$HOME/.cargo/env"
             cargo build --all-features
             cargo test --all-features -- --nocapture

@@ -18,6 +18,7 @@ use super::{
 #[cfg(any(
   target_vendor = "apple",
   target_os = "freebsd",
+  target_os = "dragonfly",
   target_os = "linux",
   windows
 ))]
