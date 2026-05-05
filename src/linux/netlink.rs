@@ -84,7 +84,6 @@ const IFLA_IFNAME: u32 = if_arp::IFLA_IFNAME as u32;
 const IFLA_ADDRESS: u32 = if_arp::IFLA_ADDRESS as u32;
 
 const RTF_UP: u16 = 0x0001;
-const RTF_GATEWAY: u16 = 0x0002;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -545,18 +544,24 @@ where
               continue;
             }
 
-            // Use the same gateway detection logic as netlink_gateway
-            let mut has_gateway = false;
-            let old_kernel_gw = (rtm_header.rtm_flags & (RTF_UP as u32 | RTF_GATEWAY as u32))
-              == (RTF_UP as u32 | RTF_GATEWAY as u32);
-            let new_kernel_gw =
-              rtm_header.rtm_dst_len == 0 && rtm_header.rtm_table == RT_TABLE_MAIN as u8;
-
-            if old_kernel_gw || new_kernel_gw {
-              has_gateway = true;
-            }
-
-            if !has_gateway {
+            // We're hunting for the *default route*, not any gateway-
+            // bearing entry. A specific route like
+            // `10.0.0.0/8 via 10.0.0.1 dev eth1` carries `RTF_GATEWAY`
+            // and `RTF_UP` and would otherwise be treated as eligible
+            // here — combined with the metric-zero fallback below it
+            // could beat the actual default route on a different
+            // interface, so `best_local_ipv4_addrs()` would hand back
+            // addresses for an interface the kernel doesn't use for
+            // ordinary outbound traffic.
+            //
+            // The default route's defining property is
+            // `rtm_dst_len == 0`. Require it. The `RTF_UP` check stays
+            // so we ignore down/expired entries; `rtm_table` is
+            // already constrained to `RT_TABLE_MAIN` / `RT_TABLE_LOCAL`
+            // by the post-walk filter below.
+            let is_default =
+              rtm_header.rtm_dst_len == 0 && (rtm_header.rtm_flags & RTF_UP as u32) != 0;
+            if !is_default {
               received = &received[l..];
               continue;
             }
@@ -578,6 +583,13 @@ where
             // `netlink_walk_routes`.
             let mut table_id: u32 = rtm_header.rtm_table as u32;
             let mut has_src_constraint = false;
+            // Track whether RTA_DST claimed a non-unspecified address.
+            // The outer guard already required `rtm_dst_len == 0`, so
+            // a sane default route either omits RTA_DST entirely or
+            // emits 0.0.0.0 / ::. A kernel-emitted route with
+            // `dst_len == 0` but `RTA_DST = 192.0.2.1` is malformed —
+            // skip it rather than steer best-local at the wrong oif.
+            let mut dst_specific = false;
 
             while rtattr_buf.len() >= RtAttr::SIZE {
               let attr = RtAttr {
@@ -605,6 +617,13 @@ where
                 RTA_OIF if data.len() >= 4 => {
                   current_oif = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
                 }
+                RTA_DST => {
+                  if let Some(addr) = parse_rta_ipaddr(rtm_header.rtm_family, data) {
+                    if !addr.is_unspecified() {
+                      dst_specific = true;
+                    }
+                  }
+                }
                 RTA_MULTIPATH => {
                   multipath = Some(data);
                 }
@@ -627,9 +646,10 @@ where
             }
 
             // Drop routes from custom policy tables and any
-            // post-walk-discovered source constraints. Same filter
-            // `netlink_walk_routes` applies.
+            // post-walk-discovered source constraints, plus any
+            // dst_len=0 row that smuggled in a specific destination.
             if has_src_constraint
+              || dst_specific
               || (table_id != RT_TABLE_MAIN as u32 && table_id != RT_TABLE_LOCAL)
             {
               received = &received[l..];

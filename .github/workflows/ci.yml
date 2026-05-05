@@ -62,12 +62,16 @@ jobs:
       - name: Install Rust ${{ steps.msrv.outputs.version }}
         run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal --no-self-update && rustup default ${{ steps.msrv.outputs.version }}
       - name: cargo check at MSRV
-        # `--locked` would force the committed Cargo.lock; we don't ship
-        # one, so let cargo resolve normally. If a transitive dep
-        # raises its MSRV above ours, this step fails with a clear
-        # rustc error and the fix is either bumping `rust-version` or
-        # pinning the dep.
-        run: cargo check --all-targets
+        # `smol_str = "0.3"` resolves to 0.3.6 by default, which itself
+        # requires Rust 1.89. Users on the advertised MSRV (1.85) need
+        # to pin smol_str down to 0.3.2 (the last 0.3.x without a
+        # rust-version requirement). Mirror that pin here so the job
+        # reflects what an actual MSRV user does. Users on Rust 1.89+
+        # don't need this and pick up the upstream 0.3.6 normally.
+        run: |
+          cargo generate-lockfile
+          cargo update -p smol_str --precise 0.3.2
+          cargo check --all-targets
 
   # Apply clippy lints
   clippy:
