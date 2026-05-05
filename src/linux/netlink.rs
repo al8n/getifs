@@ -83,8 +83,6 @@ const IFLA_MTU: u32 = if_arp::IFLA_MTU as u32;
 const IFLA_IFNAME: u32 = if_arp::IFLA_IFNAME as u32;
 const IFLA_ADDRESS: u32 = if_arp::IFLA_ADDRESS as u32;
 
-const RTF_UP: u16 = 0x0001;
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct MessageHeader {
@@ -553,22 +551,26 @@ where
 
             // We're hunting for the *default route*, not any gateway-
             // bearing entry. A specific route like
-            // `10.0.0.0/8 via 10.0.0.1 dev eth1` carries `RTF_GATEWAY`
-            // and `RTF_UP` and would otherwise be treated as eligible
-            // here — combined with the metric-zero fallback below it
-            // could beat the actual default route on a different
-            // interface, so `best_local_ipv4_addrs()` would hand back
-            // addresses for an interface the kernel doesn't use for
-            // ordinary outbound traffic.
+            // `10.0.0.0/8 via 10.0.0.1 dev eth1` would otherwise be
+            // treated as eligible here — combined with the
+            // metric-zero fallback below it could beat the actual
+            // default route on a different interface, so
+            // `best_local_ipv4_addrs()` would hand back addresses
+            // for an interface the kernel doesn't use for ordinary
+            // outbound traffic.
             //
-            // The default route's defining property is
-            // `rtm_dst_len == 0`. Require it. The `RTF_UP` check stays
-            // so we ignore down/expired entries; `rtm_table` is
-            // already constrained to `RT_TABLE_MAIN` / `RT_TABLE_LOCAL`
-            // by the post-walk filter below.
-            let is_default =
-              rtm_header.rtm_dst_len == 0 && (rtm_header.rtm_flags & RTF_UP as u32) != 0;
-            if !is_default {
+            // The default route's defining property in rtnetlink is
+            // `rtm_dst_len == 0`. We do NOT additionally check
+            // `rtm_flags & RTF_UP`: rtnetlink's `rtm_flags` is the
+            // RTM_F_* set (NOTIFY, CLONED, PREFIX, ...) — not the
+            // BSD/legacy SIOCADDRT `RTF_*` set, where `RTF_UP` lives.
+            // Ordinary installed Linux defaults have `rtm_flags == 0`
+            // and would be incorrectly skipped. Reachability filters
+            // (RTN_UNICAST/RTN_LOCAL above, table-id and source
+            // constraints below, multipath / nh_id usability flags
+            // around `RTNH_F_DEAD` etc.) cover the "is it deliverable"
+            // question without mis-applying a BSD flag bit.
+            if rtm_header.rtm_dst_len != 0 {
               received = &received[l..];
               continue;
             }
