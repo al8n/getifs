@@ -615,6 +615,16 @@ where
             // `dst_len == 0` but `RTA_DST = 192.0.2.1` is malformed —
             // skip it rather than steer best-local at the wrong oif.
             let mut dst_specific = false;
+            // Separately track "RTA_DST present but failed to parse"
+            // (truncated payload, wrong-family). Without this, a
+            // malformed RTA_DST returned `None` from
+            // `parse_rta_ipaddr`, which left `dst_specific = false`
+            // and the row stayed eligible for best-local selection.
+            // The full route walker has the same `dst_malformed`
+            // guard — keep the two paths consistent so a malformed
+            // default route is suppressed from `best_local_*` for
+            // the same reason it's suppressed from `route_table*`.
+            let mut dst_malformed = false;
 
             while rtattr_buf.len() >= RtAttr::SIZE {
               let attr = RtAttr {
@@ -646,13 +656,15 @@ where
                   }
                   have_top_oif = true;
                 }
-                RTA_DST => {
-                  if let Some(addr) = parse_rta_ipaddr(rtm_header.rtm_family, data) {
-                    if !addr.is_unspecified() {
-                      dst_specific = true;
-                    }
+                RTA_DST => match parse_rta_ipaddr(rtm_header.rtm_family, data) {
+                  Some(addr) if !addr.is_unspecified() => {
+                    dst_specific = true;
                   }
-                }
+                  Some(_) => {}
+                  None => {
+                    dst_malformed = true;
+                  }
+                },
                 RTA_MULTIPATH => {
                   multipath = Some(data);
                 }
@@ -676,9 +688,12 @@ where
 
             // Drop routes from custom policy tables and any
             // post-walk-discovered source constraints, plus any
-            // dst_len=0 row that smuggled in a specific destination.
+            // dst_len=0 row that smuggled in a specific destination
+            // or carried a malformed RTA_DST (which the route walker
+            // also drops).
             if has_src_constraint
               || dst_specific
+              || dst_malformed
               || (table_id != RT_TABLE_MAIN as u32 && table_id != RT_TABLE_LOCAL)
             {
               received = &received[l..];
@@ -930,6 +945,19 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
             let mut id: u32 = 0;
             let mut oif: u32 = 0;
             let mut gw: Option<IpAddr> = None;
+            // Track presence + parse outcome of `NHA_GATEWAY`. Without
+            // this, a malformed gateway (truncated payload, wrong
+            // family) leaves `gw = None`, and `resolve_nh_id` then
+            // hands `(oif, None)` to the caller, which builds a
+            // directly-connected on-link route — the very output mode
+            // we use for "no gateway, send straight to oif". Treating
+            // a corrupted nexthop as on-link can route via no gateway
+            // when the kernel actually meant a (broken) indirect
+            // hop. Mirror the route walker's `gw_malformed` guard:
+            // mark such nexthops `filtered` so `resolve_nh_id` skips
+            // them silently rather than emitting a synthetic on-link
+            // entry.
+            let mut gw_malformed = false;
             let mut group: Option<SmallVec<u32>> = None;
             let mut blackhole = false;
 
@@ -954,6 +982,9 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
                 }
                 NHA_GATEWAY => {
                   gw = parse_rta_ipaddr(nh_family, data);
+                  if gw.is_none() {
+                    gw_malformed = true;
+                  }
                 }
                 NHA_GROUP => {
                   // Payload is an array of `struct nexthop_grp`:
@@ -984,7 +1015,7 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
             // flag captures the latter without losing the
             // "kernel-knows-this-id" signal.
             if id != 0 {
-              let filtered = blackhole || nh_unusable;
+              let filtered = blackhole || nh_unusable || gw_malformed;
               map.insert(
                 id,
                 NexthopInfo {
