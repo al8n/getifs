@@ -77,13 +77,27 @@ const RTN_UNICAST: u8 = 1;
 const RTN_LOCAL: u8 = 2;
 
 const RT_TABLE_MAIN: u16 = netlink::rt_class_t::RT_TABLE_MAIN as u16;
-// `route_table` only emits routes from the main and local kernel
-// tables. Custom policy tables (selected via `ip rule` with fwmark,
-// iif, uid, etc.) carry constraints that aren't representable in
-// `IpRoute`, so surfacing them would mislead callers — the
-// route would look generally usable when the kernel only consults it
-// for matching policy rules.
+// `route_table` only emits routes from the kernel's standard RPDB
+// tables — `local` (255), `main` (254), and `default` (253). These
+// are the three the default rule chain `0: lookup local; 32766:
+// lookup main; 32767: lookup default` consults for every outbound
+// packet on a host without custom `ip rule` policy, so they reflect
+// "what would the kernel actually do for this destination".
+//
+// Custom policy tables (selected via `ip rule` with fwmark, iif,
+// uid, etc.) carry constraints that aren't representable in
+// `IpRoute`, so surfacing them would mislead callers — the route
+// would look generally usable when the kernel only consults it for
+// matching policy rules.
 const RT_TABLE_LOCAL: u32 = netlink::rt_class_t::RT_TABLE_LOCAL as u32;
+// `RT_TABLE_DEFAULT` (253) is the kernel's last-resort table —
+// queried by the default rule `32767: from all lookup default`. A
+// host with a fallback default route installed there
+// (`ip route add default via X table default`) has the kernel route
+// real traffic via that entry, so the route walker must include it
+// or `route_table()` and best-local selection will silently miss
+// the route the kernel would actually use.
+const RT_TABLE_DEFAULT: u32 = netlink::rt_class_t::RT_TABLE_DEFAULT as u32;
 
 const IFA_LOCAL: u32 = netlink::IFA_LOCAL as u32;
 const IFA_ADDRESS: u32 = netlink::IFA_ADDRESS as u32;
@@ -694,7 +708,9 @@ where
             if has_src_constraint
               || dst_specific
               || dst_malformed
-              || (table_id != RT_TABLE_MAIN as u32 && table_id != RT_TABLE_LOCAL)
+              || (table_id != RT_TABLE_MAIN as u32
+                && table_id != RT_TABLE_LOCAL
+                && table_id != RT_TABLE_DEFAULT)
             {
               received = &received[l..];
               continue;
@@ -1348,12 +1364,19 @@ where
               continue;
             }
 
-            // Drop routes from custom policy tables. `RT_TABLE_MAIN`
-            // (254) and `RT_TABLE_LOCAL` (255) cover the unicast / local
-            // routes the public API contracts to expose; everything
-            // else (RT_TABLE_DEFAULT, custom tables selected by `ip
-            // rule`, etc.) carries constraints `IpRoute` can't express.
-            if table_id != RT_TABLE_MAIN as u32 && table_id != RT_TABLE_LOCAL {
+            // Drop routes from custom policy tables. The three
+            // standard RPDB tables consulted by the default rule
+            // chain are `local` (255), `main` (254), and `default`
+            // (253); together they describe what the kernel would
+            // actually do for any outbound packet on a host without
+            // custom `ip rule` policy. Anything outside that set is
+            // a custom policy table selected by `ip rule` with
+            // fwmark / iif / uid / etc., whose constraints aren't
+            // representable in `IpRoute`.
+            if table_id != RT_TABLE_MAIN as u32
+              && table_id != RT_TABLE_LOCAL
+              && table_id != RT_TABLE_DEFAULT
+            {
               received = &received[l..];
               continue;
             }
