@@ -265,24 +265,14 @@ const _: () = assert!(core::mem::size_of::<RtMsghdr>() == 96);
 // =====================================================================
 //
 // Apple / FreeBSD: `libc` exports the struct + `NET_RT_IFMALIST`
-// directly. DragonFly's kernel has them too (forked from FreeBSD with
-// the same layout) but `libc` only declares them under `target_os =
-// "freebsd"`, so we re-export the FreeBSD-shaped struct on DragonFly
-// and define `NET_RT_IFMALIST` locally.
-
-#[cfg(target_os = "dragonfly")]
-#[repr(C)]
-pub(super) struct IfmaMsghdr {
-  pub ifmam_msglen: u16,
-  pub ifmam_version: u8,
-  pub ifmam_type: u8,
-  pub ifmam_addrs: libc::c_int,
-  pub ifmam_flags: libc::c_int,
-  pub ifmam_index: u16,
-}
-
-#[cfg(target_os = "dragonfly")]
-pub(super) const NET_RT_IFMALIST: libc::c_int = 4;
+// directly. DragonFly was previously rolled in here with a hand-defined
+// `IfmaMsghdr` and a hard-coded `NET_RT_IFMALIST = 4` — but DragonFly's
+// libc bindings actually define `NET_RT_MAXID = 4` and don't expose
+// `NET_RT_IFMALIST`, so the constant we picked was the kernel's
+// max-id sentinel rather than a real selector. Multicast support on
+// DragonFly is now disabled at the cfg_bsd_multicast / cfg_multicast
+// macros until a runtime test on DragonFly proves the correct
+// selector and `IfmaMsghdr` layout.
 
 #[cfg(target_os = "freebsd")]
 pub(super) use libc::ifma_msghdr as IfmaMsghdr;

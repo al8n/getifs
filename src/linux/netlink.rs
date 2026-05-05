@@ -1407,27 +1407,32 @@ enum NlmsgErrOutcome {
 /// errors propagate as `Err`; family-unavailable errnos are surfaced
 /// to the caller via [`NlmsgErrOutcome::FamilyUnavailable`] so each
 /// walker can decide how to represent "this family is empty".
+///
+/// The "family-unavailable" set (`EOPNOTSUPP`, `EPROTONOSUPPORT`,
+/// `EAFNOSUPPORT`) is read from `rustix::io::Errno`. The numeric
+/// values for these errnos differ across Linux architectures — x86 /
+/// arm have 95 / 93 / 97, MIPS uses 122 / 120 / 124, SPARC uses 45 /
+/// 43 / 47 — so a hardcoded literal whitelist would silently fail
+/// the recovery path on those targets.
 fn decode_nlmsgerr(received: &[u8], hlen: usize) -> io::Result<NlmsgErrOutcome> {
+  use rustix::io::Errno;
+
   if hlen < NLMSG_HDRLEN + 4 {
-    return Err(rustix::io::Errno::INVAL.into());
+    return Err(Errno::INVAL.into());
   }
   let errno = i32::from_ne_bytes(received[NLMSG_HDRLEN..NLMSG_HDRLEN + 4].try_into().unwrap());
   if errno == 0 {
     return Ok(NlmsgErrOutcome::Ack);
   }
   // The kernel reports negative errno values in `nlmsgerr.error`.
-  let raw = errno.unsigned_abs();
-  const EOPNOTSUPP: u32 = 95;
-  const EPROTONOSUPPORT: u32 = 93;
-  // EAFNOSUPPORT (97) — kernel signal for "this AF has no stack".
-  // Some kernels surface a v6-disabled host through this errno on
-  // RTM_GETROUTE; without whitelisting it the union APIs would
-  // discard a valid v4 result on v4-only hosts.
-  const EAFNOSUPPORT: u32 = 97;
-  if matches!(raw, EOPNOTSUPP | EPROTONOSUPPORT | EAFNOSUPPORT) {
+  let raw = errno.unsigned_abs() as i32;
+  if raw == Errno::OPNOTSUPP.raw_os_error()
+    || raw == Errno::PROTONOSUPPORT.raw_os_error()
+    || raw == Errno::AFNOSUPPORT.raw_os_error()
+  {
     return Ok(NlmsgErrOutcome::FamilyUnavailable);
   }
-  Err(io::Error::from_raw_os_error(raw as i32))
+  Err(io::Error::from_raw_os_error(raw))
 }
 
 /// First usable nexthop's `oif` from an `RTA_MULTIPATH` attribute

@@ -128,7 +128,6 @@ fn check_unicast_stats(ifstats: &IfStats, uni_stats: &RouteStats) -> std::io::Re
 #[cfg(any(
   target_vendor = "apple",
   target_os = "freebsd",
-  target_os = "dragonfly",
   target_os = "linux",
   windows,
 ))]
@@ -162,7 +161,6 @@ fn validate_interface_multicast_addrs(ifmat: &[IfAddr]) -> std::io::Result<Route
 #[cfg(any(
   target_vendor = "apple",
   target_os = "freebsd",
-  target_os = "dragonfly",
   target_os = "linux",
   windows,
 ))]
@@ -264,7 +262,6 @@ fn lc_addrs() {
 #[cfg(any(
   target_vendor = "apple",
   target_os = "freebsd",
-  target_os = "dragonfly",
   target_os = "linux",
   windows,
 ))]

@@ -27,13 +27,11 @@ use super::{
 
 // `Address` / `IfAddr` / `Ifv4Addr` / `Ifv6Addr` are only referenced
 // inside the `cfg_bsd_multicast!`-gated `interface_multiaddr_table`
-// impls, which only expand for Apple, FreeBSD, and DragonFly. Gating
-// the import to the same cfg keeps NetBSD/OpenBSD builds warning-free.
-#[cfg(any(
-  target_vendor = "apple",
-  target_os = "freebsd",
-  target_os = "dragonfly"
-))]
+// impls, which expand only for Apple and FreeBSD. (DragonFly was
+// removed from this gate alongside the bogus `NET_RT_IFMALIST`
+// constant — see `compat.rs`.) Gating the import to the same cfg
+// keeps NetBSD / OpenBSD / DragonFly builds warning-free.
+#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
 use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
 macro_rules! rt_generic_mod {
@@ -938,13 +936,12 @@ cfg_apple!(
   }
 );
 
-// FreeBSD and DragonFly share the same `NET_RT_IFMALIST` sysctl ABI and
-// `ifma_msghdr` layout (DragonFly forked from FreeBSD before the
-// multicast group enumeration sysctl was added on either side and they
-// haven't diverged). The constant + struct just aren't exposed by
-// `libc` for DragonFly, so they are defined locally in
-// `bsd_like/compat.rs`.
-#[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
+// FreeBSD only. DragonFly's libc bindings don't expose
+// `NET_RT_IFMALIST` and the `ifma_msghdr` layout we'd hand-roll
+// hasn't been runtime-verified against the kernel; multicast on
+// DragonFly is disabled at the `cfg_bsd_multicast` macro until that
+// is proven on a real DragonFly system.
+#[cfg(target_os = "freebsd")]
 pub(super) fn interface_multiaddr_table<T, F>(
   family: i32,
   idx: u32,

@@ -1,8 +1,22 @@
 use std::{io, net::IpAddr};
 
 use libc::{
-  NET_RT_DUMP, RTAX_DST, RTAX_GATEWAY, RTAX_NETMASK, RTF_BLACKHOLE, RTF_REJECT, RTF_UP, RTM_GET,
+  NET_RT_DUMP, RTAX_DST, RTAX_GATEWAY, RTAX_NETMASK, RTF_BLACKHOLE, RTF_BROADCAST, RTF_REJECT,
+  RTF_UP, RTM_GET,
 };
+
+// `RTF_MULTICAST` exists on Apple / FreeBSD / DragonFly / OpenBSD but
+// not on NetBSD's libc bindings. Pull it from libc where it exists,
+// otherwise fall back to 0 so the bitmask is a no-op there.
+#[cfg(any(
+  apple,
+  target_os = "freebsd",
+  target_os = "dragonfly",
+  target_os = "openbsd"
+))]
+use libc::RTF_MULTICAST;
+#[cfg(target_os = "netbsd")]
+const RTF_MULTICAST: libc::c_int = 0;
 
 use super::{compat::RtMsghdr, fetch, message_too_short, parse_addrs};
 
@@ -91,10 +105,15 @@ where
       //     unreachable. Up, ordinary unicast destination, but the
       //     kernel never delivers traffic via it.
       //   - `RTF_BLACKHOLE`: silent drop. Same shape as REJECT.
-      // Multicast destinations are filtered downstream in
-      // `bsd_like.rs::build_routev4` / `build_routev6` (where we know
-      // the parsed family).
-      let unusable = RTF_REJECT | RTF_BLACKHOLE;
+      //   - `RTF_BROADCAST`: per-subnet broadcast routes (e.g.
+      //     `192.168.1.255/32`) are kernel housekeeping for the
+      //     broadcast address; their destination IP is *not*
+      //     `255.255.255.255` so `Ipv4Addr::is_broadcast()` doesn't
+      //     catch them downstream. Filter at the flag level.
+      //   - `RTF_MULTICAST`: same idea for multicast routing entries
+      //     where they are tagged. (Defence-in-depth in addition to
+      //     the per-family multicast-IP check in `build_routev*`.)
+      let unusable = RTF_REJECT | RTF_BLACKHOLE | RTF_BROADCAST | RTF_MULTICAST;
       if (rtm.rtm_flags & RTF_UP) == 0 || (rtm.rtm_flags & unusable) != 0 {
         src = &src[l..];
         continue;
