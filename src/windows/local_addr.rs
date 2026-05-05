@@ -18,60 +18,61 @@ use windows_sys::Win32::Networking::WinSock::*;
 /// to reach the unspecified address of the requested family, or `None`
 /// if no route is available for that family.
 ///
-/// Defers to `GetBestRoute2` rather than scanning `MIB_IPFORWARD_TABLE2`
-/// ourselves: the kernel's selection is the **effective** metric (route
-/// metric + interface metric — not just `MIB_IPFORWARD_ROW2.Metric`)
-/// and also rejects unusable rows (loopback / dead / disabled), which
-/// matches Windows' own outbound interface selection. Querying the
-/// table and comparing only `route.Metric` would mis-order multi-homed
-/// hosts where a low-route-metric route lives on a high-cost interface.
+/// Uses [`GetBestInterfaceEx`], which takes only a destination address
+/// and returns the best interface index directly. We previously called
+/// `GetBestRoute2(NULL, 0, NULL, &dest, ...)` and let the kernel pick
+/// — that worked in practice on shipping Windows but the documented
+/// contract for `GetBestRoute2` is "DestinationAddress must be
+/// initialized AND at least one of InterfaceLuid or InterfaceIndex
+/// must be initialized" (see
+/// https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getbestroute2).
+/// `GetBestInterfaceEx` is the right shape for "given a destination,
+/// which interface would route there?" — no required interface
+/// selector, no source address, no `MIB_IPFORWARD_ROW2` we don't use.
 ///
-/// History: an earlier revision scanned `MIB_IPFORWARD_TABLE2` and
-/// picked the lowest `route.Metric`; before that, `best_local_addrs_in`
-/// fetched the legacy IPv4-only `GetIpForwardTable` *per adapter* and
-/// accepted any default route. This is the version that actually models
-/// what Windows does.
+/// The kernel still applies effective metric (route metric + interface
+/// metric) and rejects unusable rows (loopback / dead / disabled),
+/// which is what Windows itself does for outbound traffic.
+///
+/// History: earlier revisions scanned `MIB_IPFORWARD_TABLE2` and
+/// compared only `route.Metric` (mis-ordered multi-homed hosts with a
+/// low-route-metric route on a high-cost interface). Then we moved to
+/// `GetBestRoute2`. Now we use `GetBestInterfaceEx` to satisfy the
+/// documented input contract without losing the metric correctness.
 fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
-  // SAFETY: We hand `GetBestRoute2` a zero-initialised `SOCKADDR_INET`
-  // with `si_family` set to the requested family, which the kernel
-  // reads as `0.0.0.0:0` or `[::]:0` — the canonical "default-route"
-  // destination. All output buffers are kernel-writable locals.
+  // SAFETY: We zero-initialise a `SOCKADDR_INET`, set its family, and
+  // hand its address as a `*const SOCKADDR` (matching the standard
+  // Windows pattern of treating `SOCKADDR_INET` as a tagged union of
+  // `sockaddr_in` / `sockaddr_in6`). `GetBestInterfaceEx` writes
+  // back the best interface index into a stack u32.
   unsafe {
     let mut destination: SOCKADDR_INET = std::mem::zeroed();
     destination.si_family = family;
 
-    let mut best_route: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
-    let mut best_source: SOCKADDR_INET = std::mem::zeroed();
-
-    let result = GetBestRoute2(
-      std::ptr::null(), // InterfaceLuid: let kernel choose
-      0,                // InterfaceIndex: let kernel choose
-      std::ptr::null(), // SourceAddress: let kernel choose
-      &destination,
-      0, // AddressSortOptions
-      &mut best_route,
-      &mut best_source,
+    let mut best_ifindex: u32 = 0;
+    let result = GetBestInterfaceEx(
+      &destination as *const SOCKADDR_INET as *const SOCKADDR,
+      &mut best_ifindex,
     );
 
     if result != NO_ERROR {
-      // Whitelist the "no default route exists" codes — those are
-      // legitimate `Ok(None)` (e.g. v6 unconfigured on a v4-only
-      // host). Anything else (allocation failure, invalid parameter,
-      // network-stack failure) is a real syscall error that the
-      // caller deserves to see; collapsing it to `Ok(None)` would
-      // make `best_local_*` indistinguishable from "host has no
-      // default route", which can mask real platform failures.
+      // Whitelist the "no route to that destination on this host"
+      // codes as legitimate `Ok(None)`. Anything else (allocation
+      // failure, invalid parameter, network-stack failure) is a real
+      // syscall error the caller deserves to see; collapsing it
+      // would make `best_local_*` indistinguishable from "host has
+      // no default route" and mask real platform failures.
       //
       //   - `ERROR_NOT_FOUND` (1168): no default route for the
       //     requested family on this host.
       //   - `ERROR_NETWORK_UNREACHABLE` (1231): destination
       //     unreachable through any installed route.
       //   - `ERROR_NOT_SUPPORTED` (50): the IP stack for the
-      //     requested family isn't installed at all (per Microsoft's
-      //     `GetBestRoute2` documentation). Without this whitelist,
-      //     `best_local_addrs()` would discard a perfectly-good IPv4
-      //     result if the v6 probe failed because there's no v6
-      //     stack — the union API has to accept that absence.
+      //     requested family isn't installed at all. Without this
+      //     whitelist, `best_local_addrs()` would discard a
+      //     perfectly-good IPv4 result if the v6 probe failed
+      //     because there's no v6 stack — the union API has to
+      //     accept that absence.
       const ERROR_NOT_SUPPORTED: i32 = 50;
       const ERROR_NOT_FOUND: i32 = 1168;
       const ERROR_NETWORK_UNREACHABLE: i32 = 1231;
@@ -83,7 +84,7 @@ fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
       return Err(io::Error::from_raw_os_error(code));
     }
 
-    Ok(Some(best_route.InterfaceIndex))
+    Ok(Some(best_ifindex))
   }
 }
 
