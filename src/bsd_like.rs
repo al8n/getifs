@@ -627,17 +627,25 @@ pub(super) fn parse_addrs(
           // `sa_family = AF_INET[6]` but `sa_len` is short and only the
           // leading address bytes that differ from zero are present.
           // The full-length `parse_inet_addr` rejects those because it
-          // requires `b.len() >= size_of::<sockaddr_in[6]>()`. Decode
-          // both forms — full-length via `parse_inet_addr`, short via
-          // `parse_short_inet_addr` (zero-extends the trailing bytes).
-          // Without this branch, NetBSD/OpenBSD route dumps fail at the
-          // first netmask, the walker swallowed the error and silently
-          // dropped the route.
+          // requires `b.len() >= size_of::<sockaddr_in[6]>()`. The
+          // short-form decoder zero-extends the trailing bytes —
+          // correct semantics for a netmask, but wrong for any other
+          // slot (a short RTAX_DST or RTAX_GATEWAY would silently
+          // become an unspecified address, which the route builder
+          // would happily turn into a fake default route or a fake
+          // on-link gateway). Restrict the short-form fallback to
+          // `RTAX_NETMASK`; for every other slot, a sub-`SOCK4`/`SOCK6`
+          // length is a malformed message → `InvalidData`.
           let addr = if sa_len >= needed {
             let (_, a) = parse_inet_addr(af, b)?;
             a
-          } else {
+          } else if i == RTAX_NETMASK as usize {
             parse_short_inet_addr(af, &b[..sa_len])?
+          } else {
+            return Err(io::Error::new(
+              io::ErrorKind::InvalidData,
+              "short sockaddr outside RTAX_NETMASK",
+            ));
           };
           as_[i] = Some(addr);
           b = &b[l..];
