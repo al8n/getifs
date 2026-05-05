@@ -24,8 +24,7 @@ use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
   compat::RtMsghdr,
   fetch, interface_addr_table_into, interface_addresses, interface_ipv4_addresses,
-  interface_ipv6_addresses, invalid_message, message_too_short, parse_addrs, IfNet, Ifv4Net,
-  Ifv6Net, Net,
+  interface_ipv6_addresses, message_too_short, parse_addrs, IfNet, Ifv4Net, Ifv6Net, Net,
 };
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
@@ -73,8 +72,14 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
     let mut src = routes.as_slice();
     while src.len() > 4 {
       let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
+      // `l == 0` is the kernel's normal end-of-stream sentinel for
+      // residual zero padding past the last valid record — same
+      // contract as `walk_route_table`. Treating it as `InvalidData`
+      // here would discard otherwise-valid default routes for one
+      // family whenever the dump happened to land on a padded
+      // boundary. Terminate the loop cleanly instead.
       if l == 0 {
-        return Err(invalid_message());
+        break;
       }
       if src.len() < l {
         return Err(message_too_short());

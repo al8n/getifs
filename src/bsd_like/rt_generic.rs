@@ -9,7 +9,7 @@ use smallvec_wrapper::SmallVec;
 
 use crate::is_ipv6_unspecified;
 
-use super::{super::Address, compat::RtMsghdr, fetch, invalid_message, message_too_short, roundup};
+use super::{super::Address, compat::RtMsghdr, fetch, message_too_short, roundup};
 
 pub(super) fn rt_generic_addrs_in<A, F>(
   family: i32,
@@ -33,8 +33,14 @@ where
 
     while src.len() > 4 {
       let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
+      // Same end-of-stream sentinel as `walk_route_table` /
+      // `best_local_addrs_in`: a zero-length record byte-pair is the
+      // kernel's residual padding past the last valid message, not a
+      // malformed message. Erroring here would discard the entire
+      // gateway/best-local result on platforms whose sysctl response
+      // happens to land on a padded boundary.
       if l == 0 {
-        return Err(invalid_message());
+        break;
       }
       if src.len() < l {
         return Err(message_too_short());

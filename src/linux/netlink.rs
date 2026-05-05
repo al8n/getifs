@@ -452,7 +452,7 @@ where
     // based hand back `Ok([])` from `best_local_*` even though a
     // perfectly usable default exists — `netlink_walk_routes`
     // resolves these and `best_local_*` shouldn't diverge.
-    let nh_map = dump_nexthops(family.as_raw() as u8)?;
+    let nh_map = dump_nexthops()?;
 
     // Stale-snapshot recovery. If a default route references an
     // `RTA_NH_ID` missing from `nh_map` (e.g. a nexthop installed
@@ -760,7 +760,7 @@ where
     // silently, matching the first-pass behaviour. Like the first
     // pass we collect every resolved oif, not just the first.
     if !deferred_best.is_empty() {
-      let nh_map_2 = dump_nexthops(family.as_raw() as u8)?;
+      let nh_map_2 = dump_nexthops()?;
       for (metric, id) in deferred_best {
         match resolve_nh_id(&nh_map_2, id) {
           None => return Err(rustix::io::Errno::INTR.into()),
@@ -826,9 +826,15 @@ struct NexthopInfo {
 }
 
 /// Build the wire bytes for `RTM_GETNEXTHOP` + `NLM_F_DUMP`. The body
-/// is `struct nhmsg` (8 bytes); leaving every field zero requests an
-/// unfiltered dump of all nexthops the kernel knows about.
-fn build_nh_dump_request(seq: u32, family: u8) -> [u8; 24] {
+/// is `struct nhmsg` (all-zero); zero `nh_family` is `AF_UNSPEC`, which
+/// returns leaf nexthops of every family AND nexthop *group* objects
+/// (containers carrying `NHA_GROUP`). The kernel filters group objects
+/// out of any dump with a nonzero `nh_family`, because a group is
+/// family-agnostic and doesn't satisfy a per-family filter — so the
+/// only safe family to ask for is `AF_UNSPEC`. Even routes belonging
+/// to a single family may reference a group via `RTA_NH_ID`, so we
+/// must dump unfiltered.
+fn build_nh_dump_request(seq: u32) -> [u8; 24] {
   let mut bytes = [0u8; 24];
   // nlmsghdr (16 bytes)
   bytes[0..4].copy_from_slice(&24u32.to_ne_bytes());
@@ -836,22 +842,23 @@ fn build_nh_dump_request(seq: u32, family: u8) -> [u8; 24] {
   bytes[6..8].copy_from_slice(&((NLM_F_DUMP | NLM_F_REQUEST) as u16).to_ne_bytes());
   bytes[8..12].copy_from_slice(&seq.to_ne_bytes());
   bytes[12..16].copy_from_slice(&std::process::id().to_ne_bytes());
-  // nhmsg body (8 bytes): nh_family, nh_scope, nh_protocol, resvd, nh_flags
-  bytes[16] = family;
-  // bytes[17..24] left zero: scope=0, protocol=0, resvd=0, flags=0
+  // nhmsg body (8 bytes) left zero: family=AF_UNSPEC, scope=0,
+  // protocol=0, resvd=0, flags=0.
   bytes
 }
 
-/// Dump every `RTM_NEWNEXTHOP` entry for `family` (use `AF_UNSPEC` to
-/// get both v4 and v6) and return them as a map keyed by nexthop id.
-/// Used by `netlink_walk_routes` to resolve routes that arrive with an
+/// Dump every `RTM_NEWNEXTHOP` entry the kernel knows about and return
+/// them as a map keyed by nexthop id. Always dumps with
+/// `nh_family = AF_UNSPEC` — see `build_nh_dump_request` for why
+/// per-family dumps are unsafe (they drop group objects). Used by
+/// `netlink_walk_routes` to resolve routes that arrive with an
 /// `RTA_NH_ID` reference rather than an inline `RTA_OIF` / `RTA_GATEWAY`.
-fn dump_nexthops(family: u8) -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
+fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
   use std::collections::HashMap;
   unsafe {
     let handle = Handle::new()?;
 
-    let req = build_nh_dump_request(1, family);
+    let req = build_nh_dump_request(1);
     handle.send_bytes(&req)?;
 
     let lsa = handle.sock()?;
@@ -1060,7 +1067,7 @@ where
     // resolved against this map below. We dump even when the host has
     // no nexthop objects — the dump returns an empty map cheaply, and
     // we still want to call `RTM_GETROUTE` afterward.
-    let nh_map = dump_nexthops(family.as_raw() as u8)?;
+    let nh_map = dump_nexthops()?;
 
     // Stale-snapshot recovery: if a route added between the nexthop
     // dump and the route dump references an id our map doesn't know
@@ -1392,7 +1399,7 @@ where
     // (blackhole / down) — skip silently instead of erroring,
     // matching the first-pass behaviour.
     if !deferred_nh.is_empty() {
-      let nh_map_2 = dump_nexthops(family.as_raw() as u8)?;
+      let nh_map_2 = dump_nexthops()?;
       for (rfamily, dst_len, dst, id) in deferred_nh {
         match resolve_nh_id(&nh_map_2, id) {
           None => return Err(rustix::io::Errno::INTR.into()),
@@ -1620,7 +1627,7 @@ where
     // resolved (Linux 5.3+ `ip nexthop`-managed indirection). On a
     // host with no nexthop subsystem this returns an empty map
     // cheaply.
-    let nh_map = dump_nexthops(family.as_raw() as u8)?;
+    let nh_map = dump_nexthops()?;
 
     let handle = Handle::new()?;
 
