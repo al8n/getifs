@@ -95,16 +95,30 @@ const _: () = assert!(core::mem::size_of::<RtMetricsLong>() == 112);
   target_pointer_width = "64"
 ))]
 const _: () = assert!(core::mem::size_of::<RtMsghdr>() == 152);
+#[cfg(all(
+  any(target_os = "freebsd", target_os = "dragonfly"),
+  target_pointer_width = "64"
+))]
+const _: () = {
+  use core::mem::offset_of;
+  assert!(offset_of!(RtMsghdr, rtm_msglen) == 0);
+  assert!(offset_of!(RtMsghdr, rtm_index) == 4);
+  assert!(offset_of!(RtMsghdr, rtm_flags) == 8);
+  assert!(offset_of!(RtMsghdr, rtm_addrs) == 12);
+  assert!(offset_of!(RtMsghdr, rtm_rmx) == 40);
+  assert!(offset_of!(RtMetricsLong, rmx_recvpipe) == 32);
+};
 
 // ---- NetBSD -----------------------------------------------------------
 //
-// NetBSD `<net/route.h>` (modern, NetBSD 9+):
+// NetBSD `<net/route.h>` (modern, NetBSD 9+, verified against
+// https://github.com/NetBSD/src/blob/trunk/sys/net/route.h):
 //
 //     struct rt_msghdr {
 //         u_short rtm_msglen;
 //         u_char  rtm_version;
 //         u_char  rtm_type;
-//         int     rtm_index;
+//         u_short rtm_index;          /* u_short, not int */
 //         int     rtm_flags;
 //         int     rtm_addrs;
 //         pid_t   rtm_pid;
@@ -129,17 +143,16 @@ const _: () = assert!(core::mem::size_of::<RtMsghdr>() == 152);
 //     };
 //
 // `rt_metrics` is 8 × u64 + 2 × time_t = 80 bytes (NetBSD `time_t` is
-// `int64_t`). The previous version of this file declared a 16-element
-// u64 array (128 bytes) and put `rmx_expire` at index 3 instead of 8;
-// that made `size_of::<RtMsghdr>()` 48 bytes too long, which caused
-// `parse_addrs` to start mid-sockaddr and surface as either
-// `InvalidData` or silently wrong route data.
+// `int64_t`).
 //
-// `rtm_index` and `rtm_inits` are `int` (not u_short / uint32_t) — a
-// 4-byte natural-alignment-padded field plays the same role as the
-// previous explicit `_pad_to_flags`, but reading it as `c_int` is
-// also correct on big-endian targets where reading a 4-byte field as
-// `u16` would pick up the high bytes (zero) and miss the index.
+// `rtm_index` is `u_short` followed by 2 bytes of compiler-inserted
+// padding to align `rtm_flags` on a 4-byte boundary. We declare it
+// as `u16` with an explicit `_pad_index` field so the read is correct
+// on big-endian NetBSD targets (sparc64, mips, powerpc): treating
+// `rtm_index` as `c_int` would interpret the kernel-zeroed padding
+// bytes as the high half of the index value, mangling the result on
+// big-endian. The total size and the offsets of every other field are
+// the same as before — only the read of `rtm_index` differs.
 
 #[cfg(target_os = "netbsd")]
 #[repr(C)]
@@ -147,7 +160,8 @@ pub(super) struct RtMsghdr {
   pub rtm_msglen: u16,
   pub rtm_version: u8,
   pub rtm_type: u8,
-  pub rtm_index: libc::c_int,
+  pub rtm_index: u16,
+  _pad_index: u16,
   pub rtm_flags: libc::c_int,
   pub rtm_addrs: libc::c_int,
   pub rtm_pid: libc::pid_t,
@@ -180,10 +194,30 @@ pub(super) struct RtMetricsU64 {
 // reach the trailing sockaddrs; a wrong size desyncs every route
 // record. NetBSD `time_t` is `int64_t`, so this assertion is true on
 // every supported NetBSD architecture.
+//
+// Also assert the offset of every field we read at runtime: a
+// reorder that happens to keep the total size constant but moves a
+// field would otherwise pass the size check while still corrupting
+// the read. This catches the previous `rtm_index: c_int` mistake
+// (where the size was right but the field was 4 bytes wide instead
+// of 2 + 2-byte pad).
 #[cfg(target_os = "netbsd")]
 const _: () = assert!(core::mem::size_of::<RtMetricsU64>() == 80);
 #[cfg(target_os = "netbsd")]
 const _: () = assert!(core::mem::size_of::<RtMsghdr>() == 120);
+#[cfg(target_os = "netbsd")]
+const _: () = {
+  use core::mem::offset_of;
+  assert!(offset_of!(RtMsghdr, rtm_msglen) == 0);
+  assert!(offset_of!(RtMsghdr, rtm_index) == 4);
+  assert!(offset_of!(RtMsghdr, rtm_flags) == 8);
+  assert!(offset_of!(RtMsghdr, rtm_addrs) == 12);
+  assert!(offset_of!(RtMsghdr, rtm_inits) == 32);
+  assert!(offset_of!(RtMsghdr, rtm_rmx) == 40);
+  assert!(offset_of!(RtMetricsU64, rmx_recvpipe) == 24);
+  assert!(offset_of!(RtMetricsU64, rmx_expire) == 64);
+  assert!(offset_of!(RtMetricsU64, rmx_pksent) == 72);
+};
 
 // ---- OpenBSD ----------------------------------------------------------
 //
@@ -259,6 +293,16 @@ const _: () = assert!(core::mem::size_of::<RtMetricsOpenBsd>() == 56);
 // struct 8-aligned, and rt_metrics starts u64-aligned).
 #[cfg(target_os = "openbsd")]
 const _: () = assert!(core::mem::size_of::<RtMsghdr>() == 96);
+#[cfg(target_os = "openbsd")]
+const _: () = {
+  use core::mem::offset_of;
+  assert!(offset_of!(RtMsghdr, rtm_msglen) == 0);
+  assert!(offset_of!(RtMsghdr, rtm_index) == 6);
+  assert!(offset_of!(RtMsghdr, rtm_addrs) == 12);
+  assert!(offset_of!(RtMsghdr, rtm_flags) == 16);
+  assert!(offset_of!(RtMsghdr, rtm_rmx) == 40);
+  assert!(offset_of!(RtMetricsOpenBsd, rmx_recvpipe) == 32);
+};
 
 // =====================================================================
 // ifma_msghdr (multicast group membership)
