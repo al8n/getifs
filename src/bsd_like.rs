@@ -775,7 +775,25 @@ where
   interface_addr_table(AF_UNSPEC, idx, f)
 }
 
-pub(super) fn interface_addr_table<T, F>(family: i32, idx: u32, mut f: F) -> io::Result<SmallVec<T>>
+pub(super) fn interface_addr_table<T, F>(family: i32, idx: u32, f: F) -> io::Result<SmallVec<T>>
+where
+  T: Net,
+  F: FnMut(&IpAddr) -> bool,
+{
+  let mut out = SmallVec::new();
+  interface_addr_table_into(family, idx, f, &mut out)?;
+  Ok(out)
+}
+
+/// Variant of [`interface_addr_table`] that pushes results into the
+/// caller's buffer. Used by `best_local_addrs()` to merge per-family
+/// walks without intermediate `SmallVec`s.
+pub(super) fn interface_addr_table_into<T, F>(
+  family: i32,
+  idx: u32,
+  mut f: F,
+  results: &mut SmallVec<T>,
+) -> io::Result<()>
 where
   T: Net,
   F: FnMut(&IpAddr) -> bool,
@@ -784,7 +802,6 @@ where
 
   unsafe {
     let buf = fetch(family, NET_RT_IFLIST, idx as i32)?;
-    let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {
@@ -829,7 +846,7 @@ where
       b = &b[len..];
     }
 
-    Ok(results)
+    Ok(())
   }
 }
 

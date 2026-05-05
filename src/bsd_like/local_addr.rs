@@ -9,16 +9,21 @@ use smallvec_wrapper::SmallVec;
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
   compat::RtMsghdr,
-  fetch, interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, invalid_message,
-  message_too_short, parse_addrs, IfNet, Ifv4Net, Ifv6Net, Net,
+  fetch, interface_addr_table_into, interface_addresses, interface_ipv4_addresses,
+  interface_ipv6_addresses, invalid_message, message_too_short, parse_addrs, IfNet, Ifv4Net,
+  Ifv6Net, Net,
 };
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
-  best_local_addrs_in(AF_INET)
+  let mut out = SmallVec::new();
+  best_local_addrs_in(AF_INET, &mut out)?;
+  Ok(out)
 }
 
 pub(crate) fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
-  best_local_addrs_in(AF_INET6)
+  let mut out = SmallVec::new();
+  best_local_addrs_in(AF_INET6, &mut out)?;
+  Ok(out)
 }
 
 pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
@@ -30,19 +35,18 @@ pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
   // AF_UNSPEC walk, hosts whose only default route uses that encoding
   // would silently get `Ok([])` from this call. Same tradeoff as
   // `route_table_by_filter` — two sysctl calls, one consistent answer.
+  //
+  // Both walks push into one shared `SmallVec<IfNet>` via the `_into`
+  // helpers — the kernel only emits the requested family's addresses,
+  // and `IfNet`'s `Net::try_from` accepts both, so this avoids the
+  // intermediate per-family allocations.
   let mut out: SmallVec<IfNet> = SmallVec::new();
-  let v4 = best_local_addrs_in::<Ifv4Net>(AF_INET)?;
-  let v6 = best_local_addrs_in::<Ifv6Net>(AF_INET6)?;
-  for r in v4 {
-    out.push(IfNet::V4(r));
-  }
-  for r in v6 {
-    out.push(IfNet::V6(r));
-  }
+  best_local_addrs_in(AF_INET, &mut out)?;
+  best_local_addrs_in(AF_INET6, &mut out)?;
   Ok(out)
 }
 
-fn best_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
+fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result<()> {
   // First get the default route to find the interface index
   let routes = fetch(family, NET_RT_DUMP, 0)?;
   let mut best_ifindex = None;
@@ -120,10 +124,11 @@ fn best_local_addrs_in<T: Net>(family: i32) -> io::Result<SmallVec<T>> {
     }
   }
 
-  // Only pass the interface index if we found a valid default route
+  // Only pass the interface index if we found a valid default route.
+  // Push into the caller-provided buffer instead of allocating.
   match best_ifindex {
-    Some(idx) => super::interface_addr_table(family, idx as u32, local_ip_filter),
-    None => Ok(SmallVec::new()),
+    Some(idx) => interface_addr_table_into(family, idx as u32, local_ip_filter, out),
+    None => Ok(()),
   }
 }
 

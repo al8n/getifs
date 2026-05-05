@@ -1,6 +1,8 @@
 use std::{io, net::IpAddr};
 
-use libc::{NET_RT_DUMP, RTAX_DST, RTAX_GATEWAY, RTAX_NETMASK, RTF_UP, RTM_GET};
+use libc::{
+  NET_RT_DUMP, RTAX_DST, RTAX_GATEWAY, RTAX_NETMASK, RTF_BLACKHOLE, RTF_REJECT, RTF_UP, RTM_GET,
+};
 
 use super::{compat::RtMsghdr, fetch, message_too_short, parse_addrs};
 
@@ -82,12 +84,18 @@ where
       let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 
       // Match the public-API contract: `route_table` returns
-      // unicast/local routes, not every kernel routing entry. `RTF_UP`
-      // weeds out down/expired routes the kernel keeps for tracking;
-      // multicast destinations are filtered downstream in
+      // unicast/local routes, not every kernel routing entry.
+      //   - `RTF_UP == 0`: down/expired routes the kernel keeps for
+      //     tracking. Skip.
+      //   - `RTF_REJECT`: deliberately drops packets with ICMP
+      //     unreachable. Up, ordinary unicast destination, but the
+      //     kernel never delivers traffic via it.
+      //   - `RTF_BLACKHOLE`: silent drop. Same shape as REJECT.
+      // Multicast destinations are filtered downstream in
       // `bsd_like.rs::build_routev4` / `build_routev6` (where we know
       // the parsed family).
-      if (rtm.rtm_flags & RTF_UP) == 0 {
+      let unusable = RTF_REJECT | RTF_BLACKHOLE;
+      if (rtm.rtm_flags & RTF_UP) == 0 || (rtm.rtm_flags & unusable) != 0 {
         src = &src[l..];
         continue;
       }

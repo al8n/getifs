@@ -282,11 +282,25 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
   }
 }
 
-pub(super) fn netlink_addr<N, F>(
+pub(super) fn netlink_addr<N, F>(family: AddressFamily, ifi: u32, f: F) -> io::Result<SmallVec<N>>
+where
+  N: Net,
+  F: FnMut(&IpAddr) -> bool,
+{
+  let mut out = SmallVec::new();
+  netlink_addr_into(family, ifi, f, &mut out)?;
+  Ok(out)
+}
+
+/// Same as `netlink_addr` but pushes results into the caller's buffer
+/// instead of allocating a fresh one. Used by `best_local_addrs()` to
+/// merge per-family walks without three intermediate `SmallVec`s.
+pub(super) fn netlink_addr_into<N, F>(
   family: AddressFamily,
   ifi: u32,
   mut f: F,
-) -> io::Result<SmallVec<N>>
+  addrs: &mut SmallVec<N>,
+) -> io::Result<()>
 where
   N: Net,
   F: FnMut(&IpAddr) -> bool,
@@ -304,8 +318,6 @@ where
     // Receive and process messages
     let page_size = rustix::param::page_size();
     let mut rb = vec![0u8; page_size];
-
-    let mut addrs = SmallVec::new();
 
     'outer: loop {
       let nr = handle.recv(&mut rb)?;
@@ -404,11 +416,26 @@ where
       }
     }
 
-    Ok(addrs)
+    Ok(())
   }
 }
 
 pub fn netlink_best_local_addrs<N>(family: AddressFamily) -> io::Result<SmallVec<N>>
+where
+  N: Net,
+{
+  let mut out = SmallVec::new();
+  netlink_best_local_addrs_into(family, &mut out)?;
+  Ok(out)
+}
+
+/// Variant of [`netlink_best_local_addrs`] that pushes into the
+/// caller's buffer. Lets the union `best_local_addrs()` walk both
+/// families without allocating intermediate per-family `SmallVec`s.
+pub fn netlink_best_local_addrs_into<N>(
+  family: AddressFamily,
+  out: &mut SmallVec<N>,
+) -> io::Result<()>
 where
   N: Net,
 {
@@ -458,7 +485,17 @@ where
         }
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => break 'outer,
+          NLMSG_DONE => {
+            // Mirror `netlink_walk_routes`: surface EINTR if the
+            // dump was interrupted by routing-table churn (DHCP /
+            // VPN / interface flap mid-walk). Selecting a best
+            // interface from a partial snapshot would be a silent
+            // wrong answer; EINTR lets the caller retry.
+            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
+              return Err(rustix::io::Errno::INTR.into());
+            }
+            break 'outer;
+          }
           NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
           val if val == RTM_NEWROUTE => {
             // See `netlink_interface` for why this is bounded to `hlen`.
@@ -618,10 +655,11 @@ where
       }
     }
 
-    // Get addresses only from the best interface
+    // Get addresses only from the best interface, pushing into the
+    // caller-provided buffer.
     match best_ifindex {
-      Some(idx) => netlink_addr(family, idx, local_ip_filter),
-      None => Ok(SmallVec::new()),
+      Some(idx) => netlink_addr_into(family, idx, local_ip_filter, out),
+      None => Ok(()),
     }
   }
 }
