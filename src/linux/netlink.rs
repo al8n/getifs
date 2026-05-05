@@ -1648,13 +1648,15 @@ where
             }
 
             let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
-            // `(ifindex, addr)` pairs collected from this route. The
-            // pre-existing `rta` (typically `RTA_GATEWAY`) populates
-            // one entry; `RTA_MULTIPATH` and `RTA_NH_ID` fan out to
-            // many. The route walker would otherwise miss every
-            // gateway on ECMP / `ip nexthop`-based hosts because the
-            // top-level `RTA_GATEWAY` is absent on those encodings.
-            let mut tmp: SmallVec<(u32, IpAddr)> = SmallVec::new();
+            // Top-level `rta` matches all share `current_ifi` from
+            // RTA_OIF, so we only need to remember the address — the
+            // ifindex is back-filled at emit time. Stays at the
+            // smaller `IpAddr` element size (17 bytes vs 24 for the
+            // (u32, IpAddr) pair) so the inline buffer doesn't bloat
+            // on the hot path. Per-nexthop entries from RTA_MULTIPATH
+            // and RTA_NH_ID carry their own ifindex and are emitted
+            // straight into `gateways`, bypassing this vec.
+            let mut tmp_addrs: SmallVec<IpAddr> = SmallVec::new();
             let mut current_ifi = 0;
             let mut multipath: Option<&[u8]> = None;
             let mut nh_id: Option<u32> = None;
@@ -1689,10 +1691,7 @@ where
                     ));
 
                     if f(&addr) {
-                      // Pair with `current_ifi` later — fields can
-                      // arrive in any order, so we record the addr
-                      // and back-fill the index after the walk.
-                      tmp.push((0, addr));
+                      tmp_addrs.push(addr);
                     }
                   }
                   (AddressFamily::INET6, AddressFamily::INET6)
@@ -1704,7 +1703,7 @@ where
                     )));
 
                     if f(&addr) {
-                      tmp.push((0, addr));
+                      tmp_addrs.push(addr);
                     }
                   }
                   _ => {}
@@ -1727,22 +1726,41 @@ where
               rtattr_buf = &rtattr_buf[alen..];
             }
 
-            // Back-fill the top-level RTA_OIF index onto entries
-            // collected from the requested top-level attribute.
-            for entry in tmp.iter_mut() {
-              entry.0 = current_ifi;
+            // Inline closure for the dedup + try_from + push step.
+            // Avoids three duplicate copies across the top-level /
+            // multipath / nh_id paths and keeps the per-path code
+            // tight.
+            //
+            // It's a normal local closure — no boxing — so the borrow
+            // checker requires we drop the `gateways` / `seen`
+            // borrows before the next path runs. Each emit block is
+            // a separate statement, which is enough.
+            let mut emit = |idx: u32, raw: IpAddr| {
+              if let Some(addr) = A::try_from(idx, raw) {
+                if seen.insert((addr.index(), addr.addr())) {
+                  gateways.push(addr);
+                }
+              }
+            };
+
+            // Top-level matches share `current_ifi`.
+            for raw in tmp_addrs.drain(..) {
+              emit(current_ifi, raw);
             }
 
             // ECMP: each `struct rtnexthop` carries its own oif and
             // sub-attrs. Pull the gateway sub-attr per nexthop —
             // important on multi-WAN hosts where the only gateway
             // information lives inside RTA_MULTIPATH and the
-            // top-level lookup picks up nothing.
+            // top-level lookup picks up nothing. Per-nexthop entries
+            // emit straight into `gateways` via `emit`, bypassing
+            // `tmp_addrs` so we don't pay the size growth of a
+            // (u32, IpAddr) inline buffer for them either.
             if rta == RTA_GATEWAY {
               if let Some(mp) = multipath {
                 multipath_gateways_into(rtm_header.rtm_family, mp, &mut |idx, gw| {
                   if f(&gw) {
-                    tmp.push((idx, gw));
+                    emit(idx, gw);
                   }
                 });
               }
@@ -1754,7 +1772,7 @@ where
                   for (oif, maybe_gw) in resolved {
                     if let Some(gw) = maybe_gw {
                       if f(&gw) {
-                        tmp.push((oif, gw));
+                        emit(oif, gw);
                       }
                     }
                   }
@@ -1765,14 +1783,6 @@ where
                 // returning `Ok([])` rather than `Err` on transient
                 // races) and there's no per-call retry pass like
                 // `netlink_walk_routes` has.
-              }
-            }
-
-            for (idx, raw) in tmp {
-              if let Some(addr) = A::try_from(idx, raw) {
-                if seen.insert((addr.index(), addr.addr())) {
-                  gateways.push(addr);
-                }
               }
             }
           }
