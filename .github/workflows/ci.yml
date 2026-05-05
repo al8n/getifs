@@ -290,10 +290,14 @@ jobs:
             cargo test --all-features -- --nocapture
 
   # DragonFlyBSD's `pkg` ships rust 1.85.x (as of 2026-05), which is
-  # below this crate's advertised MSRV (1.89, driven by smol_str
-  # 0.3.6). We install rust via rustup-init in the VM prepare step
-  # to pick up a current toolchain; that bypasses the pkg-version
-  # ceiling so `cargo build` / `cargo test` actually run.
+  # below the crate's advertised MSRV (1.89, driven by smol_str
+  # 0.3.6's MSRV bump). The Cargo.toml deps are kept clean — real
+  # DragonFly users can install a newer toolchain (rustup, source
+  # build, etc.) and use the latest smol_str — but the pkg-shipped
+  # `rust` we install here is constrained to 1.85, so we pin
+  # smol_str to 0.3.2 (the last 0.3.x without a rust-version
+  # requirement) in this CI run only via `cargo update --precise`.
+  # Drop the `cargo update` line once DragonFly's pkg catches up.
   #
   # The multicast surface on DragonFly is intentionally a stub
   # (returns `Ok([])`) because the kernel doesn't expose
@@ -304,7 +308,6 @@ jobs:
     name: test (dragonflybsd)
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - name: Test on DragonFlyBSD
@@ -313,9 +316,9 @@ jobs:
           usesh: true
           copyback: false
           prepare: |
-            pkg install -y curl gcc
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+            pkg install -y rust
           run: |
-            . "$HOME/.cargo/env"
+            cargo generate-lockfile
+            cargo update -p smol_str --precise 0.3.2
             cargo build --all-features
             cargo test --all-features -- --nocapture
