@@ -64,6 +64,16 @@ const RTA_NH_ID: u16 = netlink::rtattr_type_t::RTA_NH_ID as u16;
 // to skip the route, rather than emitting it as a directly-connected
 // route (which is what reading only `RTA_GATEWAY` would do).
 const RTA_VIA: u16 = netlink::rtattr_type_t::RTA_VIA as u16;
+// `RTA_PREF` carries the RFC 4191 router-preference flag (`high` /
+// `medium` / `low`) that an IPv6 default route picks up when it's
+// installed by an RA. The kernel's IPv6 route selection uses this as
+// a tie-breaker between equal-metric defaults — without it, two
+// equal-metric defaults (the common dual-router IPv6 setup) extend
+// `best_oifs` together, including a backup router the kernel itself
+// would not choose for outbound traffic. IPv4 routes never carry the
+// attribute; absence falls back to MEDIUM, the documented default,
+// so v4 selection is unchanged.
+const RTA_PREF: u16 = netlink::rtattr_type_t::RTA_PREF as u16;
 
 // `struct rtnexthop` flag bits from <linux/rtnetlink.h>. Nexthops with
 // any of these set are not currently usable, so the multipath walker
@@ -128,6 +138,38 @@ fn table_rank_for(table_id: u32) -> u8 {
   }
 }
 
+/// RFC 4191 router-preference rank for IPv6 default routes, lex-ready
+/// (smaller wins). The wire values from
+/// `include/uapi/linux/icmpv6.h` are non-monotonic
+/// (`HIGH = 0x1`, `MEDIUM = 0x0`, `LOW = 0x3`, plus the reserved
+/// `INVALID = 0x2`), which we can't sort directly — remap to a clean
+/// `HIGH < MEDIUM < LOW` order so `(table_rank, metric, pref_rank)`
+/// lex-compare matches the kernel's tie-break for equal-metric IPv6
+/// defaults.
+///
+/// Absence of `RTA_PREF` and reserved/unknown values both fold to
+/// MEDIUM — that's the kernel's default and the value applied to
+/// every IPv4 route (no preference attribute), so v4 selection is
+/// unaffected by introducing this tier.
+#[inline]
+fn pref_rank_for(pref: u8) -> u8 {
+  // Constants from `include/uapi/linux/icmpv6.h`
+  // (`enum icmpv6_router_pref`). MEDIUM (0x0) and INVALID (0x2) are
+  // covered by the fall-through arm, so they don't need named
+  // constants here.
+  const ICMPV6_ROUTER_PREF_HIGH: u8 = 0x1;
+  const ICMPV6_ROUTER_PREF_LOW: u8 = 0x3;
+  match pref {
+    ICMPV6_ROUTER_PREF_HIGH => 0,
+    ICMPV6_ROUTER_PREF_LOW => 2,
+    // MEDIUM (0x0) and INVALID (0x2) / unknown / absent all land
+    // here. The kernel uses MEDIUM as the default; treating
+    // unknown as MEDIUM is conservative — it can't downgrade a
+    // valid route below LOW or upgrade it above HIGH.
+    _ => 1,
+  }
+}
+
 const IFA_LOCAL: u32 = netlink::IFA_LOCAL as u32;
 const IFA_ADDRESS: u32 = netlink::IFA_ADDRESS as u32;
 
@@ -185,6 +227,23 @@ impl Handle {
     Ok(nr)
   }
 }
+
+/// Receive-buffer size for route / nexthop dumps.
+///
+/// A single `RTM_NEWROUTE` message can comfortably exceed 4 KiB on
+/// hosts with large ECMP `RTA_MULTIPATH` lists or `RTM_NEWNEXTHOP`
+/// dumps with deep `NHA_GROUP` payloads (8 bytes per member). The
+/// per-interface and per-address walks stay on a page (their messages
+/// are small and bounded), but route walks must accept any single
+/// message the kernel produces — the OS truncates oversize messages
+/// silently, surfacing later as `nlmsg_len > nr` → spurious
+/// `EINVAL` aborting the whole walk.
+///
+/// `iproute2` uses 32 KiB for the same dumps; matching that gives
+/// plenty of headroom for ECMP across dozens of nexthops without
+/// resorting to the more invasive `recvmsg` + `MSG_TRUNC` retry
+/// pattern.
+const ROUTE_RECV_BUF_SIZE: usize = 32 * 1024;
 
 pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<TinyVec<Interface>> {
   unsafe {
@@ -505,12 +564,12 @@ where
     // `netlink_walk_routes`. A persistent miss surfaces as `EINTR` so
     // the caller can retry rather than getting a silently wrong
     // best-interface selection.
-    // `(table_rank, metric, nh_id)`. `table_rank` carries Linux RPDB
-    // precedence (`local` first, then `main`, then `default`), so a
-    // deferred-retry candidate from the `default` table can never
-    // beat a `main` candidate even with a lower numeric metric. See
-    // `table_rank_for` below.
-    let mut deferred_best: Vec<(u8, u32, u32)> = Vec::new();
+    // `(table_rank, metric, pref_rank, nh_id)`. `table_rank` carries
+    // Linux RPDB precedence (`local` < `main` < `default`); within
+    // the same table, lower metric wins; within the same metric,
+    // lower pref_rank wins (HIGH < MEDIUM < LOW per RFC 4191). See
+    // `table_rank_for` and `pref_rank_for` below.
+    let mut deferred_best: Vec<(u8, u32, u8, u32)> = Vec::new();
 
     let handle = Handle::new()?;
 
@@ -522,8 +581,9 @@ where
     // netlink walkers use.
     let lsa = handle.sock()?;
 
-    let page_size = rustix::param::page_size();
-    let mut rb = vec![0u8; page_size];
+    // Route walks must accept any single message the kernel emits —
+    // see `ROUTE_RECV_BUF_SIZE` for why a page is too small here.
+    let mut rb = vec![0u8; ROUTE_RECV_BUF_SIZE];
     // Set of interfaces tied at `best_metric`. ECMP / nexthop-object
     // groups can list multiple usable nexthops behind a single route,
     // and equal-metric default routes on different interfaces are
@@ -543,6 +603,10 @@ where
     // do that. The lex key matches kernel selection exactly.
     let mut best_rank: u8 = u8::MAX;
     let mut best_metric: u32 = u32::MAX;
+    // Lex tier: RFC 4191 router preference rank. See `pref_rank_for`.
+    // `u8::MAX` is the "no candidate yet" sentinel; any real route
+    // will produce a strictly smaller value.
+    let mut best_pref_rank: u8 = u8::MAX;
 
     'outer: loop {
       let nr = handle.recv(&mut rb)?;
@@ -683,6 +747,11 @@ where
             // default route is suppressed from `best_local_*` for
             // the same reason it's suppressed from `route_table*`.
             let mut dst_malformed = false;
+            // RFC 4191 router preference for IPv6 RA-installed
+            // defaults. Kernel default (and the value applied to
+            // every IPv4 route, which never carries the attribute)
+            // is `MEDIUM = 0x0`. See `pref_rank_for`.
+            let mut current_pref: u8 = 0;
 
             while rtattr_buf.len() >= RtAttr::SIZE {
               let attr = RtAttr {
@@ -738,6 +807,9 @@ where
                   // in depth.
                   has_src_constraint = true;
                 }
+                RTA_PREF if !data.is_empty() => {
+                  current_pref = data[0];
+                }
                 _ => {}
               }
 
@@ -790,7 +862,8 @@ where
                   None => {
                     let metric = current_metric.unwrap_or(0);
                     let rank = table_rank_for(table_id);
-                    deferred_best.push((rank, metric, id));
+                    let pref_rank = pref_rank_for(current_pref);
+                    deferred_best.push((rank, metric, pref_rank, id));
                     received = &received[l..];
                     continue;
                   }
@@ -820,11 +893,13 @@ where
             if !current_oifs.is_empty() {
               let metric = current_metric.unwrap_or(0);
               let rank = table_rank_for(table_id);
-              let cur_key = (rank, metric);
-              let best_key = (best_rank, best_metric);
+              let pref_rank = pref_rank_for(current_pref);
+              let cur_key = (rank, metric, pref_rank);
+              let best_key = (best_rank, best_metric, best_pref_rank);
               if cur_key < best_key {
                 best_rank = rank;
                 best_metric = metric;
+                best_pref_rank = pref_rank;
                 best_oifs.clear();
                 best_oifs.extend(current_oifs.iter().copied());
               } else if cur_key == best_key {
@@ -849,7 +924,7 @@ where
     // pass we collect every resolved oif, not just the first.
     if !deferred_best.is_empty() {
       let nh_map_2 = dump_nexthops()?;
-      for (rank, metric, id) in deferred_best {
+      for (rank, metric, pref_rank, id) in deferred_best {
         match resolve_nh_id(&nh_map_2, id) {
           None => return Err(rustix::io::Errno::INTR.into()),
           Some(resolved) => {
@@ -860,11 +935,12 @@ where
             if oifs.is_empty() {
               continue;
             }
-            let cur_key = (rank, metric);
-            let best_key = (best_rank, best_metric);
+            let cur_key = (rank, metric, pref_rank);
+            let best_key = (best_rank, best_metric, best_pref_rank);
             if cur_key < best_key {
               best_rank = rank;
               best_metric = metric;
+              best_pref_rank = pref_rank;
               best_oifs.clear();
               best_oifs.extend(oifs);
             } else if cur_key == best_key {
@@ -953,8 +1029,10 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
     handle.send_bytes(&req)?;
 
     let lsa = handle.sock()?;
-    let page_size = rustix::param::page_size();
-    let mut rb = vec![0u8; page_size];
+    // Nexthop dumps can carry deep `NHA_GROUP` payloads (8 bytes per
+    // member); use the route-walk buffer size for the same reason
+    // detailed at `ROUTE_RECV_BUF_SIZE`.
+    let mut rb = vec![0u8; ROUTE_RECV_BUF_SIZE];
 
     let mut map: HashMap<u32, NexthopInfo> = HashMap::new();
 
@@ -1202,8 +1280,9 @@ where
     handle.send(&req)?;
 
     let lsa = handle.sock()?;
-    let page_size = rustix::param::page_size();
-    let mut rb = vec![0u8; page_size];
+    // See `ROUTE_RECV_BUF_SIZE`: a page is too small for routes that
+    // carry large `RTA_MULTIPATH` ECMP payloads.
+    let mut rb = vec![0u8; ROUTE_RECV_BUF_SIZE];
 
     'outer: loop {
       let nr = handle.recv(&mut rb)?;
@@ -1764,9 +1843,9 @@ where
     // Get socket name
     let lsa = handle.sock()?;
 
-    // Receive and process messages
-    let page_size = rustix::param::page_size();
-    let mut rb = vec![0u8; page_size];
+    // Receive and process messages. `rt_generic_addrs` walks routes
+    // with `RTA_MULTIPATH` payloads — see `ROUTE_RECV_BUF_SIZE`.
+    let mut rb = vec![0u8; ROUTE_RECV_BUF_SIZE];
     let mut gateways = SmallVec::new();
     // Policy-routing tables and multipath/ECMP entries can surface the
     // same gateway on multiple route messages. Dedup via a HashSet
