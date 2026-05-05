@@ -1451,26 +1451,36 @@ fn walk_multipath<F>(
       continue;
     }
 
-    // Decode sub-attributes. We track three states:
+    // Decode sub-attributes. We track four skip states:
     //   - `nh_gw = Some(addr)`: parsed RTA_GATEWAY → emit with this gw.
-    //   - `nh_gw = None, nh_gw_malformed = false`: no gateway sub-attr
-    //     at all → on-link nexthop, emit with `gw = None`.
+    //   - `nh_gw = None`, no skip flag set: no gateway sub-attr at
+    //     all → on-link nexthop, emit with `gw = None`.
     //   - `nh_gw_malformed = true`: RTA_GATEWAY sub-attr was present
-    //     but parse failed → skip this nexthop (treating malformed
-    //     as on-link would silently downgrade the route to direct).
+    //     but parse_rta_ipaddr returned None → skip (treating
+    //     malformed as on-link would silently downgrade the route
+    //     to direct).
     //   - `nh_has_via = true`: the nexthop carries an `RTA_VIA`
     //     cross-family gateway, which `IpRoute` can't represent →
-    //     skip this nexthop (matches the top-level RTA_VIA rule;
-    //     emitting it without a gateway would lie about
-    //     reachability).
+    //     skip (matches the top-level RTA_VIA rule).
+    //   - `nh_truncated = true`: the sub-attribute walk encountered
+    //     a length that wouldn't fit the remaining buffer (i.e. the
+    //     nexthop's claimed size was inconsistent with its
+    //     contents). Without this guard, breaking out of the walk
+    //     mid-stream and falling through to `on_route` with whatever
+    //     state we'd parsed so far could turn a truncated gateway
+    //     into a fake on-link route — strictly worse than a clean
+    //     skip, since callers can't distinguish corrupted ECMP data
+    //     from a real direct nexthop.
     let mut nh_gw: Option<IpAddr> = None;
     let mut nh_gw_malformed = false;
     let mut nh_has_via = false;
+    let mut nh_truncated = false;
     let mut sub = &buf[RTNH_SIZE..nh_len];
     while sub.len() >= RtAttr::SIZE {
       let attr_len = u16::from_ne_bytes(sub[..2].try_into().unwrap()) as usize;
       let attr_ty = u16::from_ne_bytes(sub[2..4].try_into().unwrap());
       if attr_len < RtAttr::SIZE || attr_len > sub.len() {
+        nh_truncated = true;
         break;
       }
       if attr_ty == RTA_GATEWAY {
@@ -1485,7 +1495,7 @@ fn walk_multipath<F>(
       sub = &sub[alen..];
     }
 
-    if nh_ifindex != 0 && !nh_gw_malformed && !nh_has_via {
+    if nh_ifindex != 0 && !nh_gw_malformed && !nh_has_via && !nh_truncated {
       on_route(rtm_family, nh_ifindex, dst_len, dst, nh_gw);
     }
 
