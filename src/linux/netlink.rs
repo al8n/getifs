@@ -55,6 +55,15 @@ const RTA_TABLE: u16 = netlink::rtattr_type_t::RTA_TABLE as u16;
 // `oif == 0` guard. Decoding nexthop objects is documented as a
 // known gap in `route_table`.
 const RTA_NH_ID: u16 = netlink::rtattr_type_t::RTA_NH_ID as u16;
+// RTA_VIA carries a cross-family gateway: an `__kernel_sa_family_t`
+// followed by the address payload, used when the nexthop's family
+// differs from the route's family (e.g. an IPv4 route via an IPv6
+// link-local nexthop). `IpRoute` only models same-family gateways
+// (`Ipv4Route::gateway: Option<Ipv4Addr>`, etc.), so we can't faithfully
+// represent these — the walker treats RTA_VIA's presence as a marker
+// to skip the route, rather than emitting it as a directly-connected
+// route (which is what reading only `RTA_GATEWAY` would do).
+const RTA_VIA: u16 = netlink::rtattr_type_t::RTA_VIA as u16;
 
 // `struct rtnexthop` flag bits from <linux/rtnetlink.h>. Nexthops with
 // any of these set are not currently usable, so the multipath walker
@@ -1175,6 +1184,11 @@ where
             let mut dst_present = false;
             let mut dst_malformed = false;
             let mut gw_malformed = false;
+            // Set true when the route carries a cross-family
+            // `RTA_VIA`. See the constant's doc comment for why we
+            // skip these — the route walker can't represent a
+            // mismatched-family gateway with `IpRoute`.
+            let mut has_via = false;
             // Linux returns the full table id either inline in
             // `rtm_table` (values 0..=255) or via an RTA_TABLE
             // attribute when the id exceeds 255 — the kernel sets
@@ -1225,6 +1239,14 @@ where
                     gw_malformed = true;
                   }
                 }
+                RTA_VIA => {
+                  // Cross-family gateway. `IpRoute` can't represent
+                  // an IPv4 route with an IPv6 next-hop or vice
+                  // versa, and treating the route as on-link
+                  // (`gw = None`) would silently misroute. Mark and
+                  // skip after the walk.
+                  has_via = true;
+                }
                 RTA_MULTIPATH => {
                   multipath = Some(data);
                 }
@@ -1257,7 +1279,11 @@ where
             //     malformed gateway as `None` would silently
             //     downgrade the route to "on-link", which is a
             //     different routing decision.
-            if dst_malformed || gw_malformed || (dst.is_none() && rtm_header.rtm_dst_len != 0) {
+            if dst_malformed
+              || gw_malformed
+              || has_via
+              || (dst.is_none() && rtm_header.rtm_dst_len != 0)
+            {
               received = &received[l..];
               continue;
             }
@@ -1562,6 +1588,12 @@ where
   F: FnMut(&IpAddr) -> bool,
 {
   unsafe {
+    // Dump nexthop objects up-front so RTA_NH_ID routes can be
+    // resolved (Linux 5.3+ `ip nexthop`-managed indirection). On a
+    // host with no nexthop subsystem this returns an empty map
+    // cheaply.
+    let nh_map = dump_nexthops(family.as_raw() as u8)?;
+
     let handle = Handle::new()?;
 
     // Create and send netlink request for routes
@@ -1616,8 +1648,16 @@ where
             }
 
             let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
-            let mut tmp_addrs = SmallVec::new();
+            // `(ifindex, addr)` pairs collected from this route. The
+            // pre-existing `rta` (typically `RTA_GATEWAY`) populates
+            // one entry; `RTA_MULTIPATH` and `RTA_NH_ID` fan out to
+            // many. The route walker would otherwise miss every
+            // gateway on ECMP / `ip nexthop`-based hosts because the
+            // top-level `RTA_GATEWAY` is absent on those encodings.
+            let mut tmp: SmallVec<(u32, IpAddr)> = SmallVec::new();
             let mut current_ifi = 0;
+            let mut multipath: Option<&[u8]> = None;
+            let mut nh_id: Option<u32> = None;
             while rtattr_buf.len() >= RtAttr::SIZE {
               let attr = RtAttr {
                 len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
@@ -1649,7 +1689,10 @@ where
                     ));
 
                     if f(&addr) {
-                      tmp_addrs.push(addr);
+                      // Pair with `current_ifi` later — fields can
+                      // arrive in any order, so we record the addr
+                      // and back-fill the index after the walk.
+                      tmp.push((0, addr));
                     }
                   }
                   (AddressFamily::INET6, AddressFamily::INET6)
@@ -1661,7 +1704,7 @@ where
                     )));
 
                     if f(&addr) {
-                      tmp_addrs.push(addr);
+                      tmp.push((0, addr));
                     }
                   }
                   _ => {}
@@ -1672,14 +1715,61 @@ where
                     current_ifi = idx;
                   }
                 }
+                RTA_MULTIPATH => {
+                  multipath = Some(data);
+                }
+                RTA_NH_ID if data.len() >= 4 => {
+                  nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+                }
                 _ => {}
               }
 
               rtattr_buf = &rtattr_buf[alen..];
             }
 
-            for raw in tmp_addrs {
-              if let Some(addr) = A::try_from(current_ifi, raw) {
+            // Back-fill the top-level RTA_OIF index onto entries
+            // collected from the requested top-level attribute.
+            for entry in tmp.iter_mut() {
+              entry.0 = current_ifi;
+            }
+
+            // ECMP: each `struct rtnexthop` carries its own oif and
+            // sub-attrs. Pull the gateway sub-attr per nexthop —
+            // important on multi-WAN hosts where the only gateway
+            // information lives inside RTA_MULTIPATH and the
+            // top-level lookup picks up nothing.
+            if rta == RTA_GATEWAY {
+              if let Some(mp) = multipath {
+                multipath_gateways_into(rtm_header.rtm_family, mp, &mut |idx, gw| {
+                  if f(&gw) {
+                    tmp.push((idx, gw));
+                  }
+                });
+              }
+
+              // Nexthop-object: resolve via the up-front dump. Each
+              // resolved leaf contributes one `(oif, gw)` pair.
+              if let Some(id) = nh_id {
+                if let Some(resolved) = resolve_nh_id(&nh_map, id) {
+                  for (oif, maybe_gw) in resolved {
+                    if let Some(gw) = maybe_gw {
+                      if f(&gw) {
+                        tmp.push((oif, gw));
+                      }
+                    }
+                  }
+                }
+                // `None` (id absent from snapshot) is silently
+                // skipped here — gateway enumeration is best-effort
+                // by design (matches the historical contract of
+                // returning `Ok([])` rather than `Err` on transient
+                // races) and there's no per-call retry pass like
+                // `netlink_walk_routes` has.
+              }
+            }
+
+            for (idx, raw) in tmp {
+              if let Some(addr) = A::try_from(idx, raw) {
                 if seen.insert((addr.index(), addr.addr())) {
                   gateways.push(addr);
                 }
@@ -1694,6 +1784,51 @@ where
     }
 
     Ok(gateways)
+  }
+}
+
+/// Walk an `RTA_MULTIPATH` payload and call `sink(oif, gateway)` for
+/// each usable nexthop that has an `RTA_GATEWAY` sub-attribute.
+/// Skips nexthops with `RTNH_F_DEAD / RTNH_F_LINKDOWN /
+/// RTNH_F_UNRESOLVED`, an `oif` of zero, or no gateway sub-attr.
+fn multipath_gateways_into<F>(rtm_family: u8, mut buf: &[u8], sink: &mut F)
+where
+  F: FnMut(u32, IpAddr),
+{
+  const RTNH_SIZE: usize = 8;
+  let unusable = RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_UNRESOLVED;
+  while buf.len() >= RTNH_SIZE {
+    let nh_len = u16::from_ne_bytes(buf[..2].try_into().unwrap()) as usize;
+    if nh_len < RTNH_SIZE || nh_len > buf.len() {
+      break;
+    }
+    let nh_flags = buf[2];
+    let nh_ifindex = i32::from_ne_bytes(buf[4..8].try_into().unwrap()) as u32;
+
+    if nh_flags & unusable == 0 && nh_ifindex != 0 {
+      // Walk sub-attributes for RTA_GATEWAY.
+      let mut sub = &buf[RTNH_SIZE..nh_len];
+      while sub.len() >= RtAttr::SIZE {
+        let attr_len = u16::from_ne_bytes(sub[..2].try_into().unwrap()) as usize;
+        let attr_ty = u16::from_ne_bytes(sub[2..4].try_into().unwrap());
+        if attr_len < RtAttr::SIZE || attr_len > sub.len() {
+          break;
+        }
+        if attr_ty == RTA_GATEWAY {
+          if let Some(gw) = parse_rta_ipaddr(rtm_family, &sub[RtAttr::SIZE..attr_len]) {
+            sink(nh_ifindex, gw);
+          }
+        }
+        let alen = rta_align_of(attr_len).min(sub.len());
+        sub = &sub[alen..];
+      }
+    }
+
+    let nh_aligned = rta_align_of(nh_len).min(buf.len());
+    if nh_aligned == 0 {
+      break;
+    }
+    buf = &buf[nh_aligned..];
   }
 }
 
