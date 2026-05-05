@@ -134,11 +134,21 @@ jobs:
           path: coverage/netbsd/cobertura.xml
 
   upload-codecov:
-    # `needs:` waits on every coverage producer. BSD jobs are skipped on
-    # PR via their `if:` — GitHub Actions treats a skipped dependency as
-    # successful, so `upload-codecov` still runs on PRs with just the
-    # tarpaulin Linux/macOS/Windows reports.
+    # `needs:` waits on every coverage producer. BSD jobs are skipped
+    # on PR via their `if:` — and contrary to what the previous
+    # comment here claimed, GitHub Actions treats a skipped
+    # dependency as cause to skip downstream jobs UNLESS the
+    # downstream job explicitly opts in. The `if:` below
+    # (`always() && !cancelled()`) does that opt-in: run as long as
+    # the workflow wasn't cancelled, regardless of which producers
+    # ran or were skipped. The `download-artifact@v6` step then picks
+    # up whatever artifacts were actually produced (PR runs get the
+    # tarpaulin Linux/macOS/Windows trio; push/dispatch runs also get
+    # the freebsd + netbsd reports). Without this, PR coverage
+    # signal silently disappeared the moment the BSD jobs were gated
+    # off pull_request.
     needs: [coverage-report, coverage-freebsd, coverage-netbsd]
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -147,7 +157,7 @@ jobs:
         with:
           path: reports/
       - name: List contents of the reports directory
-        run: ls -a reports
+        run: ls -a reports || true
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v6
         with:
