@@ -194,6 +194,33 @@ fn build_routev6(
   Some(Ipv6Route::new(index, net, gw))
 }
 
+/// `Ok(())` if the result is "this address-family stack isn't
+/// installed on this host" — `EAFNOSUPPORT`, `EPROTONOSUPPORT`, or
+/// `EOPNOTSUPP`. Anything else propagates. The numeric values for
+/// these errnos vary across BSDs (macOS `EOPNOTSUPP = 102` vs.
+/// FreeBSD/NetBSD/OpenBSD `EOPNOTSUPP = 45`), so we read them from
+/// `libc::E*` rather than hardcoding — `rustix` isn't a BSD dep.
+///
+/// Used by the two-family BSD union APIs (`route_table_by_filter`,
+/// `best_local_addrs`) so a single-stack host that successfully
+/// returns the populated family doesn't lose the result when the
+/// other family's `sysctl` dump comes back with one of the above.
+/// The single-family entry points (`route_ipv4_table_by_filter`,
+/// `best_local_ipv4_addrs`, etc.) deliberately keep propagating —
+/// asking for IPv6 routes on a v6-disabled host should not silently
+/// return `Ok([])`.
+pub(super) fn family_unavailable_to_empty(result: io::Result<()>) -> io::Result<()> {
+  match result {
+    Ok(()) => Ok(()),
+    Err(e) => match e.raw_os_error() {
+      Some(c) if c == libc::EAFNOSUPPORT || c == libc::EPROTONOSUPPORT || c == libc::EOPNOTSUPP => {
+        Ok(())
+      }
+      _ => Err(e),
+    },
+  }
+}
+
 pub(super) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<IpRoute>>
 where
   F: FnMut(&IpRoute) -> bool,
@@ -208,24 +235,34 @@ where
   // sysctl calls is the right tradeoff for keeping the union API
   // consistent with its single-family counterparts.
   let mut out: SmallVec<IpRoute> = SmallVec::new();
-  route::walk_route_table(AF_INET, |index, flags, dst, gw, mask| {
-    let dst = dst.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-    if let Some(r) = build_routev4(index, flags, dst, gw, mask) {
-      let r = IpRoute::V4(r);
-      if f(&r) {
-        out.push(r);
+  // Each family is wrapped so a single-stack host (no v4 OR no v6)
+  // gets the populated family back instead of `Err`. The
+  // family-specific entry points further down still propagate the
+  // error — see `family_unavailable_to_empty` for why.
+  family_unavailable_to_empty(route::walk_route_table(
+    AF_INET,
+    |index, flags, dst, gw, mask| {
+      let dst = dst.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+      if let Some(r) = build_routev4(index, flags, dst, gw, mask) {
+        let r = IpRoute::V4(r);
+        if f(&r) {
+          out.push(r);
+        }
       }
-    }
-  })?;
-  route::walk_route_table(AF_INET6, |index, flags, dst, gw, mask| {
-    let dst = dst.unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
-    if let Some(r) = build_routev6(index, flags, dst, gw, mask) {
-      let r = IpRoute::V6(r);
-      if f(&r) {
-        out.push(r);
+    },
+  ))?;
+  family_unavailable_to_empty(route::walk_route_table(
+    AF_INET6,
+    |index, flags, dst, gw, mask| {
+      let dst = dst.unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+      if let Some(r) = build_routev6(index, flags, dst, gw, mask) {
+        let r = IpRoute::V6(r);
+        if f(&r) {
+          out.push(r);
+        }
       }
-    }
-  })?;
+    },
+  ))?;
   Ok(out)
 }
 

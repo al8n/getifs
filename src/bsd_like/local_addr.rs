@@ -54,8 +54,12 @@ pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
   // and `IfNet`'s `Net::try_from` accepts both, so this avoids the
   // intermediate per-family allocations.
   let mut out: SmallVec<IfNet> = SmallVec::new();
-  best_local_addrs_in(AF_INET, &mut out)?;
-  best_local_addrs_in(AF_INET6, &mut out)?;
+  // Wrap each family's walk so a single-stack BSD host (no v6 stack
+  // / no v4 stack) returns the populated family rather than `Err`.
+  // Same rationale and predicate as `route_table_by_filter`; see
+  // `family_unavailable_to_empty` for the errno set.
+  super::family_unavailable_to_empty(best_local_addrs_in(AF_INET, &mut out))?;
+  super::family_unavailable_to_empty(best_local_addrs_in(AF_INET6, &mut out))?;
   Ok(out)
 }
 
