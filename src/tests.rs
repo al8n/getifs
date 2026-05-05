@@ -97,20 +97,8 @@ fn is_environmental_skip(msg: &str) -> bool {
     || msg.contains("module")
 }
 
-// Skipped on NetBSD/OpenBSD for the same reason as
-// `test_interface_arrival_and_departure`: `interfaces()` parses
-// sysctl(NET_RT_IFLIST) via the BSD-shared `interface_table` walker,
-// which has a pre-existing parser quirk on NetBSD/OpenBSD that
-// surfaces as `Err(InvalidData "invalid message")` mid-walk. The
-// quirk is unrelated to the symbol under test here, but the
-// `interfaces()` call inside the test trips over it.
 #[test]
-#[cfg(all(
-  not(apple),
-  unix,
-  not(target_os = "netbsd"),
-  not(target_os = "openbsd"),
-))]
+#[cfg(all(not(apple), unix))]
 fn point_to_point_interface() {
   #[cfg(bsd_like)]
   let uid = unsafe { libc::getuid() };
@@ -186,14 +174,7 @@ fn point_to_point_interface() {
   }
 }
 
-// Skipped on NetBSD/OpenBSD: `interfaces()` parses sysctl(NET_RT_IFLIST)
-// via the BSD-shared `interface_table` walker, and that walker has a
-// pre-existing parser quirk on those two platforms that surfaces as
-// `Err(InvalidData "invalid message")` mid-walk. Fixing the
-// `interface_table` parser for NetBSD/OpenBSD is a separate
-// (out-of-scope) concern from the rest of this PR; gating the test
-// here keeps CI honest until that work happens.
-#[cfg(all(unix, not(target_os = "netbsd"), not(target_os = "openbsd")))]
+#[cfg(unix)]
 #[test]
 fn test_interface_arrival_and_departure() {
   if std::env::var("RUST_TEST_SHORT").is_ok() {

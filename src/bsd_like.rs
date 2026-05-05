@@ -678,7 +678,10 @@ fn fetch(family: i32, rt: i32, flag: i32) -> io::Result<Vec<u8>> {
       return Err(io::Error::last_os_error());
     }
 
-    // Allocate buffer
+    // Allocate buffer. The first sysctl is a *size estimate*; the
+    // kernel can write fewer bytes on the second call when something
+    // (an interface, route, etc.) goes away in the gap. We re-read
+    // the updated `len` after the second call and truncate.
     let mut buf = vec![0u8; len];
     if sysctl(
       mib.as_mut_ptr(),
@@ -691,6 +694,15 @@ fn fetch(family: i32, rt: i32, flag: i32) -> io::Result<Vec<u8>> {
     {
       return Err(io::Error::last_os_error());
     }
+
+    // Truncate to the actually-written prefix. Without this, the
+    // tail of `buf` is the zero-init padding from `vec![0u8; len]`,
+    // and the walker reads the leading 2 bytes of that as a
+    // zero-length message header — surfacing as
+    // `Err(InvalidData "invalid message")` on platforms where the
+    // kernel routinely writes less than the size estimate
+    // (especially NetBSD/OpenBSD `NET_RT_IFLIST`).
+    buf.truncate(len);
 
     Ok(buf)
   }
