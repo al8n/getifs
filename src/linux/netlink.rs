@@ -1093,6 +1093,20 @@ where
             let mut dst: Option<IpAddr> = None;
             let mut gw: Option<IpAddr> = None;
             let mut has_src_constraint = false;
+            // Track present-but-malformed for RTA_DST / RTA_GATEWAY.
+            // `parse_rta_ipaddr` returns `None` for either "the
+            // attribute had a wrong-family / too-short payload" *or*
+            // "the attribute wasn't there." Keeping a separate
+            // present-flag lets us reject a malformed attribute
+            // outright without conflating it with the legitimate
+            // "default-route" / "on-link" encodings (`dst` absent
+            // with `rtm_dst_len == 0`, `gw` absent for direct
+            // routes). Without this, a kernel emitting a wrong-sized
+            // RTA_DST alongside `rtm_dst_len = 24` would surface as
+            // `0.0.0.0/24`.
+            let mut dst_present = false;
+            let mut dst_malformed = false;
+            let mut gw_malformed = false;
             // Linux returns the full table id either inline in
             // `rtm_table` (values 0..=255) or via an RTA_TABLE
             // attribute when the id exceeds 255 — the kernel sets
@@ -1131,10 +1145,17 @@ where
                   oif = u32::from_ne_bytes(data[..4].try_into().unwrap());
                 }
                 RTA_DST => {
+                  dst_present = true;
                   dst = parse_rta_ipaddr(rtm_header.rtm_family, data);
+                  if dst.is_none() {
+                    dst_malformed = true;
+                  }
                 }
                 RTA_GATEWAY => {
                   gw = parse_rta_ipaddr(rtm_header.rtm_family, data);
+                  if gw.is_none() {
+                    gw_malformed = true;
+                  }
                 }
                 RTA_MULTIPATH => {
                   multipath = Some(data);
@@ -1155,6 +1176,27 @@ where
 
               rtattr_buf = &rtattr_buf[alen..];
             }
+
+            // Reject malformed routes before any further processing:
+            //   - RTA_DST present but unparseable (wrong family / too
+            //     short).
+            //   - RTA_DST absent but `rtm_dst_len != 0`. The "default
+            //     route" encoding is `dst absent + dst_len == 0`;
+            //     anything else means the kernel claimed a non-zero
+            //     prefix length without supplying the address, which
+            //     would synthesize a fake `0.0.0.0/N` / `::/N`.
+            //   - RTA_GATEWAY present but unparseable. Treating a
+            //     malformed gateway as `None` would silently
+            //     downgrade the route to "on-link", which is a
+            //     different routing decision.
+            if dst_malformed || gw_malformed || (dst.is_none() && rtm_header.rtm_dst_len != 0) {
+              received = &received[l..];
+              continue;
+            }
+            // Suppress the "unused" warning for the present flag —
+            // `dst_malformed` already encodes the real branch we care
+            // about.
+            let _ = dst_present;
 
             // Skip if a source constraint snuck in via RTA_SRC.
             if has_src_constraint {

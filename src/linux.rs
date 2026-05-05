@@ -98,10 +98,15 @@ fn route_v4_from_raw(
   if dst_len > 32 {
     return None;
   }
+  // Treat absent `dst` as the default route only when `dst_len == 0`.
+  // The walker rejects "dst absent + dst_len != 0" as malformed; this
+  // is a defence-in-depth check for any future caller that doesn't
+  // pre-validate.
   let dst_ip = match dst {
     Some(IpAddr::V4(ip)) => ip,
     Some(_) => return None,
-    None => Ipv4Addr::UNSPECIFIED,
+    None if dst_len == 0 => Ipv4Addr::UNSPECIFIED,
+    None => return None,
   };
   let net = Ipv4Net::new(dst_ip, dst_len).ok()?;
   let gw = match gw {
@@ -125,7 +130,8 @@ fn route_v6_from_raw(
   let dst_ip = match dst {
     Some(IpAddr::V6(ip)) => ip,
     Some(_) => return None,
-    None => Ipv6Addr::UNSPECIFIED,
+    None if dst_len == 0 => Ipv6Addr::UNSPECIFIED,
+    None => return None,
   };
   let net = Ipv6Net::new(dst_ip, dst_len).ok()?;
   let gw = match gw {
