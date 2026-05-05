@@ -7,7 +7,7 @@ homepage = "https://github.com/al8n/getifs"
 documentation = "https://docs.rs/getifs"
 description = "Cross-platform enumeration of network interfaces and their MTU, gateway, multicast, and local/private/public IP addresses."
 license = "MIT OR Apache-2.0"
-rust-version = "1.89.0"
+rust-version = "1.85.0"
 keywords = ["getifaddrs", "network-interface", "local-ip-address", "gateway", "mtu"]
 categories = ["network-programming"]
 
