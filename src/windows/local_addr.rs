@@ -15,76 +15,136 @@ use windows_sys::Win32::NetworkManagement::IpHelper::*;
 use windows_sys::Win32::Networking::WinSock::*;
 
 /// Finds the `InterfaceIndex` of the adapter that the kernel would use
-/// to reach the unspecified address of the requested family, or `None`
-/// if no route is available for that family.
+/// to reach the default route for the requested family, or `None` if
+/// no usable default route exists for that family.
 ///
-/// Uses [`GetBestInterfaceEx`], which takes only a destination address
-/// and returns the best interface index directly. We previously called
-/// `GetBestRoute2(NULL, 0, NULL, &dest, ...)` and let the kernel pick
-/// — that worked in practice on shipping Windows but the documented
-/// contract for `GetBestRoute2` is "DestinationAddress must be
-/// initialized AND at least one of InterfaceLuid or InterfaceIndex
-/// must be initialized" (see
-/// https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getbestroute2).
-/// `GetBestInterfaceEx` is the right shape for "given a destination,
-/// which interface would route there?" — no required interface
-/// selector, no source address, no `MIB_IPFORWARD_ROW2` we don't use.
+/// Walks `GetIpForwardTable2` for `PrefixLength == 0` rows with
+/// `ValidLifetime > 0 && !Loopback`, then picks the row with the
+/// smallest *effective* metric (route metric + interface metric — the
+/// sum the Windows TCP/IP stack itself uses for routing decisions).
+/// Joining the interface metric matters on multi-homed hosts where a
+/// low-route-metric default sits on a high-cost interface (Wi-Fi
+/// behind a cellular fallback, for example) — comparing on
+/// `route.Metric` alone would silently misorder them.
 ///
-/// The kernel still applies effective metric (route metric + interface
-/// metric) and rejects unusable rows (loopback / dead / disabled),
-/// which is what Windows itself does for outbound traffic.
-///
-/// History: earlier revisions scanned `MIB_IPFORWARD_TABLE2` and
-/// compared only `route.Metric` (mis-ordered multi-homed hosts with a
-/// low-route-metric route on a high-cost interface). Then we moved to
-/// `GetBestRoute2`. Now we use `GetBestInterfaceEx` to satisfy the
-/// documented input contract without losing the metric correctness.
+/// History: earlier revisions of this code used `GetBestRoute2(NULL,
+/// 0, NULL, &dest, ...)` and then `GetBestInterfaceEx(&zero_dest,
+/// ...)`. Both queries — passing the unspecified address as a
+/// destination — are outside the documented contracts of those APIs:
+/// `GetBestRoute2` requires both the destination AND at least one
+/// interface selector to be initialized
+/// (https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getbestroute2),
+/// and `GetBestInterfaceEx` is documented as "interface with the best
+/// route to the *specified* IPv4 or IPv6 address"
+/// (https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getbestinterfaceex)
+/// — `0.0.0.0` / `::` is an unspecified address, not a documented
+/// "give me the default" sentinel. Both happened to work on shipping
+/// Windows, but neither is guaranteed by the API contract. The
+/// forwarding-table walk is the right shape: it asks the only
+/// question Windows answers unambiguously — "which routes have
+/// `/0`?" — and applies the same effective-metric tie-break the
+/// kernel uses.
 fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
-  // SAFETY: We zero-initialise a `SOCKADDR_INET`, set its family, and
-  // hand its address as a `*const SOCKADDR` (matching the standard
-  // Windows pattern of treating `SOCKADDR_INET` as a tagged union of
-  // `sockaddr_in` / `sockaddr_in6`). `GetBestInterfaceEx` writes
-  // back the best interface index into a stack u32.
+  // SAFETY: All three calls below allocate kernel-side tables that we
+  // free via `FreeMibTable` in `Drop`. We treat each row through a
+  // `&MIB_IPFORWARD_ROW2` / `&MIB_IPINTERFACE_ROW` reference into the
+  // table's storage; the table lives until the guard drops at end of
+  // scope, so no row reference outlives its backing memory.
   unsafe {
-    let mut destination: SOCKADDR_INET = std::mem::zeroed();
-    destination.si_family = family;
-
-    let mut best_ifindex: u32 = 0;
-    let result = GetBestInterfaceEx(
-      &destination as *const SOCKADDR_INET as *const SOCKADDR,
-      &mut best_ifindex,
-    );
-
-    if result != NO_ERROR {
-      // Whitelist the "no route to that destination on this host"
-      // codes as legitimate `Ok(None)`. Anything else (allocation
-      // failure, invalid parameter, network-stack failure) is a real
-      // syscall error the caller deserves to see; collapsing it
-      // would make `best_local_*` indistinguishable from "host has
-      // no default route" and mask real platform failures.
-      //
-      //   - `ERROR_NOT_FOUND` (1168): no default route for the
-      //     requested family on this host.
-      //   - `ERROR_NETWORK_UNREACHABLE` (1231): destination
-      //     unreachable through any installed route.
-      //   - `ERROR_NOT_SUPPORTED` (50): the IP stack for the
-      //     requested family isn't installed at all. Without this
-      //     whitelist, `best_local_addrs()` would discard a
-      //     perfectly-good IPv4 result if the v6 probe failed
-      //     because there's no v6 stack — the union API has to
-      //     accept that absence.
-      const ERROR_NOT_SUPPORTED: i32 = 50;
-      const ERROR_NOT_FOUND: i32 = 1168;
-      const ERROR_NETWORK_UNREACHABLE: i32 = 1231;
-      let code = result as i32;
-      if code == ERROR_NOT_FOUND || code == ERROR_NETWORK_UNREACHABLE || code == ERROR_NOT_SUPPORTED
-      {
-        return Ok(None);
+    let mut forward_ptr: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+    let r = GetIpForwardTable2(family, &mut forward_ptr);
+    if r != NO_ERROR {
+      return classify_table_error(r);
+    }
+    struct ForwardGuard(*mut MIB_IPFORWARD_TABLE2);
+    impl Drop for ForwardGuard {
+      fn drop(&mut self) {
+        if !self.0.is_null() {
+          unsafe { FreeMibTable(self.0 as *mut _) };
+        }
       }
-      return Err(io::Error::from_raw_os_error(code));
+    }
+    let _g1 = ForwardGuard(forward_ptr);
+
+    // Build (InterfaceIndex -> Metric) for `family` so we can fold
+    // the per-interface metric into each candidate row's effective
+    // metric. Missing rows fall back to 0 — that matches what the
+    // kernel does on interfaces without an explicit metric.
+    let mut iface_ptr: *mut MIB_IPINTERFACE_TABLE = std::ptr::null_mut();
+    let r2 = GetIpInterfaceTable(family, &mut iface_ptr);
+    if r2 != NO_ERROR {
+      return classify_table_error(r2);
+    }
+    struct IfaceGuard(*mut MIB_IPINTERFACE_TABLE);
+    impl Drop for IfaceGuard {
+      fn drop(&mut self) {
+        if !self.0.is_null() {
+          unsafe { FreeMibTable(self.0 as *mut _) };
+        }
+      }
+    }
+    let _g2 = IfaceGuard(iface_ptr);
+
+    let mut iface_metric: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    if !iface_ptr.is_null() {
+      let it = &*iface_ptr;
+      let rows = core::slice::from_raw_parts(
+        &it.Table as *const _ as *const MIB_IPINTERFACE_ROW,
+        it.NumEntries as usize,
+      );
+      for r in rows {
+        iface_metric.insert(r.InterfaceIndex, r.Metric);
+      }
     }
 
-    Ok(Some(best_ifindex))
+    let mut best: Option<(u64, u32)> = None;
+    if !forward_ptr.is_null() {
+      let ft = &*forward_ptr;
+      let rows = core::slice::from_raw_parts(
+        &ft.Table as *const _ as *const MIB_IPFORWARD_ROW2,
+        ft.NumEntries as usize,
+      );
+      for row in rows {
+        if row.DestinationPrefix.PrefixLength != 0 {
+          continue;
+        }
+        if row.ValidLifetime == 0 || row.Loopback {
+          continue;
+        }
+        // Effective metric per Microsoft's documented routing model:
+        // the kernel sums route metric + interface metric and picks
+        // the row with the smallest sum. Promote to u64 so the
+        // addition can't wrap on a pathological u32+u32.
+        let if_m = iface_metric.get(&row.InterfaceIndex).copied().unwrap_or(0) as u64;
+        let eff = row.Metric as u64 + if_m;
+        match best {
+          None => best = Some((eff, row.InterfaceIndex)),
+          Some((cur, _)) if eff < cur => best = Some((eff, row.InterfaceIndex)),
+          _ => {}
+        }
+      }
+    }
+
+    Ok(best.map(|(_, idx)| idx))
+  }
+}
+
+/// Map a `MIB`-table fetch failure: known "no stack / no entries"
+/// codes collapse to `Ok(None)`, anything else propagates as the
+/// concrete syscall error. Same whitelist `windows/route.rs` and
+/// `windows/gateway.rs` use so single-stack hosts surface their
+/// populated family instead of `Err`.
+#[inline]
+fn classify_table_error(code: u32) -> io::Result<Option<u32>> {
+  // ERROR_NOT_SUPPORTED (50): IP stack for this family not installed.
+  // ERROR_NOT_FOUND (1168): no entries for this family.
+  // ERROR_NETWORK_UNREACHABLE (1231): destination unreachable.
+  const ERROR_NOT_SUPPORTED: u32 = 50;
+  const ERROR_NOT_FOUND: u32 = 1168;
+  const ERROR_NETWORK_UNREACHABLE: u32 = 1231;
+  match code {
+    ERROR_NOT_SUPPORTED | ERROR_NOT_FOUND | ERROR_NETWORK_UNREACHABLE => Ok(None),
+    _ => Err(io::Error::from_raw_os_error(code as i32)),
   }
 }
 
