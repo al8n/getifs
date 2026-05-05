@@ -3,7 +3,21 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
-use libc::{AF_INET, AF_INET6, NET_RT_DUMP, RTAX_DST, RTF_UP};
+use libc::{
+  AF_INET, AF_INET6, NET_RT_DUMP, RTAX_DST, RTF_BLACKHOLE, RTF_BROADCAST, RTF_REJECT, RTF_UP,
+};
+
+// Same `RTF_MULTICAST` cfg shim as `bsd_like/route.rs`: NetBSD's libc
+// bindings don't export it, so fall back to 0 (no-op bit).
+#[cfg(any(
+  apple,
+  target_os = "freebsd",
+  target_os = "dragonfly",
+  target_os = "openbsd"
+))]
+use libc::RTF_MULTICAST;
+#[cfg(target_os = "netbsd")]
+const RTF_MULTICAST: libc::c_int = 0;
 use smallvec_wrapper::SmallVec;
 
 use super::{
@@ -84,8 +98,15 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
       }
       let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 
-      // Only consider UP routes
-      if (rtm.rtm_flags & RTF_UP) == 0 {
+      // Same usable-route filter as `bsd_like/route.rs`. A
+      // `RTF_REJECT` / `RTF_BLACKHOLE` default route can be `RTF_UP`
+      // with a low metric and would otherwise win `best_ifindex`,
+      // making `best_local_*` return addresses on an interface the
+      // kernel never delivers via. `RTF_BROADCAST` / `RTF_MULTICAST`
+      // are housekeeping routes the kernel attaches to interfaces
+      // and not candidates for default-route selection.
+      let unusable = RTF_REJECT | RTF_BLACKHOLE | RTF_BROADCAST | RTF_MULTICAST;
+      if (rtm.rtm_flags & RTF_UP) == 0 || (rtm.rtm_flags & unusable) != 0 {
         src = &src[l..];
         continue;
       }

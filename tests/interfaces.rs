@@ -282,22 +282,34 @@ fn if_multicast_addrs() {
   let mut multi_stats = RouteStats::default();
 
   for ifi in ift {
-    let ifmat = ifi.multicast_addrs().unwrap();
-
-    let stats = validate_interface_multicast_addrs(&ifmat).unwrap();
-
-    multi_stats.ipv4 += stats.ipv4;
-    multi_stats.ipv6 += stats.ipv6;
+    match ifi.multicast_addrs() {
+      Ok(ifmat) => {
+        let stats = validate_interface_multicast_addrs(&ifmat).unwrap();
+        multi_stats.ipv4 += stats.ipv4;
+        multi_stats.ipv6 += stats.ipv6;
+      }
+      // DragonFly's kernel has no multicast-group enumeration
+      // sysctl (no `NET_RT_IFMALIST`) so `multicast_addrs()` returns
+      // `ErrorKind::Unsupported` rather than a misleading empty
+      // `Ok`. Treat it as a skip on that platform; on every other
+      // target, propagate.
+      Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+        #[cfg(target_os = "dragonfly")]
+        {
+          let _ = e;
+        }
+        #[cfg(not(target_os = "dragonfly"))]
+        panic!("unexpected Unsupported from multicast_addrs(): {e}");
+      }
+      Err(e) => panic!("multicast_addrs() failed: {e}"),
+    }
   }
 
   // The "v6 multicast must be present when v6 unicast > 1" assertion
   // is the existence-of-multicast-route check copied from the Go
-  // reference. It would always trip on DragonFly, where the
-  // multicast walker is a stub (the kernel doesn't expose
-  // `NET_RT_IFMALIST`) — exercising the call path still has value
-  // (it confirms the symbol is callable and returns a usable Vec),
-  // but the count assertion is meaningless. Keep the test running
-  // on DragonFly without the count check.
+  // reference. Skip on DragonFly — `multi_stats` is always zero
+  // there because every iteration short-circuited on
+  // `Unsupported`, and the assertion would always trip.
   #[cfg(not(target_os = "dragonfly"))]
   check_multicast_stats(&if_stats, &uni_stats, &multi_stats).unwrap();
   #[cfg(target_os = "dragonfly")]

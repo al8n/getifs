@@ -1016,11 +1016,17 @@ where
 // DragonFly stub: the kernel does not expose multicast group
 // enumeration via sysctl. `<sys/socket.h>` defines only four route
 // selectors (`NET_RT_DUMP` / `NET_RT_FLAGS` / `NET_RT_IFLIST` /
-// `NET_RT_MAXID = 4`); there is no `NET_RT_IFMALIST` to call. The
-// public API surfaces on DragonFly so cross-platform callers can
-// compile and link, but the call returns an empty list rather than
-// faking entries or returning `ENOTSUP`. Documented in `route.rs` /
-// `interfaces.rs` doc strings.
+// `NET_RT_MAXID = 4`); there is no `NET_RT_IFMALIST` to call.
+//
+// The public API still surfaces on DragonFly so cross-platform
+// callers compile and link without target-specific cfgs, but a real
+// call returns `ErrorKind::Unsupported` rather than a misleading
+// empty `Ok` — `Ok(SmallVec::new())` would be indistinguishable from
+// a host with multicast enumeration available but no current
+// memberships, which is wrong-by-default semantics for everyone
+// reading the result. Callers can match on `ErrorKind::Unsupported`
+// when they want to treat DragonFly the same way as platforms with
+// the kernel API absent.
 #[cfg(target_os = "dragonfly")]
 pub(super) fn interface_multiaddr_table<T, F>(
   _family: i32,
@@ -1031,5 +1037,9 @@ where
   T: Address,
   F: FnMut(&IpAddr) -> bool,
 {
-  Ok(SmallVec::new())
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "multicast group enumeration is not supported on DragonFly \
+     (no NET_RT_IFMALIST sysctl selector)",
+  ))
 }
