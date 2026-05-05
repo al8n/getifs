@@ -1451,8 +1451,21 @@ fn walk_multipath<F>(
       continue;
     }
 
-    // Decode sub-attributes (only RTA_GATEWAY is interesting today).
+    // Decode sub-attributes. We track three states:
+    //   - `nh_gw = Some(addr)`: parsed RTA_GATEWAY → emit with this gw.
+    //   - `nh_gw = None, nh_gw_malformed = false`: no gateway sub-attr
+    //     at all → on-link nexthop, emit with `gw = None`.
+    //   - `nh_gw_malformed = true`: RTA_GATEWAY sub-attr was present
+    //     but parse failed → skip this nexthop (treating malformed
+    //     as on-link would silently downgrade the route to direct).
+    //   - `nh_has_via = true`: the nexthop carries an `RTA_VIA`
+    //     cross-family gateway, which `IpRoute` can't represent →
+    //     skip this nexthop (matches the top-level RTA_VIA rule;
+    //     emitting it without a gateway would lie about
+    //     reachability).
     let mut nh_gw: Option<IpAddr> = None;
+    let mut nh_gw_malformed = false;
+    let mut nh_has_via = false;
     let mut sub = &buf[RTNH_SIZE..nh_len];
     while sub.len() >= RtAttr::SIZE {
       let attr_len = u16::from_ne_bytes(sub[..2].try_into().unwrap()) as usize;
@@ -1462,12 +1475,17 @@ fn walk_multipath<F>(
       }
       if attr_ty == RTA_GATEWAY {
         nh_gw = parse_rta_ipaddr(rtm_family, &sub[RtAttr::SIZE..attr_len]);
+        if nh_gw.is_none() {
+          nh_gw_malformed = true;
+        }
+      } else if attr_ty == RTA_VIA {
+        nh_has_via = true;
       }
       let alen = rta_align_of(attr_len).min(sub.len());
       sub = &sub[alen..];
     }
 
-    if nh_ifindex != 0 {
+    if nh_ifindex != 0 && !nh_gw_malformed && !nh_has_via {
       on_route(rtm_family, nh_ifindex, dst_len, dst, nh_gw);
     }
 
