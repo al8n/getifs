@@ -111,6 +111,29 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
         continue;
       }
 
+      // Source-specific default routes constrain selection to a
+      // particular packet source, so a "best local address for any
+      // outbound traffic" walk must not pick them — the addresses
+      // returned would only be correct for traffic that already has
+      // a matching source bound. Same per-platform shape as
+      // `walk_route_table` (NetBSD: `RTF_SRC`; OpenBSD:
+      // `RTAX_SRC` / `RTAX_SRCMASK` slots in `rtm_addrs`).
+      #[cfg(target_os = "netbsd")]
+      {
+        if (rtm.rtm_flags & libc::RTF_SRC) != 0 {
+          src = &src[l..];
+          continue;
+        }
+      }
+      #[cfg(target_os = "openbsd")]
+      {
+        let src_mask = (1u32 << libc::RTAX_SRC as u32) | (1u32 << libc::RTAX_SRCMASK as u32);
+        if (rtm.rtm_addrs as u32 & src_mask) != 0 {
+          src = &src[l..];
+          continue;
+        }
+      }
+
       // Decode the address slots through the shared `parse_addrs`
       // helper so default-route detection here matches the
       // route-table walker. That helper:

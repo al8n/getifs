@@ -119,6 +119,38 @@ where
         continue;
       }
 
+      // Source-specific routes constrain the kernel's selection to
+      // packets matching a particular source prefix. A caller asking
+      // "what route does the system use to reach X?" via
+      // `route_table()` / default-route filters must not receive one
+      // of these — applying it without honouring the source side
+      // would describe a forwarding decision the kernel would not
+      // actually make. Linux's netlink path already drops
+      // `rtm_src_len != 0` / `RTA_SRC` routes; mirror that here for
+      // the two BSDs that expose source-specific routing in the
+      // sysctl dump.
+      //   - NetBSD tags such routes with `RTF_SRC` in `rtm_flags`.
+      //   - OpenBSD has no flag but emits `RTAX_SRC` / `RTAX_SRCMASK`
+      //     slots in `rtm_addrs` (slot indices 8 and 9 — beyond
+      //     `RTAX_BRD`, so `parse_addrs` ignores their addresses;
+      //     the bitmask is the only signal).
+      // FreeBSD / Apple / DragonFly have neither concept.
+      #[cfg(target_os = "netbsd")]
+      {
+        if (rtm.rtm_flags & libc::RTF_SRC) != 0 {
+          src = &src[l..];
+          continue;
+        }
+      }
+      #[cfg(target_os = "openbsd")]
+      {
+        let src_mask = (1u32 << libc::RTAX_SRC as u32) | (1u32 << libc::RTAX_SRCMASK as u32);
+        if (rtm.rtm_addrs as u32 & src_mask) != 0 {
+          src = &src[l..];
+          continue;
+        }
+      }
+
       // Per-message parse errors propagate — see function doc.
       let addrs = parse_addrs(rtm.rtm_addrs as u32, &src[header_size..l])?;
 
