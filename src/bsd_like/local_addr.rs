@@ -63,14 +63,42 @@ pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
   Ok(out)
 }
 
+/// Per-route priority used to rank competing default routes. OpenBSD
+/// is the only BSD that exposes a documented routing priority on the
+/// route header (`rtm_priority`, lower wins — added when its
+/// kernel grew per-priority routing). FreeBSD / NetBSD / DragonFly /
+/// macOS have no equivalent field on `rt_msghdr`; the fields actually
+/// present (`rmx_recvpipe`, `rmx_pksent`, etc.) are TCP-pipe metrics,
+/// not routing priority. Returning `0` for those targets makes every
+/// candidate compare equal, and the caller-side selector then
+/// collects every default-route ifindex (instead of arbitrarily
+/// picking by an irrelevant TCP metric, which the previous code did).
+#[cfg(target_os = "openbsd")]
+#[inline]
+fn route_priority(rtm: &RtMsghdr) -> u8 {
+  rtm.rtm_priority
+}
+
+#[cfg(not(target_os = "openbsd"))]
+#[inline]
+fn route_priority(_rtm: &RtMsghdr) -> u8 {
+  0
+}
+
 fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result<()> {
-  // First get the default route to find the interface index
   let routes = fetch(family, NET_RT_DUMP, 0)?;
-  let mut best_ifindex = None;
-  // Widened to `u64` so the same variable can hold `rmx_recvpipe` across
-  // BSDs — on Apple/OpenBSD the field is 32-bit, on FreeBSD/DragonFly
-  // it's `u_long` (64-bit on LP64 hosts).
-  let mut best_metric: u64 = u64::MAX;
+  // Selection key: route priority (lower wins on OpenBSD, all-zero
+  // elsewhere). `best_oifs` holds every interface that ties at the
+  // current best priority. The previous code keyed on
+  // `rtm_rmx.rmx_recvpipe` — a TCP receive-pipe metric, not a routing
+  // priority — so on hosts with multiple defaults it could pick an
+  // interface based on irrelevant TCP state instead of the one the
+  // kernel actually uses. On non-OpenBSD BSDs there is no usable
+  // priority field at all, so we collect every default-route oif and
+  // emit addresses for all of them; that's strictly more conservative
+  // than picking arbitrarily.
+  let mut best_oifs: SmallVec<u16> = SmallVec::new();
+  let mut best_priority: u8 = u8::MAX;
 
   unsafe {
     let mut src = routes.as_slice();
@@ -166,23 +194,37 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
         _ => false,
       };
 
-      // If this is a default route and has better metric, update best_ifindex
-      let metric = rtm.rtm_rmx.rmx_recvpipe as u64;
-      if is_default && metric < best_metric {
-        best_metric = metric;
-        best_ifindex = Some(rtm.rtm_index);
+      // Update the candidate set on lower priority; ties extend.
+      // Same `< / ==` semantics as Linux's best-local walker.
+      if is_default {
+        let prio = route_priority(&rtm);
+        if prio < best_priority {
+          best_priority = prio;
+          best_oifs.clear();
+          best_oifs.push(rtm.rtm_index);
+        } else if prio == best_priority {
+          best_oifs.push(rtm.rtm_index);
+        }
       }
 
       src = &src[l..];
     }
   }
 
-  // Only pass the interface index if we found a valid default route.
-  // Push into the caller-provided buffer instead of allocating.
-  match best_ifindex {
-    Some(idx) => interface_addr_table_into(family, idx as u32, local_ip_filter, out),
-    None => Ok(()),
+  // Sort + dedup so a multipath default that lists the same interface
+  // twice (or two separate defaults that share an interface) doesn't
+  // make us walk the address dump twice for the same ifindex.
+  best_oifs.sort_unstable();
+  best_oifs.dedup();
+
+  // Fetch addresses for every selected interface, appending into the
+  // caller-provided buffer. Returns immediately on the first syscall
+  // failure; partial results stay in `out` (consistent with Linux's
+  // `netlink_best_local_addrs_into`).
+  for idx in best_oifs {
+    interface_addr_table_into(family, idx as u32, local_ip_filter, out)?;
   }
+  Ok(())
 }
 
 pub(crate) fn local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {

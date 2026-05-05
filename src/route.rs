@@ -186,6 +186,14 @@ impl IpRoute {
 ///   one route per member (group-of-groups is rare and skipped).
 ///   Blackhole nexthops are filtered.
 ///
+///   Cross-family next-hop routes (the kernel's `RTA_VIA` encoding —
+///   e.g. an IPv4 route via an IPv6 link-local gateway) are dropped:
+///   [`IpRoute`] only models a same-family `(destination, gateway)`
+///   pair, and emitting such a route with `gateway = None` would
+///   misrepresent it as on-link. Hosts that route via an `RTA_VIA`
+///   default will see no default in [`route_table`] / [`route_ipv4_table`]
+///   / [`route_ipv6_table`]; reach for `rtnetlink` directly there.
+///
 ///   Best-effort: hosts running unconstrained custom `ip rule`
 ///   policies ahead of `main` (multi-WAN / mwan3 / advanced VPN
 ///   setups) may have outbound traffic routed through a custom table
