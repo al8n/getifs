@@ -59,9 +59,6 @@ impl TestInterface {
   }
 
   pub fn set_link_local(&mut self, _suffix: i32) -> io::Result<()> {
-    Err(io::Error::new(
-      io::ErrorKind::Other,
-      "not yet implemented for BSD",
-    ))
+    Err(io::Error::other("not yet implemented for BSD"))
   }
 }

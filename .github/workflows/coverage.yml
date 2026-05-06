@@ -54,24 +54,25 @@ jobs:
           name: ${{ matrix.os }}
           path: coverage/${{ matrix.os }}/cobertura.xml
 
-  # Coverage on BSDs runs in a vmactions VM and uses cargo-llvm-cov
-  # (cargo-tarpaulin only supports Linux). FreeBSD uses rustup so we can
-  # pull in `llvm-tools-preview`; NetBSD uses pkgsrc rust + the bundled
-  # llvm-cov from rustlib so the LLVM major version matches rustc.
-  # OpenBSD/DragonFly are skipped: rustup isn't supported there and
-  # matching system llvm to system rust is brittle. The `freebsdlike`
-  # path (FreeBSD/DragonFly) and `netbsdlike` path (NetBSD/OpenBSD) are
-  # both exercised by the two coverage targets we keep.
+  # BSD coverage runs in vmactions VMs using cargo-tarpaulin — same
+  # tool as the Linux/macOS/Windows job above, just installed inside
+  # each VM. Tarpaulin's LLVM-instrumentation engine handles the
+  # non-Linux targets, so we no longer need the cargo-llvm-cov /
+  # rustlib-llvm-cov plumbing the previous revision required. All four
+  # BSDs in the matching `ci.yml` `test-*` jobs (FreeBSD, NetBSD,
+  # OpenBSD, DragonFly) have a coverage counterpart here.
   #
-  # PRs skip BSD coverage because installing cargo-llvm-cov from source
-  # inside each VM costs ~10 minutes; runs on push/dispatch instead.
-  # Both jobs are best-effort: the VM step is continue-on-error and the
-  # artifact upload is gated on the report existing.
+  # All jobs are best-effort: the VM step is `continue-on-error` and
+  # the artifact upload is gated on the report existing. OpenBSD and
+  # DragonFly are most likely to fall back to "no artifact" — neither
+  # is in tarpaulin's officially-supported matrix, so the
+  # `cargo install cargo-tarpaulin` build can fail outright; when it
+  # works, the LLVM-instrumentation engine handles the coverage
+  # collection the same way it does on FreeBSD/NetBSD.
   coverage-freebsd:
     name: Generate Coverage for freebsd
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v6
       - name: Generate coverage on FreeBSD
@@ -81,13 +82,13 @@ jobs:
           copyback: true
           prepare: |
             pkg install -y curl
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable -c llvm-tools-preview
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
             . $HOME/.cargo/env
-            cargo install cargo-llvm-cov --locked
+            cargo install cargo-tarpaulin --locked
           run: |
             . $HOME/.cargo/env
             mkdir -p coverage/freebsd
-            cargo llvm-cov --all-features --cobertura --output-path coverage/freebsd/cobertura.xml -- --nocapture
+            cargo tarpaulin --all-features --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/freebsd -j 1
         continue-on-error: true
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/freebsd/cobertura.xml') != ''
@@ -100,7 +101,6 @@ jobs:
     name: Generate Coverage for netbsd
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v6
       - name: Generate coverage on NetBSD
@@ -111,20 +111,16 @@ jobs:
           prepare: |
             /usr/sbin/pkg_add rust
             export PATH=$HOME/.cargo/bin:$PATH
-            cargo install cargo-llvm-cov --locked
+            cargo install cargo-tarpaulin --locked
           run: |
             export PATH=$HOME/.cargo/bin:$PATH
-            # Prefer the llvm-cov / llvm-profdata that ship with pkgsrc's
-            # rust (under /usr/pkg/lib/rustlib/<target>/bin) so the LLVM
-            # major version matches rustc. Falls through to PATH discovery
-            # if the rustlib copy isn't present.
-            RUST_BIN=$(find /usr/pkg/lib/rustlib -type d -name bin 2>/dev/null | head -1)
-            if [ -x "$RUST_BIN/llvm-cov" ] && [ -x "$RUST_BIN/llvm-profdata" ]; then
-              export LLVM_COV="$RUST_BIN/llvm-cov"
-              export LLVM_PROFDATA="$RUST_BIN/llvm-profdata"
-            fi
             mkdir -p coverage/netbsd
-            cargo llvm-cov --all-features --cobertura --output-path coverage/netbsd/cobertura.xml -- --nocapture
+            # Lib-only on NetBSD for the same reason as `test-netbsd` in
+            # `ci.yml`: doctests + the `tests/` integration suite hit a
+            # `parse_addrs` "invalid address" gap on the VM's
+            # `RTM_NEWADDR` slot encoding. Lib coverage alone is
+            # enough to exercise the netbsdlike code path.
+            cargo tarpaulin --all-features --run-types Lib --out xml --output-dir coverage/netbsd -j 1
         continue-on-error: true
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/netbsd/cobertura.xml') != ''
@@ -133,21 +129,82 @@ jobs:
           name: netbsd
           path: coverage/netbsd/cobertura.xml
 
+  coverage-openbsd:
+    name: Generate Coverage for openbsd
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate coverage on OpenBSD
+        uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          copyback: true
+          prepare: |
+            pkg_add -I rust
+            cargo install cargo-tarpaulin --locked
+          run: |
+            mkdir -p coverage/openbsd
+            cargo tarpaulin --all-features --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/openbsd -j 1
+        continue-on-error: true
+      - name: Upload Coverage Report as Artifact
+        if: hashFiles('coverage/openbsd/cobertura.xml') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: openbsd
+          path: coverage/openbsd/cobertura.xml
+
+  coverage-dragonflybsd:
+    name: Generate Coverage for dragonflybsd
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate coverage on DragonFlyBSD
+        uses: vmactions/dragonflybsd-vm@v1
+        with:
+          usesh: true
+          copyback: true
+          prepare: |
+            pkg install -y rust
+            cargo install cargo-tarpaulin --locked
+          run: |
+            # DragonFly's pkg-shipped Rust is 1.85.x — same MSRV
+            # workaround as `test-dragonflybsd` in `ci.yml`: pin
+            # smol_str + criterion back to versions whose declared
+            # MSRV matches, in this CI run only via
+            # `cargo update --precise`.
+            cargo generate-lockfile
+            cargo update -p smol_str --precise 0.3.2
+            cargo update -p criterion --precise 0.7.0
+            mkdir -p coverage/dragonflybsd
+            # Lib-only on DragonFly for the same reason as
+            # `test-dragonflybsd` in `ci.yml`: the vmactions VM has a
+            # sparse network configuration that breaks the
+            # `tests/interfaces.rs` assertions, and the
+            # `interface_by_index` re-lookup in `ifis` flakes due to
+            # interface churn.
+            cargo tarpaulin --all-features --run-types Lib --out xml --output-dir coverage/dragonflybsd -j 1
+        continue-on-error: true
+      - name: Upload Coverage Report as Artifact
+        if: hashFiles('coverage/dragonflybsd/cobertura.xml') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: dragonflybsd
+          path: coverage/dragonflybsd/cobertura.xml
+
   upload-codecov:
-    # `needs:` waits on every coverage producer. BSD jobs are skipped
-    # on PR via their `if:` — and contrary to what the previous
-    # comment here claimed, GitHub Actions treats a skipped
-    # dependency as cause to skip downstream jobs UNLESS the
-    # downstream job explicitly opts in. The `if:` below
-    # (`always() && !cancelled()`) does that opt-in: run as long as
-    # the workflow wasn't cancelled, regardless of which producers
-    # ran or were skipped. The `download-artifact@v6` step then picks
-    # up whatever artifacts were actually produced (PR runs get the
-    # tarpaulin Linux/macOS/Windows trio; push/dispatch runs also get
-    # the freebsd + netbsd reports). Without this, PR coverage
-    # signal silently disappeared the moment the BSD jobs were gated
-    # off pull_request.
-    needs: [coverage-report, coverage-freebsd, coverage-netbsd]
+    # `needs:` waits on every coverage producer. The
+    # `if: always() && !cancelled()` predicate opts the upload step
+    # into running even if a producer fails or is skipped — without
+    # it, GitHub Actions would short-circuit the whole upload on any
+    # missing dependency, and a single VM hiccup on FreeBSD/NetBSD
+    # would silently kill the entire coverage signal. The
+    # `download-artifact@v6` step picks up whatever artifacts were
+    # actually produced; a missing BSD report just means the
+    # codecov.io merge runs without that platform's data for that
+    # commit.
+    needs: [coverage-report, coverage-freebsd, coverage-netbsd, coverage-openbsd, coverage-dragonflybsd]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:

@@ -72,15 +72,12 @@ fn run_once(cmd: &mut Command) -> std::io::Result<()> {
     return Ok(());
   }
   let args: Vec<_> = cmd.get_args().collect();
-  Err(std::io::Error::new(
-    std::io::ErrorKind::Other,
-    format!(
-      "{:?} failed (status={:?}): {}",
-      args,
-      output.status.code(),
-      String::from_utf8_lossy(&output.stderr).trim()
-    ),
-  ))
+  Err(std::io::Error::other(format!(
+    "{:?} failed (status={:?}): {}",
+    args,
+    output.status.code(),
+    String::from_utf8_lossy(&output.stderr).trim()
+  )))
 }
 
 /// Treat as "host doesn't support this" rather than a library bug.

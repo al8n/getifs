@@ -6,8 +6,9 @@ use std::{
 
 use super::{interface_addrs, interface_ipv4_addrs, interface_ipv6_addrs, interfaces};
 
+#[inline]
 fn interface_not_found_for_ip() -> io::Error {
-  io::Error::new(io::ErrorKind::Other, "interface not found")
+  io::Error::other("interface not found")
 }
 
 /// Get the MTU of the given [`IpAddr`].
