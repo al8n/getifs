@@ -1083,3 +1083,99 @@ where
      (no NET_RT_IFMALIST sysctl selector)",
   ))
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // Pure-function unit tests for the BSD parser helpers and the
+  // `family_unavailable_to_empty` errno classifier. These run on
+  // every BSD CI target (FreeBSD VM + macOS) and exercise branches
+  // that are otherwise reachable only via specific kernel-message
+  // shapes which a live test environment doesn't necessarily emit.
+
+  #[test]
+  fn family_unavailable_collapses_known_errnos() {
+    for c in [libc::EAFNOSUPPORT, libc::EPROTONOSUPPORT, libc::EOPNOTSUPP] {
+      let e = io::Error::from_raw_os_error(c);
+      let r = family_unavailable_to_empty(Err(e));
+      assert!(r.is_ok(), "expected Ok for errno {c}");
+    }
+  }
+
+  #[test]
+  fn family_unavailable_propagates_other_errnos() {
+    // Any errno outside the family-unavailable whitelist should
+    // surface. EINVAL is convenient and never confused with the
+    // whitelist.
+    let e = io::Error::from_raw_os_error(libc::EINVAL);
+    let r = family_unavailable_to_empty(Err(e));
+    assert!(r.is_err());
+  }
+
+  #[test]
+  fn family_unavailable_passthrough_ok() {
+    assert!(family_unavailable_to_empty(Ok(())).is_ok());
+  }
+
+  #[test]
+  fn roundup_matches_kernel_alignment() {
+    // `roundup(0)` returns one alignment unit (the kernel's
+    // documented behaviour for empty sockaddrs).
+    assert_eq!(roundup(0), KERNAL_ALIGN);
+    // Already-aligned values stay put.
+    assert_eq!(roundup(KERNAL_ALIGN), KERNAL_ALIGN);
+    assert_eq!(roundup(2 * KERNAL_ALIGN), 2 * KERNAL_ALIGN);
+    // Sub-alignment values round up.
+    assert_eq!(roundup(1), KERNAL_ALIGN);
+    assert_eq!(roundup(KERNAL_ALIGN + 1), 2 * KERNAL_ALIGN);
+  }
+
+  #[test]
+  fn parse_short_inet_addr_zero_extends_v4() {
+    // BSD compact `RTAX_NETMASK` for `255.255.255.0` (a `/24`):
+    // sa_len = 7, sa_family = AF_INET, port = 0, then 3 bytes of
+    // address (`255.255.255`). Trailing byte is implicit zero.
+    let bytes = [7u8, libc::AF_INET as u8, 0, 0, 255, 255, 255];
+    let ip = parse_short_inet_addr(libc::AF_INET, &bytes).unwrap();
+    assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0)));
+  }
+
+  #[test]
+  fn parse_short_inet_addr_zero_extends_v6() {
+    // Compact short-form for `ff00::` netmask (/8): sa_len = 9,
+    // sa_family = AF_INET6, then 1 byte (`0xff`).
+    let mut bytes = [0u8; 9];
+    bytes[0] = 9;
+    bytes[1] = libc::AF_INET6 as u8;
+    bytes[8] = 0xff;
+    let ip = parse_short_inet_addr(libc::AF_INET6, &bytes).unwrap();
+    assert!(matches!(ip, IpAddr::V6(_)));
+  }
+
+  #[test]
+  fn parse_short_inet_addr_unknown_family_errors() {
+    let bytes = [4u8, 99, 0, 0]; // sa_family = 99 (not INET/INET6)
+    assert!(parse_short_inet_addr(99, &bytes).is_err());
+  }
+
+  #[test]
+  fn parse_inet_addr_truncated_v4_errors() {
+    // Buffer shorter than `sockaddr_in` (16 bytes on most BSDs)
+    // surfaces as `Err(invalid_address())`.
+    let buf = [0u8; 4];
+    assert!(parse_inet_addr(libc::AF_INET, &buf).is_err());
+  }
+
+  #[test]
+  fn parse_inet_addr_truncated_v6_errors() {
+    let buf = [0u8; 8];
+    assert!(parse_inet_addr(libc::AF_INET6, &buf).is_err());
+  }
+
+  #[test]
+  fn parse_inet_addr_unknown_family_errors() {
+    let buf = [0u8; 32];
+    assert!(parse_inet_addr(0xff, &buf).is_err());
+  }
+}

@@ -453,3 +453,86 @@ where
 
   Ok(ifmat)
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // `route_v4_from_raw` / `route_v6_from_raw` cover every branch of
+  // the family / length / gateway validation matrix. They live on
+  // the hot path between the netlink walker and `IpRoute`, so any
+  // regression silently affects every `route_*_table*()` caller.
+  // Live tarpaulin runs only exercise the success arm; these unit
+  // tests fill in the wrong-family / out-of-range / absent-dst
+  // branches.
+
+  #[test]
+  fn route_v4_from_raw_rejects_oversize_prefix() {
+    assert!(route_v4_from_raw(1, 33, Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)), None).is_none());
+  }
+
+  #[test]
+  fn route_v4_from_raw_rejects_wrong_family_dst() {
+    assert!(route_v4_from_raw(1, 0, Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)), None).is_none());
+  }
+
+  #[test]
+  fn route_v4_from_raw_treats_absent_dst_as_default() {
+    let r = route_v4_from_raw(1, 0, None, None).unwrap();
+    assert_eq!(r.destination().addr(), Ipv4Addr::UNSPECIFIED);
+  }
+
+  #[test]
+  fn route_v4_from_raw_rejects_absent_dst_with_nonzero_prefix() {
+    assert!(route_v4_from_raw(1, 8, None, None).is_none());
+  }
+
+  #[test]
+  fn route_v4_from_raw_rejects_wrong_family_gateway() {
+    let dst = Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let gw_v6 = Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    assert!(route_v4_from_raw(1, 0, dst, gw_v6).is_none());
+  }
+
+  #[test]
+  fn route_v4_from_raw_accepts_absent_gateway() {
+    let dst = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0)));
+    let r = route_v4_from_raw(1, 8, dst, None).unwrap();
+    assert!(r.gateway().is_none());
+  }
+
+  #[test]
+  fn route_v6_from_raw_rejects_oversize_prefix() {
+    assert!(route_v6_from_raw(1, 129, Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)), None).is_none());
+  }
+
+  #[test]
+  fn route_v6_from_raw_rejects_wrong_family_dst() {
+    assert!(route_v6_from_raw(1, 0, Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)), None).is_none());
+  }
+
+  #[test]
+  fn route_v6_from_raw_treats_absent_dst_as_default() {
+    let r = route_v6_from_raw(1, 0, None, None).unwrap();
+    assert_eq!(r.destination().addr(), Ipv6Addr::UNSPECIFIED);
+  }
+
+  #[test]
+  fn route_v6_from_raw_rejects_absent_dst_with_nonzero_prefix() {
+    assert!(route_v6_from_raw(1, 64, None, None).is_none());
+  }
+
+  #[test]
+  fn route_v6_from_raw_rejects_wrong_family_gateway() {
+    let dst = Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    let gw_v4 = Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    assert!(route_v6_from_raw(1, 0, dst, gw_v4).is_none());
+  }
+
+  #[test]
+  fn route_v6_from_raw_accepts_absent_gateway() {
+    let dst = Some(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0)));
+    let r = route_v6_from_raw(1, 32, dst, None).unwrap();
+    assert!(r.gateway().is_none());
+  }
+}
