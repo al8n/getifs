@@ -46,8 +46,7 @@ jobs:
       - name: Run Coverage and Generate Report
         run: |
           mkdir -p coverage
-          cargo tarpaulin --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/${{ matrix.os }} -j 1
-
+          cargo tarpaulin --all-features --engine llvm --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/${{ matrix.os }} -j 1
       - name: Upload Coverage Report as Artifact
         uses: actions/upload-artifact@v7
         with:
@@ -256,7 +255,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Download all coverage reports
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: reports/
       - name: List contents of the reports directory
