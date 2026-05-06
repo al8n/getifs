@@ -64,12 +64,15 @@ jobs:
   # those code paths at runtime; coverage just isn't measurable.
   #
   # FreeBSD uses rustup so we get a recent toolchain that matches
-  # tarpaulin latest. OpenBSD's pkg-shipped rust (1.90) lags
-  # tarpaulin's transitive-dep MSRV (cargo-platform 0.3.3 needs
-  # 1.91, which gets pulled in via cargo_metadata even with `=0.33`
-  # pins), so the OpenBSD job pins back to 0.30.0 — the last
-  # tarpaulin whose Cargo.toml uses cargo_metadata 0.18 (depending
-  # on cargo-platform 0.1.x, predating the modern MSRV cliff).
+  # tarpaulin latest. OpenBSD pins to tarpaulin 0.31.5 with
+  # `--no-default-features` — that's the unique version that satisfies
+  # both constraints we hit on OpenBSD's pkg-shipped rust (1.90.0):
+  #   1. cargo_metadata = "0.19" predates the cargo-platform 0.3.3
+  #      MSRV cliff at rust 1.91 (anything 0.32+ pulls it in).
+  #   2. coveralls-api became optional behind the `coveralls` feature
+  #      in 0.31.5, so --no-default-features cuts the
+  #      reqwest → openssl-sys path — important because openssl-sys
+  #      0.9.x doesn't support OpenBSD's LibreSSL 4.0+.
   #
   # All BSDs skip doctests: tarpaulin's doctest-build path triggers
   # a rustup component download that has flaked, and Tests + Lib
@@ -140,19 +143,28 @@ jobs:
           prepare: |
             pkg_add -I rust
             # OpenBSD's pkg-shipped Rust is currently 1.90.0.
-            # Even tarpaulin 0.33 transitively resolves
-            # `cargo-platform 0.3.3` (rustc 1.91) when installed
-            # without `--locked`, and `--locked` doesn't help
-            # because tarpaulin's bundled Cargo.lock has the same
-            # pinned version. Drop further back to 0.30.0
-            # (September 2024) — its Cargo.toml uses
-            # `cargo_metadata 0.18` which depends on
-            # `cargo-platform 0.1.x`, predating the modern
-            # MSRV-cliff transitive deps entirely.
-            # `--no-default-features` skips the openssl-pulling
-            # `coveralls` reporter.
+            # Pin to 0.31.5 — it's the right intersection of two
+            # constraints:
+            #   1. `cargo_metadata = "0.19"` in its Cargo.toml,
+            #      which depends on `cargo-platform 0.1.x` (pre-MSRV
+            #      cliff). 0.32+ uses `cargo_metadata 0.20+` whose
+            #      transitive `cargo-platform 0.3.3` declares
+            #      `rust-version = 1.91` and fails on rust 1.90.
+            #   2. `coveralls-api` first became optional behind the
+            #      `coveralls` feature in 0.31.5. 0.30.0 (and
+            #      earlier) hard-required it, so
+            #      `--no-default-features` couldn't drop the
+            #      transitive `reqwest → native-tls → openssl-sys`
+            #      chain. openssl-sys 0.9.102 only supports LibreSSL
+            #      ≤ 3.9.x and OpenBSD ships LibreSSL 4.0+, so
+            #      the build aborts.
+            # 0.31.5 with `--no-default-features` cuts the entire
+            # coveralls/reqwest/openssl-sys path, sidestepping the
+            # LibreSSL version mismatch. `--locked` keeps the
+            # bundled lockfile to also avoid surprise transitive
+            # bumps.
             # Bump this pin once OpenBSD's pkg catches up to 1.91.
-            cargo install cargo-tarpaulin --version "=0.30.0" --no-default-features --locked
+            cargo install cargo-tarpaulin --version "=0.31.5" --no-default-features --locked
           run: |
             mkdir -p coverage/openbsd
             cargo tarpaulin --all-features --run-types Tests --run-types Lib --out xml --output-dir coverage/openbsd -j 1
