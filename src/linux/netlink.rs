@@ -1259,19 +1259,19 @@ where
   F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
 {
   unsafe {
-    // Dump nexthop objects up-front. Routes that arrive with
-    // `RTA_NH_ID` (Linux 5.3+ `ip nexthop`-managed indirection) are
-    // resolved against this map below. We dump even when the host has
-    // no nexthop objects — the dump returns an empty map cheaply, and
-    // we still want to call `RTM_GETROUTE` afterward.
-    let nh_map = dump_nexthops()?;
-
-    // Stale-snapshot recovery: if a route added between the nexthop
-    // dump and the route dump references an id our map doesn't know
-    // about, we record it here and re-resolve after the route walk
-    // completes. `NLM_F_DUMP_INTR` only catches changes *during* the
-    // route dump — it can't see the nexthop arriving in the gap
-    // between our two requests.
+    // Lazy nexthop-dump: we collect every `RTA_NH_ID` route we see
+    // during the route walk and resolve them in a single post-walk
+    // dump. This avoids paying the `RTM_GETNEXTHOP` round-trip when
+    // no route uses nexthop objects (the typical Linux host today,
+    // since `ip nexthop`-managed routes are a 5.3+ opt-in feature).
+    // It also decouples ordinary route enumeration from nexthop-
+    // subsystem availability — a transient `NLM_F_DUMP_INTR` or
+    // unrelated nexthop churn during the upfront dump used to fail
+    // `route_table()` even on hosts whose route table contains no
+    // `RTA_NH_ID` references.
+    //
+    // Same pattern `rt_generic_addrs` (the gateway walker) already
+    // uses; matching it here keeps the two paths consistent.
     let mut deferred_nh: Vec<(u8, u8, Option<IpAddr>, u32)> = Vec::new();
 
     let handle = Handle::new()?;
@@ -1525,34 +1525,25 @@ where
             // leaves emit one route; groups fan out to one route per
             // member (similar to RTA_MULTIPATH).
             //
-            // Three outcomes from `resolve_nh_id`:
-            //   - `None`: id absent from map. Likely race (a nexthop
-            //     installed between our two dumps); defer for the
-            //     retry pass.
-            //   - `Some(empty)`: id present but the nexthop is
-            //     unusable (blackhole / dead / linkdown / unresolved,
-            //     or a group whose members are all filtered). The
-            //     route can't deliver traffic; skip silently rather
-            //     than fail the whole walk.
+            // Lazy resolution: defer every `RTA_NH_ID` route to the
+            // post-walk pass. The pass dumps `RTM_GETNEXTHOP` once
+            // and resolves the entire batch — same correctness as
+            // dump-up-front, lower cost when no route uses nexthop
+            // objects.
+            //
+            // `resolve_nh_id` outcomes (handled by the post-walk
+            // block):
+            //   - `None`: id absent from the dump. Surface as
+            //     `EINTR` so the caller can retry — kernel state
+            //     was changing during enumeration.
+            //   - `Some(empty)`: id present but unusable
+            //     (blackhole / dead / linkdown / unresolved, or a
+            //     group whose members are all filtered). Skip the
+            //     route silently.
             //   - `Some(non-empty)`: emit one route per resolved
             //     `(oif, gw)`.
             if let Some(id) = nh_id {
-              match resolve_nh_id(&nh_map, id) {
-                None => {
-                  deferred_nh.push((rtm_header.rtm_family, rtm_header.rtm_dst_len, dst, id));
-                }
-                Some(resolved) => {
-                  for (nh_oif, nh_gw) in resolved {
-                    on_route(
-                      rtm_header.rtm_family,
-                      nh_oif,
-                      rtm_header.rtm_dst_len,
-                      dst,
-                      nh_gw,
-                    );
-                  }
-                }
-              }
+              deferred_nh.push((rtm_header.rtm_family, rtm_header.rtm_dst_len, dst, id));
               received = &received[l..];
               continue;
             }
@@ -1595,18 +1586,20 @@ where
       }
     }
 
-    // Retry pass for routes whose RTA_NH_ID was absent (`None`) from
-    // the first nexthop dump. Re-dump once and re-resolve. A second
-    // `None` is the "kernel state changed faster than we can
-    // snapshot" case — surface as EINTR so the caller can retry
-    // rather than silently lose the route. `Some(non-empty)` emits;
-    // `Some(empty)` means the nexthop arrived but is itself unusable
-    // (blackhole / down) — skip silently instead of erroring,
-    // matching the first-pass behaviour.
+    // Resolve any deferred `RTA_NH_ID` references in a single batch.
+    // Skipping this block when nothing was deferred is the whole
+    // point of the lazy-dump optimization — a host with no
+    // nexthop-object routes never pays the `RTM_GETNEXTHOP`
+    // round-trip. `None` from `resolve_nh_id` means the id wasn't
+    // in the dump (kernel state changed during enumeration); we
+    // surface that as `EINTR` so the caller can retry rather than
+    // silently lose the route. `Some(empty)` means the nexthop is
+    // present but unusable (blackhole / down) — skip silently.
+    // `Some(non-empty)` emits one route per resolved leaf.
     if !deferred_nh.is_empty() {
-      let nh_map_2 = dump_nexthops()?;
+      let nh_map = dump_nexthops()?;
       for (rfamily, dst_len, dst, id) in deferred_nh {
-        match resolve_nh_id(&nh_map_2, id) {
+        match resolve_nh_id(&nh_map, id) {
           None => return Err(rustix::io::Errno::INTR.into()),
           Some(resolved) => {
             for (nh_oif, nh_gw) in resolved {

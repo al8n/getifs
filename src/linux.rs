@@ -146,19 +146,33 @@ pub(super) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<IpRoute>
 where
   F: FnMut(&IpRoute) -> bool,
 {
+  // Walk `AF_INET` and `AF_INET6` separately rather than relying on
+  // `AF_UNSPEC` to deliver both. Linux's `RTM_GETROUTE` with
+  // `rtm_family = AF_UNSPEC` is documented as a "give me all
+  // families" request, but in practice some kernel versions /
+  // configurations can return only IPv4 — pyroute2 and similar
+  // bindings document the same workaround
+  // (https://pyroute2.org/docs/iproute_linux.html). On a dual-stack
+  // host the union API would silently drop every IPv6 route while
+  // `route_ipv6_table()` still surfaced them; the BSD path already
+  // walks per-family for the same reason. Two dumps is the right
+  // tradeoff for a consistent answer.
   let mut out: SmallVec<IpRoute> = SmallVec::new();
-  netlink_walk_routes(AddressFamily::UNSPEC, |fam, oif, dst_len, dst, gw| {
-    let route = if fam as u16 == AddressFamily::INET.as_raw() {
-      route_v4_from_raw(oif, dst_len, dst, gw).map(IpRoute::V4)
-    } else if fam as u16 == AddressFamily::INET6.as_raw() {
-      route_v6_from_raw(oif, dst_len, dst, gw).map(IpRoute::V6)
-    } else {
-      None
-    };
-
-    if let Some(r) = route {
-      if f(&r) {
-        out.push(r);
+  netlink_walk_routes(AddressFamily::INET, |fam, oif, dst_len, dst, gw| {
+    if fam as u16 == AddressFamily::INET.as_raw() {
+      if let Some(r) = route_v4_from_raw(oif, dst_len, dst, gw).map(IpRoute::V4) {
+        if f(&r) {
+          out.push(r);
+        }
+      }
+    }
+  })?;
+  netlink_walk_routes(AddressFamily::INET6, |fam, oif, dst_len, dst, gw| {
+    if fam as u16 == AddressFamily::INET6.as_raw() {
+      if let Some(r) = route_v6_from_raw(oif, dst_len, dst, gw).map(IpRoute::V6) {
+        if f(&r) {
+          out.push(r);
+        }
       }
     }
   })?;
