@@ -2,8 +2,21 @@ use std::net::IpAddr;
 
 use getifs::{
   gateway_addrs, interface_addrs, interface_by_index, interface_by_name, interfaces, local_addrs,
-  Flags, IfAddr, IfNet, Interface,
+  Flags, IfNet, Interface,
 };
+
+// `IfAddr` is only used by the multicast helper below, which is
+// itself cfg-gated to platforms with multicast enumeration. Pulling
+// it in unconditionally produced an unused-import warning on
+// NetBSD/OpenBSD where the helper isn't compiled.
+#[cfg(any(
+  target_vendor = "apple",
+  target_os = "freebsd",
+  target_os = "dragonfly",
+  target_os = "linux",
+  windows,
+))]
+use getifs::IfAddr;
 
 use iprobe::{ipv4, ipv6};
 

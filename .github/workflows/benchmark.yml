@@ -65,6 +65,10 @@ jobs:
         run: cargo bench --bench gateway -- --output-format bencher | tee benchmark-gateway-${{ matrix.os }}.txt
         continue-on-error: true
 
+      - name: Run benchmarks - route
+        run: cargo bench --bench route -- --output-format bencher | tee benchmark-route-${{ matrix.os }}.txt
+        continue-on-error: true
+
       - name: Collect Criterion results
         shell: bash
         run: |
@@ -103,6 +107,16 @@ jobs:
             echo "" >> benchmark-summary-${{ matrix.os }}.md
             echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
             grep "^test " benchmark-gateway-${{ matrix.os }}.txt >> benchmark-summary-${{ matrix.os }}.md || echo "No results" >> benchmark-summary-${{ matrix.os }}.md
+            echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
+            echo "" >> benchmark-summary-${{ matrix.os }}.md
+          fi
+
+          # Process route benchmarks
+          if [ -f "benchmark-route-${{ matrix.os }}.txt" ]; then
+            echo "### Route Table Operations" >> benchmark-summary-${{ matrix.os }}.md
+            echo "" >> benchmark-summary-${{ matrix.os }}.md
+            echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
+            grep "^test " benchmark-route-${{ matrix.os }}.txt >> benchmark-summary-${{ matrix.os }}.md || echo "No results" >> benchmark-summary-${{ matrix.os }}.md
             echo "\`\`\`" >> benchmark-summary-${{ matrix.os }}.md
             echo "" >> benchmark-summary-${{ matrix.os }}.md
           fi

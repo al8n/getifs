@@ -333,11 +333,6 @@ fn message_too_short() -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, "message too short")
 }
 
-#[inline]
-fn invalid_mask(e: ipnet::PrefixLenError) -> io::Error {
-  io::Error::new(io::ErrorKind::InvalidData, e)
-}
-
 bitflags::bitflags! {
   /// Flags represents the interface flags.
   #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -888,13 +883,21 @@ where
 
         let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
-        if let (Some(ip), Some(mask)) = (ip, mask) {
-          if let Some(ifa) = T::try_from_with_filter(
-            ifam.ifam_index as u32,
-            ip,
-            mask.map_err(invalid_mask)?,
-            |addr| f(addr),
-          ) {
+        // A non-contiguous mask (`PrefixLenError` from `ipnet`) is
+        // skipped per-address rather than failing the whole walk.
+        // BSD kernels — especially NetBSD — can emit a non-canonical
+        // `RTAX_NETMASK` for point-to-point and tunnel interfaces
+        // (the mask slot sometimes carries peer-address bytes
+        // instead of a clean prefix mask). Propagating that error
+        // killed `interfaces()` / `Interface::addrs()` entirely on
+        // those hosts even though the rest of the addresses were
+        // perfectly readable. A skipped address is strictly better
+        // than no addresses; if the caller only cares about a
+        // single interface they can detect the gap themselves.
+        if let (Some(ip), Some(Ok(prefix))) = (ip, mask) {
+          if let Some(ifa) =
+            T::try_from_with_filter(ifam.ifam_index as u32, ip, prefix, |addr| f(addr))
+          {
             results.push(ifa);
           }
         }

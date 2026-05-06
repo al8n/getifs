@@ -26,6 +26,11 @@ path = "benches/gateway.rs"
 name = "gateway"
 harness = false
 
+[[bench]]
+path = "benches/route.rs"
+name = "route"
+harness = false
+
 [features]
 default = []
 # serde = ["dep:serde", "ipnet/serde", "smallvec-wrapper/serde", "hardware-address/serde"]
