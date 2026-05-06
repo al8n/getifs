@@ -114,10 +114,17 @@ jobs:
             # `--no-default-features` drops the `coveralls` feature
             # which transitively pulls in `reqwest` → `openssl-sys`.
             # NetBSD's pkgsrc doesn't ship matching openssl headers,
-            # so the openssl-sys build script fails. We only need
-            # the core coverage instrumentation, not the
-            # coveralls.io reporter.
-            cargo install cargo-tarpaulin --locked --no-default-features
+            # so the openssl-sys build script fails.
+            #
+            # Pin to 0.31.5 (March 2025) for the same reason as the
+            # DragonFly job below: the latest tarpaulin's bundled
+            # Cargo.lock has transitive deps requiring rustc ≥ 1.86,
+            # and pkgsrc rust on the vmactions VM lags. 0.31.5 is the
+            # last release whose dep tree compiles on rust < 1.86.
+            # Drop `--locked` so cargo resolves transitive deps fresh
+            # against the installed toolchain rather than the bundled
+            # lockfile (which would re-introduce the MSRV gap).
+            cargo install cargo-tarpaulin --version "=0.31.5" --no-default-features
           run: |
             export PATH=$HOME/.cargo/bin:$PATH
             mkdir -p coverage/netbsd
@@ -150,14 +157,16 @@ jobs:
             pkg_add -I rust
             # OpenBSD's pkg-shipped Rust is currently 1.90.0. Latest
             # cargo-tarpaulin (0.35.x) pulls in `cargo-platform 0.3.3`
-            # which declares `rust-version = 1.91`, so the install
-            # fails MSRV. Pin to the 0.34.x line — its dep tree pre-
-            # dates the cargo-platform 1.91 bump and works on 1.90.
-            # Bump this pin once OpenBSD's pkg catches up.
+            # which declares `rust-version = 1.91`, so installs fail
+            # MSRV. Pin to 0.34.1 (October 2025) — last release whose
+            # dep tree compiles on rust 1.90. Drop `--locked` so
+            # cargo resolves transitive deps fresh; with `--locked`
+            # we'd inherit tarpaulin's bundled Cargo.lock and
+            # re-introduce the MSRV gap.
             # `--no-default-features` mirrors the NetBSD job to
             # sidestep the openssl-sys build (we don't need
             # coveralls).
-            cargo install cargo-tarpaulin --version "~0.34" --locked --no-default-features
+            cargo install cargo-tarpaulin --version "=0.34.1" --no-default-features
           run: |
             mkdir -p coverage/openbsd
             cargo tarpaulin --all-features --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/openbsd -j 1
@@ -183,14 +192,18 @@ jobs:
           prepare: |
             pkg install -y rust
             # DragonFly's pkg-shipped Rust is currently 1.85.1.
-            # Latest cargo-tarpaulin (0.35.x) needs ≥ 1.91 via
-            # `cargo-platform 0.3.3`; even the 0.34.x line transitively
-            # pulls in deps requiring 1.86+. The 0.32.x line is the
-            # last release with a dep tree compatible with 1.85.
+            # Pin to 0.31.5 (March 2025) — the last cargo-tarpaulin
+            # release whose dep tree compiles on rust < 1.86.
+            # Anything 0.32+ pulls in `cargo_metadata 0.20+` /
+            # `gimli 0.32+` whose own deps require ≥ 1.86; 0.35+
+            # additionally needs `cargo-platform 0.3.3` (≥ 1.91).
+            # Drop `--locked` so cargo resolves transitive deps fresh
+            # against the installed toolchain rather than the bundled
+            # lockfile (which would re-introduce the MSRV gap).
             # `--no-default-features` skips the openssl-pulling
-            # `coveralls` feature (same rationale as NetBSD/OpenBSD).
-            # Bump this pin once DragonFly's pkg catches up.
-            cargo install cargo-tarpaulin --version "~0.32" --locked --no-default-features
+            # `coveralls` feature.
+            # Bump these pins once DragonFly's pkg catches up.
+            cargo install cargo-tarpaulin --version "=0.31.5" --no-default-features
           run: |
             # DragonFly's pkg-shipped Rust is 1.85.x — same MSRV
             # workaround as `test-dragonflybsd` in `ci.yml`: pin
