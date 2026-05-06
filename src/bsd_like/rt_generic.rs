@@ -72,8 +72,17 @@ where
       // rationale as in `walk_route_table` / `parse_inet_addr`.
       let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 
-      // Only consider UP routes
-      if (rtm.rtm_flags & (RTF_UP | rtf)) == 0 {
+      // Require *both* `RTF_UP` and the caller's requested flag
+      // (e.g. `RTF_GATEWAY` for `gateway_addrs*`). The previous
+      // `(rtm_flags & (RTF_UP | rtf)) == 0` predicate was an OR
+      // mask that admitted any route with *either* bit set — so a
+      // down gateway (`RTF_GATEWAY` without `RTF_UP`) would still
+      // pass through and surface in the output even though the
+      // kernel will not use it for forwarding. Although
+      // `NET_RT_FLAGS` asks the kernel to filter by `rtf`,
+      // entries can still come back with `RTF_UP` cleared during
+      // churn or shutdown.
+      if (rtm.rtm_flags & RTF_UP) == 0 || (rtm.rtm_flags & rtf) == 0 {
         src = &src[l..];
         continue;
       }

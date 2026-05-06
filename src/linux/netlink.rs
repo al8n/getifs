@@ -1882,8 +1882,30 @@ where
         }
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => break 'outer,
-          NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
+          NLMSG_DONE => {
+            // Mirror `netlink_walk_routes` / `netlink_best_local_addrs_into`:
+            // surface `EINTR` if the kernel signaled `NLM_F_DUMP_INTR`,
+            // because route-table churn during the walk means we
+            // returned a partial snapshot. Returning the partial set
+            // as `Ok` would silently mislead callers about which
+            // gateways actually exist.
+            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
+              return Err(rustix::io::Errno::INTR.into());
+            }
+            break 'outer;
+          }
+          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
+            NlmsgErrOutcome::Ack => {
+              received = &received[l..];
+              continue;
+            }
+            // No stack for this family — surface as an empty result
+            // instead of `Err`. Lets `gateway_addrs()` keep the
+            // populated family on a single-stack host instead of
+            // failing the whole call when the other family's dump
+            // hits `EAFNOSUPPORT` / `EPROTONOSUPPORT` / `EOPNOTSUPP`.
+            NlmsgErrOutcome::FamilyUnavailable => return Ok(SmallVec::new()),
+          },
           val if val == RTM_NEWROUTE => {
             // See `netlink_interface` for why this is bounded to `hlen`.
             let rtm = &received[NLMSG_HDRLEN..hlen];
