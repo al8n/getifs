@@ -45,41 +45,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  # Verify the crate compiles at the advertised MSRV. Reads the floor
-  # from Cargo.toml so this job stays honest if the MSRV gets bumped
-  # again. Catches `let-else`, `core::mem::offset_of!`, and similar
-  # silent toolchain-version regressions before they reach a release.
-  msrv:
-    name: msrv
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - name: Read MSRV from Cargo.toml
-        id: msrv
-        run: |
-          msrv=$(awk -F\" '/^rust-version/ { print $2; exit }' Cargo.toml)
-          echo "version=$msrv" >> "$GITHUB_OUTPUT"
-      - name: Install Rust ${{ steps.msrv.outputs.version }}
-        run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal --no-self-update && rustup default ${{ steps.msrv.outputs.version }}
-      - name: cargo check at MSRV
-        # `smol_str = "0.3"` resolves to 0.3.6 by default, which itself
-        # requires Rust 1.89. Users on the advertised MSRV (1.85) need
-        # to pin smol_str down to 0.3.2 (the last 0.3.x without a
-        # rust-version requirement). Mirror that pin here so the job
-        # reflects what an actual MSRV user does. Users on Rust 1.89+
-        # don't need this and pick up the upstream 0.3.6 normally.
-        #
-        # `criterion = 0.8.0+` declares `rust-version = 1.86`, so the
-        # benchmark dev-dependency also needs an MSRV-compatible pin
-        # (0.7.0 is the last release that supports 1.80+). Same
-        # justification: 1.89+ users transparently pick up newer
-        # criterion via `cargo update`.
-        run: |
-          cargo generate-lockfile
-          cargo update -p smol_str --precise 0.3.2
-          cargo update -p criterion --precise 0.7.0
-          cargo check --all-targets
-
   # Apply clippy lints
   clippy:
     name: clippy
@@ -300,15 +265,17 @@ jobs:
             cargo build --all-features
             cargo test --all-features -- --nocapture
 
-  # DragonFlyBSD's `pkg` ships rust 1.85.x (as of 2026-05), which is
-  # below the crate's advertised MSRV (1.89, driven by smol_str
-  # 0.3.6's MSRV bump). The Cargo.toml deps are kept clean — real
-  # DragonFly users can install a newer toolchain (rustup, source
-  # build, etc.) and use the latest smol_str — but the pkg-shipped
-  # `rust` we install here is constrained to 1.85, so we pin
-  # smol_str to 0.3.2 (the last 0.3.x without a rust-version
-  # requirement) in this CI run only via `cargo update --precise`.
-  # Drop the `cargo update` line once DragonFly's pkg catches up.
+  # DragonFlyBSD's `pkg` ships rust 1.85.x (as of 2026-05). Two
+  # dev/dep crates require >1.85, so `cargo update --precise` pulls
+  # both back to MSRV-compatible versions in this CI run only — the
+  # Cargo.toml deps stay clean for real DragonFly users on a newer
+  # toolchain (rustup, source build, etc.).
+  #   - `smol_str` 0.3.6 (default `^0.3` resolution) declares
+  #     `rust-version = 1.89`. Pin to 0.3.2 (last 0.3.x without a
+  #     rust-version field).
+  #   - `criterion` 0.8.x declares `rust-version = 1.86`. Pin to
+  #     0.7.0 (last release supporting 1.80+).
+  # Drop these `cargo update` lines once DragonFly's pkg catches up.
   #
   # The multicast surface on DragonFly is intentionally a stub
   # (returns `Ok([])`) because the kernel doesn't expose

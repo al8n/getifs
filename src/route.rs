@@ -423,22 +423,15 @@ mod tests {
     }
   }
 
+  // NetBSD's CI VM has a v6 routing stack whose `NET_RT_DUMP` sysctl
+  // can return `ENOMEM` rather than an empty dump (the OS-side
+  // `sysctl_dorouttable` allocator behavior — not a real out-of-memory
+  // condition we can do anything about). Propagating the errno is
+  // correct library behavior, so the smoke test just gets gated off
+  // on the platform.
+  #[cfg(not(target_os = "netbsd"))]
   #[test]
   fn route_v6_table_returns() {
-    // NetBSD's CI VM ships with an IPv6 stack whose `NET_RT_DUMP`
-    // sysctl returns `ENOMEM` rather than an empty dump on hosts
-    // where the v6 routing table is in a partial state — propagating
-    // that errno is the correct library behavior, but it makes this
-    // smoke test useless on the platform. Apple/FreeBSD/OpenBSD/
-    // DragonFly and Linux/Windows all return a real (possibly empty)
-    // dump.
-    #[cfg(target_os = "netbsd")]
-    if let Err(e) = route_ipv6_table() {
-      if e.raw_os_error() == Some(libc::ENOMEM) {
-        eprintln!("skipping route_v6_table_returns on NetBSD: {e}");
-        return;
-      }
-    }
     let routes = route_ipv6_table().unwrap();
     for r in &routes {
       let _ = r.index();
