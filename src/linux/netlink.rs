@@ -1926,9 +1926,19 @@ where
                   | (AddressFamily::UNSPEC, AddressFamily::INET)
                     if data.len() >= 4 =>
                   {
-                    let addr = IpAddr::V4(std::net::Ipv4Addr::from(
-                      u32::from_ne_bytes(data[..4].try_into().unwrap()).swap_bytes(),
-                    ));
+                    // Netlink address payloads are already in network
+                    // byte order; `Ipv4Addr::from([u8; 4])` is
+                    // network-order-by-contract and host-endian-
+                    // independent. The previous
+                    // `u32::from_ne_bytes(...).swap_bytes()` decode
+                    // happened to work on little-endian Linux
+                    // (LE-load + swap = BE-load) but produced
+                    // byte-reversed addresses on big-endian Linux —
+                    // matters now that CI explicitly covers
+                    // big-endian targets. Match the canonical
+                    // `parse_rta_ipaddr` shape.
+                    let bytes: [u8; 4] = data[..4].try_into().unwrap();
+                    let addr = IpAddr::V4(bytes.into());
 
                     if f(&addr) {
                       tmp_addrs.push(addr);
@@ -1938,9 +1948,14 @@ where
                   | (AddressFamily::UNSPEC, AddressFamily::INET6)
                     if data.len() >= 16 =>
                   {
-                    let addr = IpAddr::V6(std::net::Ipv6Addr::from(u128::from_be_bytes(
-                      data[..16].try_into().unwrap(),
-                    )));
+                    // `Ipv6Addr::from([u8; 16])` is also
+                    // network-order-by-contract — same rationale as
+                    // the v4 branch above. The `u128::from_be_bytes`
+                    // chain it replaced was already correct, but
+                    // sticking to the byte-array form keeps both
+                    // arms uniform with `parse_rta_ipaddr`.
+                    let bytes: [u8; 16] = data[..16].try_into().unwrap();
+                    let addr = IpAddr::V6(bytes.into());
 
                     if f(&addr) {
                       tmp_addrs.push(addr);
