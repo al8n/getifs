@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -67,8 +68,71 @@ impl Drop for ForwardTable {
   }
 }
 
+/// Compute the set of directed-broadcast IPv4 addresses for every
+/// locally-configured unicast prefix on this host
+/// (`network | host_mask` for each `(addr, prefix_len)` pair).
+///
+/// Windows' `GetIpForwardTable2` returns per-subnet directed-broadcast
+/// `/32` rows alongside ordinary unicast routes — `192.168.1.0/24`
+/// produces a `192.168.1.255/32` housekeeping row, `127.0.0.0/8`
+/// produces `127.255.255.255/32`, etc. The kernel uses these for
+/// inbound broadcast handling, not for outbound forwarding, so they
+/// don't belong in `route_table`'s "unicast and local" contract.
+/// `Ipv4Addr::is_broadcast()` only matches the limited-broadcast
+/// `255.255.255.255` and the kernel doesn't tag directed-broadcast
+/// rows with anything in `MIB_IPFORWARD_ROW2`, so the only reliable
+/// signal is to derive the broadcast addresses from the host's own
+/// unicast addresses + prefix lengths and filter rows that match.
+///
+/// Returns an empty set on `GetUnicastIpAddressTable` failure rather
+/// than propagating — the cost is at worst a handful of extra
+/// directed-broadcast rows leaking through, vs. the alternative of
+/// turning a real syscall hiccup into an empty `route_table`.
+unsafe fn directed_broadcast_set() -> HashSet<Ipv4Addr> {
+  let mut out: HashSet<Ipv4Addr> = HashSet::new();
+  let mut ptr: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+  if GetUnicastIpAddressTable(AF_INET, &mut ptr) != NO_ERROR {
+    return out;
+  }
+  if ptr.is_null() {
+    return out;
+  }
+  let table = &*ptr;
+  let rows = core::slice::from_raw_parts(
+    &table.Table as *const _ as *const MIB_UNICASTIPADDRESS_ROW,
+    table.NumEntries as usize,
+  );
+  for r in rows {
+    if r.Address.si_family != AF_INET {
+      continue;
+    }
+    let prefix = r.OnLinkPrefixLength;
+    // `OnLinkPrefixLength` of 0 (unconfigured) and 32 (host route)
+    // can't generate a meaningful broadcast — `host_mask = 0` for
+    // /0 → `network | 0 = network`, which is the address itself
+    // (not a broadcast); /32 → `host_mask = 0`, same thing. Skip
+    // both rather than add the host's own address to the broadcast
+    // set, which would suppress legitimate /32 host routes.
+    if prefix == 0 || prefix >= 32 {
+      continue;
+    }
+    let v4 = r.Address.Ipv4;
+    // `sin_addr.S_un.S_addr` is in network byte order; libc/windows
+    // exposes it as a u32 — convert via `to_ne_bytes` then `from`.
+    let raw = v4.sin_addr.S_un.S_addr;
+    let bytes = raw.to_ne_bytes();
+    let addr = Ipv4Addr::from(bytes);
+    let host_mask: u32 = !((!0u32) << (32 - prefix));
+    let addr_u32 = u32::from(addr);
+    let broadcast = Ipv4Addr::from(addr_u32 | host_mask);
+    out.insert(broadcast);
+  }
+  FreeMibTable(ptr as *mut _);
+  out
+}
+
 #[inline]
-fn build_routev4(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv4Route> {
+fn build_routev4(row: &MIB_IPFORWARD_ROW2, broadcasts: &HashSet<Ipv4Addr>) -> Option<Ipv4Route> {
   // `ValidLifetime` is the kernel's "seconds this row is still
   // usable" counter; `0xffffffff` means "infinite" (statically
   // configured / never expires), `0` means the entry is past its
@@ -89,10 +153,19 @@ fn build_routev4(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv4Route> {
   };
   // Match the public `route_table` contract (unicast/local routes).
   // Windows' `GetIpForwardTable2` includes the on-link multicast cone
-  // `224.0.0.0/4` and the limited-broadcast row `255.255.255.255/32`
-  // alongside ordinary unicast routes; same filter as
-  // `bsd_like::build_routev4` so cross-platform behavior is consistent.
+  // `224.0.0.0/4`, the limited-broadcast row `255.255.255.255/32`,
+  // and *per-subnet directed broadcasts* (e.g. `192.168.1.255/32`
+  // for a `192.168.1.0/24` interface) alongside ordinary unicast
+  // routes. The first two are catchable via `Ipv4Addr` predicates;
+  // the third is a `/32` host route whose destination matches the
+  // broadcast address of one of this host's own unicast prefixes —
+  // see `directed_broadcast_set` for how that set is derived. Drop
+  // all three so cross-platform behavior is consistent with
+  // `bsd_like::build_routev4` and Linux's `RTN_BROADCAST` filter.
   if dst_v4.is_multicast() || dst_v4.is_broadcast() {
+    return None;
+  }
+  if row.DestinationPrefix.PrefixLength == 32 && broadcasts.contains(&dst_v4) {
     return None;
   }
   let net = Ipv4Net::new(dst_v4, row.DestinationPrefix.PrefixLength).ok()?;
@@ -172,8 +245,13 @@ where
   // so callers reasoning about connectivity can distinguish "no
   // routes" from "the table syscall failed."
   if let Some(table_v4) = fetch_family(AF_INET)? {
+    // SAFETY: `directed_broadcast_set` is unsafe because it calls the
+    // raw Windows table API; we contain that here so each
+    // `build_routev4` call can do an O(1) hashset lookup against the
+    // resulting set. v6 doesn't need this (no broadcast concept).
+    let broadcasts = unsafe { directed_broadcast_set() };
     for row in table_v4.rows() {
-      if let Some(r) = build_routev4(row) {
+      if let Some(r) = build_routev4(row, &broadcasts) {
         let r = IpRoute::V4(r);
         if f(&r) {
           out.push(r);
@@ -205,8 +283,9 @@ where
   // propagate.
   let mut out: SmallVec<Ipv4Route> = SmallVec::new();
   if let Some(table) = fetch_family(AF_INET)? {
+    let broadcasts = unsafe { directed_broadcast_set() };
     for row in table.rows() {
-      if let Some(r) = build_routev4(row) {
+      if let Some(r) = build_routev4(row, &broadcasts) {
         if f(&r) {
           out.push(r);
         }
