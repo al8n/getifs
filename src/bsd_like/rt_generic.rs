@@ -118,7 +118,18 @@ where
                 let sa_in: libc::sockaddr_in =
                   std::ptr::read_unaligned(cur.as_ptr() as *const libc::sockaddr_in);
                 if sa_in.sin_addr.s_addr != 0 {
-                  let ip = IpAddr::V4(Ipv4Addr::from(sa_in.sin_addr.s_addr.swap_bytes()));
+                  // `sin_addr.s_addr` is in network byte order on
+                  // every platform. Going via `to_ne_bytes` →
+                  // `Ipv4Addr::from([u8; 4])` is host-endian-
+                  // independent — the previous
+                  // `Ipv4Addr::from(s_addr.swap_bytes())` happened
+                  // to work on little-endian (LE-load + swap =
+                  // BE-value), but produced byte-reversed addresses
+                  // on big-endian BSD targets. Same fix we already
+                  // applied to the Linux gateway walker; matches
+                  // `parse_inet_addr`'s pattern.
+                  let bytes = sa_in.sin_addr.s_addr.to_ne_bytes();
+                  let ip = IpAddr::V4(Ipv4Addr::from(bytes));
                   if let Some(addr) =
                     A::try_from_with_filter(rtm.rtm_index as u32, ip, |addr| f(addr))
                   {

@@ -548,22 +548,17 @@ where
   N: Net,
 {
   unsafe {
-    // Dump nexthop objects up-front so we can resolve any default
-    // route that arrives with `RTA_NH_ID` (Linux 5.3+ `ip nexthop`).
-    // Without this, hosts whose only default route is nexthop-object
-    // based hand back `Ok([])` from `best_local_*` even though a
-    // perfectly usable default exists — `netlink_walk_routes`
-    // resolves these and `best_local_*` shouldn't diverge.
-    let nh_map = dump_nexthops()?;
-
-    // Stale-snapshot recovery. If a default route references an
-    // `RTA_NH_ID` missing from `nh_map` (e.g. a nexthop installed
-    // between our two dumps during VPN/DHCP/interface churn), we
-    // record `(metric, id)` here and re-resolve after the route walk
-    // finishes. Mirrors the deferred-retry pattern in
-    // `netlink_walk_routes`. A persistent miss surfaces as `EINTR` so
-    // the caller can retry rather than getting a silently wrong
-    // best-interface selection.
+    // Lazy nexthop-dump: don't pay the `RTM_GETNEXTHOP` round-trip
+    // unless the route walk actually encounters an `RTA_NH_ID`
+    // attribute on a default route. Most Linux hosts have no `ip
+    // nexthop`-managed routes (Linux 5.3+ opt-in feature); on those
+    // hosts `best_local_*` no longer fails when an unrelated nexthop
+    // dump returns `EINTR` / `NLM_F_DUMP_INTR` from concurrent
+    // nexthop-subsystem churn. Same pattern `netlink_walk_routes`
+    // and `rt_generic_addrs` already use; keeping all three
+    // consistent.
+    //
+    // Selection key for deferred candidates:
     // `(table_rank, metric, pref_rank, nh_id)`. `table_rank` carries
     // Linux RPDB precedence (`local` < `main` < `default`); within
     // the same table, lower metric wins; within the same metric,
@@ -851,23 +846,19 @@ where
               if let Some(mp) = multipath {
                 multipath_oifs_into(mp, &mut current_oifs);
               } else if let Some(id) = nh_id {
-                match resolve_nh_id(&nh_map, id) {
-                  Some(resolved) => {
-                    for (oif, _) in resolved {
-                      if oif != 0 {
-                        current_oifs.push(oif);
-                      }
-                    }
-                  }
-                  None => {
-                    let metric = current_metric.unwrap_or(0);
-                    let rank = table_rank_for(table_id);
-                    let pref_rank = pref_rank_for(current_pref);
-                    deferred_best.push((rank, metric, pref_rank, id));
-                    received = &received[l..];
-                    continue;
-                  }
-                }
+                // Lazy resolution: defer every `RTA_NH_ID` default
+                // candidate to the post-walk pass. The pass dumps
+                // nexthops once and resolves the entire batch — same
+                // correctness as the previous "try inline, defer to
+                // retry" two-dump pattern, but we skip the dump
+                // entirely when no default route uses nexthop
+                // objects.
+                let metric = current_metric.unwrap_or(0);
+                let rank = table_rank_for(table_id);
+                let pref_rank = pref_rank_for(current_pref);
+                deferred_best.push((rank, metric, pref_rank, id));
+                received = &received[l..];
+                continue;
               }
             }
 
@@ -914,18 +905,22 @@ where
       }
     }
 
-    // Retry pass for routes whose RTA_NH_ID was absent (`None`) from
-    // the first nexthop dump. Re-dump and re-resolve once. A second
-    // `None` is "kernel state changing faster than we can snapshot
-    // it" → surface as EINTR so the caller can retry rather than
-    // silently lose the route. `Some(empty)` means the nexthop now
-    // exists but is itself unusable (blackhole / down) — skip
-    // silently, matching the first-pass behaviour. Like the first
-    // pass we collect every resolved oif, not just the first.
+    // Resolve any deferred `RTA_NH_ID` default-route references in a
+    // single batch. Skipping this block when nothing was deferred is
+    // the whole point of the lazy-dump optimization — most Linux
+    // hosts have no `ip nexthop`-managed default routes and never
+    // pay the `RTM_GETNEXTHOP` round-trip. `None` from
+    // `resolve_nh_id` means the id wasn't in the dump (kernel state
+    // changed during enumeration); surface as `EINTR` so the caller
+    // can retry rather than silently lose the route. `Some(empty)`
+    // means the nexthop is present but unusable (blackhole / down)
+    // — skip silently. `Some(non-empty)` contributes oifs to the
+    // selection key; same `<` / `==` lex semantics as the first
+    // pass.
     if !deferred_best.is_empty() {
-      let nh_map_2 = dump_nexthops()?;
+      let nh_map = dump_nexthops()?;
       for (rank, metric, pref_rank, id) in deferred_best {
-        match resolve_nh_id(&nh_map_2, id) {
+        match resolve_nh_id(&nh_map, id) {
           None => return Err(rustix::io::Errno::INTR.into()),
           Some(resolved) => {
             let oifs: SmallVec<u32> = resolved

@@ -21,22 +21,36 @@ fn interface_not_found_for_ip() -> io::Error {
 /// println!("MTU: {}", mtu);
 /// ```
 pub fn get_ip_mtu(ip: IpAddr) -> io::Result<u32> {
-  // Enumerate interfaces (with their MTUs) and all interface addresses
-  // exactly once each, then match by `IpAddr` → index → MTU in memory.
+  // Fast path: enumerate interfaces (with their MTUs) and all
+  // interface addresses exactly once each, then match by
+  // `IpAddr` → index → MTU in memory. O(1) dumps regardless of
+  // interface count.
   //
-  // The previous implementation did a `for iface in interfaces() {
-  // iface.addrs_by_filter(...) }`, which on Linux triggered a fresh
-  // full-table netlink dump for every interface — O(1+N) dumps per
-  // lookup. This version is O(1) dumps regardless of interface count,
-  // which matters on hosts with many veth/tunnel interfaces.
+  // Fallback: if the bulk address dump fails (a malformed kernel
+  // message or transient race on any *unrelated* interface), retry
+  // by iterating per-interface — one bad interface no longer
+  // poisons the whole lookup. The per-interface path is the older
+  // O(N) dump-per-iface shape; resilience is worth the cost when
+  // the fast path has already failed.
   let ifis = interfaces()?;
-  let addrs = interface_addrs()?;
-  addrs
-    .iter()
-    .find(|a| a.addr() == ip)
-    .and_then(|a| ifis.iter().find(|i| i.index() == a.index()))
-    .map(|i| i.mtu())
-    .ok_or_else(interface_not_found_for_ip)
+  if let Ok(addrs) = interface_addrs() {
+    if let Some(mtu) = addrs
+      .iter()
+      .find(|a| a.addr() == ip)
+      .and_then(|a| ifis.iter().find(|i| i.index() == a.index()))
+      .map(|i| i.mtu())
+    {
+      return Ok(mtu);
+    }
+  }
+  for iface in &ifis {
+    if let Ok(addrs) = iface.addrs() {
+      if addrs.iter().any(|a| a.addr() == ip) {
+        return Ok(iface.mtu());
+      }
+    }
+  }
+  Err(interface_not_found_for_ip())
 }
 
 /// Get the MTU of the given [`Ipv4Addr`].
@@ -51,14 +65,27 @@ pub fn get_ip_mtu(ip: IpAddr) -> io::Result<u32> {
 /// println!("MTU: {}", mtu);
 /// ```
 pub fn get_ipv4_mtu(ip: Ipv4Addr) -> io::Result<u32> {
+  // Same fast-path / per-interface fallback shape as `get_ip_mtu`
+  // — see the comment there for rationale.
   let ifis = interfaces()?;
-  let addrs = interface_ipv4_addrs()?;
-  addrs
-    .iter()
-    .find(|a| a.addr() == ip)
-    .and_then(|a| ifis.iter().find(|i| i.index() == a.index()))
-    .map(|i| i.mtu())
-    .ok_or_else(interface_not_found_for_ip)
+  if let Ok(addrs) = interface_ipv4_addrs() {
+    if let Some(mtu) = addrs
+      .iter()
+      .find(|a| a.addr() == ip)
+      .and_then(|a| ifis.iter().find(|i| i.index() == a.index()))
+      .map(|i| i.mtu())
+    {
+      return Ok(mtu);
+    }
+  }
+  for iface in &ifis {
+    if let Ok(addrs) = iface.ipv4_addrs() {
+      if addrs.iter().any(|a| a.addr() == ip) {
+        return Ok(iface.mtu());
+      }
+    }
+  }
+  Err(interface_not_found_for_ip())
 }
 
 /// Get the MTU of the given [`Ipv6Addr`].
@@ -73,12 +100,25 @@ pub fn get_ipv4_mtu(ip: Ipv4Addr) -> io::Result<u32> {
 /// println!("MTU: {}", mtu);
 /// ```
 pub fn get_ipv6_mtu(ip: Ipv6Addr) -> io::Result<u32> {
+  // Same fast-path / per-interface fallback shape as `get_ip_mtu`
+  // — see the comment there for rationale.
   let ifis = interfaces()?;
-  let addrs = interface_ipv6_addrs()?;
-  addrs
-    .iter()
-    .find(|a| a.addr() == ip)
-    .and_then(|a| ifis.iter().find(|i| i.index() == a.index()))
-    .map(|i| i.mtu())
-    .ok_or_else(interface_not_found_for_ip)
+  if let Ok(addrs) = interface_ipv6_addrs() {
+    if let Some(mtu) = addrs
+      .iter()
+      .find(|a| a.addr() == ip)
+      .and_then(|a| ifis.iter().find(|i| i.index() == a.index()))
+      .map(|i| i.mtu())
+    {
+      return Ok(mtu);
+    }
+  }
+  for iface in &ifis {
+    if let Ok(addrs) = iface.ipv6_addrs() {
+      if addrs.iter().any(|a| a.addr() == ip) {
+        return Ok(iface.mtu());
+      }
+    }
+  }
+  Err(interface_not_found_for_ip())
 }
