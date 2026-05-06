@@ -1204,15 +1204,19 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
 /// Return value distinguishes three cases the caller has to handle
 /// differently:
 ///
-/// - `None`: the id is **not** in the map. This is the "stale snapshot
-///   / race" case — a nexthop was likely added between our nexthop
-///   dump and the route dump. Caller defers for a retry pass; on the
-///   second miss, surfaces `EINTR`.
-/// - `Some(empty)`: the id **is** in the map but the kernel marked it
-///   unusable (`NHA_BLACKHOLE`, `RTNH_F_DEAD`, `RTNH_F_LINKDOWN`,
+/// - `None`: a referenced id is **not** in the map. This is the
+///   "stale snapshot / race" case — either the top-level id, or a
+///   member id inside a group, was likely added between our nexthop
+///   dump and the route dump. Caller defers for a retry pass; on
+///   the second miss, surfaces `EINTR`. Same return for both
+///   missing-top-level and missing-group-member so a partial group
+///   can't silently lose a leg.
+/// - `Some(empty)`: the id **is** in the map but the kernel marked
+///   it unusable (`NHA_BLACKHOLE`, `RTNH_F_DEAD`, `RTNH_F_LINKDOWN`,
 ///   `RTNH_F_UNRESOLVED`), or it's a group whose members are all
-///   filtered/missing/nested-group. The route can't deliver traffic;
-///   skip it silently — no retry, no error.
+///   filtered or nested-groups. Every member is present; nothing
+///   usable. The route can't deliver traffic; skip it silently —
+///   no retry, no error.
 /// - `Some(non-empty)`: one or more `(oif, gw)` pairs to emit.
 ///
 /// Conflating the bottom two cases (the previous `SmallVec`-only API
@@ -1229,11 +1233,26 @@ fn resolve_nh_id(
   }
   if let Some(members) = &nh.group {
     for member_id in members {
-      if let Some(member) = map.get(member_id) {
-        // Skip nested groups — keep the depth bounded.
-        // Skip filtered members — kernel marked them unusable.
-        if member.group.is_none() && !member.filtered && member.oif != 0 {
-          out.push((member.oif, member.gw));
+      match map.get(member_id) {
+        Some(member) => {
+          // Skip nested groups — keep the depth bounded.
+          // Skip filtered members — kernel marked them unusable.
+          if member.group.is_none() && !member.filtered && member.oif != 0 {
+            out.push((member.oif, member.gw));
+          }
+        }
+        None => {
+          // Missing group member: the route dump told us this group
+          // contains `member_id`, but our nexthop snapshot doesn't.
+          // Treating that as `Some(out)` would silently drop a leg of
+          // the group — callers turn `Some(empty)` into "skip this
+          // route" and `Some(non-empty)` into "emit what we got",
+          // both of which lose the missing leg without any retry
+          // signal. Mirror the top-level missing-id path (`None`
+          // here) so the caller retries with a fresh dump and either
+          // resolves the member or surfaces `EINTR` if the kernel
+          // state is genuinely flapping.
+          return None;
         }
       }
     }
