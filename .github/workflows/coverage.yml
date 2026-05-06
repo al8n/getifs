@@ -53,40 +53,31 @@ jobs:
           name: ${{ matrix.os }}
           path: coverage/${{ matrix.os }}/cobertura.xml
 
-  # BSD coverage runs in vmactions VMs using cargo-tarpaulin. Only
-  # FreeBSD and OpenBSD have viable coverage jobs — NetBSD's pkgsrc
-  # rust and DragonFly's pkg rust are both built without the
+  # BSD coverage: only FreeBSD has a viable coverage job. NetBSD,
+  # OpenBSD, and DragonFly all ship rust packages built without the
   # `profiler_builtins` crate, so any `-Cinstrument-coverage` build
   # fails with `error[E0463]: can't find crate for profiler_builtins`.
-  # rustup doesn't support either of those triples, so we can't swap
-  # in a profiler-enabled toolchain inside the vmactions VM. The
-  # `test-netbsd` and `test-dragonflybsd` jobs in `ci.yml` exercise
-  # those code paths at runtime; coverage just isn't measurable.
+  # That requirement is shared by both cargo-tarpaulin and
+  # cargo-llvm-cov — they both rely on rustc's source-based
+  # coverage instrumentation. rustup doesn't support those host
+  # triples, so we can't swap in a profiler-enabled toolchain inside
+  # the vmactions VM. The `test-{netbsd,openbsd,dragonflybsd}` jobs
+  # in `ci.yml` exercise those code paths at runtime; coverage just
+  # isn't measurable.
   #
-  # FreeBSD uses rustup so we get a recent toolchain that matches
-  # tarpaulin latest. OpenBSD pins to tarpaulin 0.31.5 with
-  # `--no-default-features` — that's the unique version that satisfies
-  # both constraints we hit on OpenBSD's pkg-shipped rust (1.90.0):
-  #   1. cargo_metadata = "0.19" predates the cargo-platform 0.3.3
-  #      MSRV cliff at rust 1.91 (anything 0.32+ pulls it in).
-  #   2. coveralls-api became optional behind the `coveralls` feature
-  #      in 0.31.5, so --no-default-features cuts the
-  #      reqwest → openssl-sys path — important because openssl-sys
-  #      0.9.x doesn't support OpenBSD's LibreSSL 4.0+.
-  #
-  # All BSDs skip doctests: tarpaulin's doctest-build path triggers
-  # a rustup component download that has flaked, and Tests + Lib
+  # FreeBSD uses rustup, which gives us a profiler-enabled toolchain.
+  # Doctests are skipped here because tarpaulin's doctest-build path
+  # triggers a rustup component download that has flaked; Tests + Lib
   # cover every public API call surface anyway.
   #
-  # Earlier revisions tried cargo-llvm-cov on the older-Rust BSDs to
-  # sidestep the tarpaulin MSRV issue, but llvm-cov also needs
-  # rustlib-shipped `llvm-cov` / `llvm-profdata` (which pkg rusts
-  # don't include), and on older Rust llvm-cov hits its own MSRV.
-  # Pinned-version tarpaulin where the rust supports
-  # `profiler_builtins` is the working answer.
-  #
-  # Both jobs are best-effort: the VM step is `continue-on-error`
-  # and the artifact upload is gated on the report existing.
+  # Earlier revisions tried (a) cargo-llvm-cov on the non-FreeBSD
+  # BSDs to sidestep tarpaulin's MSRV issues, (b) older tarpaulin
+  # pins to predate the cargo-platform 0.3.3 / cargo_metadata 0.20
+  # MSRV cliff, and (c) `--no-default-features` to drop the
+  # reqwest → openssl-sys chain on OpenBSD's LibreSSL 4.0. All of
+  # those got far enough to start compiling — and then surfaced the
+  # same `profiler_builtins` error. The toolchain limitation is the
+  # actual blocker.
   coverage-freebsd:
     name: Generate Coverage for freebsd
     runs-on: ubuntu-latest
@@ -129,52 +120,15 @@ jobs:
   # The runtime test pass in `ci.yml`'s `test-netbsd` job exercises
   # the netbsdlike code path; coverage just isn't measurable here.
 
-  coverage-openbsd:
-    name: Generate Coverage for openbsd
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v6
-      - name: Generate coverage on OpenBSD
-        uses: vmactions/openbsd-vm@v1
-        with:
-          usesh: true
-          copyback: true
-          prepare: |
-            pkg_add -I rust
-            # OpenBSD's pkg-shipped Rust is currently 1.90.0.
-            # Pin to 0.31.5 — it's the right intersection of two
-            # constraints:
-            #   1. `cargo_metadata = "0.19"` in its Cargo.toml,
-            #      which depends on `cargo-platform 0.1.x` (pre-MSRV
-            #      cliff). 0.32+ uses `cargo_metadata 0.20+` whose
-            #      transitive `cargo-platform 0.3.3` declares
-            #      `rust-version = 1.91` and fails on rust 1.90.
-            #   2. `coveralls-api` first became optional behind the
-            #      `coveralls` feature in 0.31.5. 0.30.0 (and
-            #      earlier) hard-required it, so
-            #      `--no-default-features` couldn't drop the
-            #      transitive `reqwest → native-tls → openssl-sys`
-            #      chain. openssl-sys 0.9.102 only supports LibreSSL
-            #      ≤ 3.9.x and OpenBSD ships LibreSSL 4.0+, so
-            #      the build aborts.
-            # 0.31.5 with `--no-default-features` cuts the entire
-            # coveralls/reqwest/openssl-sys path, sidestepping the
-            # LibreSSL version mismatch. `--locked` keeps the
-            # bundled lockfile to also avoid surprise transitive
-            # bumps.
-            # Bump this pin once OpenBSD's pkg catches up to 1.91.
-            cargo install cargo-tarpaulin --version "=0.31.5" --no-default-features --locked
-          run: |
-            mkdir -p coverage/openbsd
-            cargo tarpaulin --all-features --run-types Tests --run-types Lib --out xml --output-dir coverage/openbsd -j 1
-
-      - name: Upload Coverage Report as Artifact
-        if: hashFiles('coverage/openbsd/cobertura.xml') != ''
-        uses: actions/upload-artifact@v7
-        with:
-          name: openbsd
-          path: coverage/openbsd/cobertura.xml
+  # OpenBSD coverage isn't viable for the same reason as NetBSD and
+  # DragonFly: the pkg-shipped `rust` package is built without
+  # `profiler_builtins`, so `-Cinstrument-coverage` fails with
+  # `error[E0463]: can't find crate for profiler_builtins`. rustup
+  # doesn't support OpenBSD as a host triple. The runtime test pass
+  # in `ci.yml`'s `test-openbsd` job exercises the netbsdlike code
+  # path with OpenBSD-specific quirks (`rtm_priority`,
+  # `RTAX_SRC` / `RTAX_SRCMASK`, etc.); coverage just isn't
+  # measurable here.
 
   # DragonFly coverage isn't viable for the same reason as NetBSD:
   # the pkg-shipped `rust` package is built without
@@ -195,7 +149,7 @@ jobs:
     # actually produced; a missing BSD report just means the
     # codecov.io merge runs without that platform's data for that
     # commit.
-    needs: [coverage-report, coverage-freebsd, coverage-openbsd]
+    needs: [coverage-report, coverage-freebsd]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
