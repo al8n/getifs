@@ -54,21 +54,23 @@ jobs:
           name: ${{ matrix.os }}
           path: coverage/${{ matrix.os }}/cobertura.xml
 
-  # BSD coverage runs in vmactions VMs using cargo-tarpaulin — same
-  # tool as the Linux/macOS/Windows job above, just installed inside
-  # each VM. Tarpaulin's LLVM-instrumentation engine handles the
-  # non-Linux targets, so we no longer need the cargo-llvm-cov /
-  # rustlib-llvm-cov plumbing the previous revision required. All four
-  # BSDs in the matching `ci.yml` `test-*` jobs (FreeBSD, NetBSD,
-  # OpenBSD, DragonFly) have a coverage counterpart here.
+  # BSD coverage runs in vmactions VMs. FreeBSD uses cargo-tarpaulin
+  # (same as Linux/macOS/Windows above, installed inside the VM via
+  # rustup so we always get a recent toolchain). NetBSD, OpenBSD, and
+  # DragonFly use cargo-llvm-cov instead — their pkg-shipped rust
+  # versions (1.85.1 on DragonFly, 1.90.0 on OpenBSD, similar on
+  # NetBSD) lag behind tarpaulin's transitive-dep MSRV requirements
+  # (cargo-platform 0.3.3 needs 1.91, cargo_metadata 0.23 needs 1.86,
+  # etc.), so installing tarpaulin from crates.io fails MSRV no
+  # matter which 0.3x.x release we pin to. cargo-llvm-cov has a much
+  # smaller dep tree and stays compatible with older rustc; it also
+  # plays well with the rustlib-shipped `llvm-cov` / `llvm-profdata`
+  # binaries so the LLVM major version always matches rustc's.
   #
+  # All four BSDs in the matching `ci.yml` `test-*` jobs (FreeBSD,
+  # NetBSD, OpenBSD, DragonFly) have a coverage counterpart here.
   # All jobs are best-effort: the VM step is `continue-on-error` and
-  # the artifact upload is gated on the report existing. OpenBSD and
-  # DragonFly are most likely to fall back to "no artifact" — neither
-  # is in tarpaulin's officially-supported matrix, so the
-  # `cargo install cargo-tarpaulin` build can fail outright; when it
-  # works, the LLVM-instrumentation engine handles the coverage
-  # collection the same way it does on FreeBSD/NetBSD.
+  # the artifact upload is gated on the report existing.
   coverage-freebsd:
     name: Generate Coverage for freebsd
     runs-on: ubuntu-latest
@@ -111,29 +113,33 @@ jobs:
           prepare: |
             /usr/sbin/pkg_add rust
             export PATH=$HOME/.cargo/bin:$PATH
-            # `--no-default-features` drops the `coveralls` feature
-            # which transitively pulls in `reqwest` → `openssl-sys`.
-            # NetBSD's pkgsrc doesn't ship matching openssl headers,
-            # so the openssl-sys build script fails.
-            #
-            # Pin to 0.31.5 (March 2025) for the same reason as the
-            # DragonFly job below: the latest tarpaulin's bundled
-            # Cargo.lock has transitive deps requiring rustc ≥ 1.86,
-            # and pkgsrc rust on the vmactions VM lags. 0.31.5 is the
-            # last release whose dep tree compiles on rust < 1.86.
-            # Drop `--locked` so cargo resolves transitive deps fresh
-            # against the installed toolchain rather than the bundled
-            # lockfile (which would re-introduce the MSRV gap).
-            cargo install cargo-tarpaulin --version "=0.31.5" --no-default-features
+            # `cargo-llvm-cov` instead of `cargo-tarpaulin` here:
+            # tarpaulin's recent transitive deps (`cargo-platform`,
+            # `cargo_metadata`, `gimli`, `icu_*`) declare rust-version
+            # constraints above what NetBSD's pkgsrc rust currently
+            # provides, so installing tarpaulin from crates.io fails
+            # MSRV regardless of which 0.3x.x release we pin to.
+            # `cargo-llvm-cov` has a much smaller dep tree and stays
+            # compatible with older rustc.
+            cargo install cargo-llvm-cov --locked
           run: |
             export PATH=$HOME/.cargo/bin:$PATH
+            # Prefer the `llvm-cov` / `llvm-profdata` shipped under
+            # `/usr/pkg/lib/rustlib/<target>/bin` (pkgsrc rust's
+            # rustlib copy) so the LLVM major version matches
+            # rustc's. Falls through to PATH discovery if the
+            # rustlib copy isn't present.
+            RUST_BIN=$(find /usr/pkg/lib/rustlib -type d -name bin 2>/dev/null | head -1)
+            if [ -x "$RUST_BIN/llvm-cov" ] && [ -x "$RUST_BIN/llvm-profdata" ]; then
+              export LLVM_COV="$RUST_BIN/llvm-cov"
+              export LLVM_PROFDATA="$RUST_BIN/llvm-profdata"
+            fi
             mkdir -p coverage/netbsd
-            # Lib-only on NetBSD for the same reason as `test-netbsd` in
-            # `ci.yml`: doctests + the `tests/` integration suite hit a
-            # `parse_addrs` "invalid address" gap on the VM's
-            # `RTM_NEWADDR` slot encoding. Lib coverage alone is
-            # enough to exercise the netbsdlike code path.
-            cargo tarpaulin --all-features --run-types Lib --out xml --output-dir coverage/netbsd -j 1
+            # Lib-only on NetBSD for the same reason as `test-netbsd`
+            # in `ci.yml`: doctests + the `tests/` integration suite
+            # hit a `parse_addrs` "invalid address" gap on the VM's
+            # `RTM_NEWADDR` slot encoding.
+            cargo llvm-cov --all-features --lib --cobertura --output-path coverage/netbsd/cobertura.xml -- --nocapture
 
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/netbsd/cobertura.xml') != ''
@@ -155,21 +161,24 @@ jobs:
           copyback: true
           prepare: |
             pkg_add -I rust
-            # OpenBSD's pkg-shipped Rust is currently 1.90.0. Latest
-            # cargo-tarpaulin (0.35.x) pulls in `cargo-platform 0.3.3`
-            # which declares `rust-version = 1.91`, so installs fail
-            # MSRV. Pin to 0.34.1 (October 2025) — last release whose
-            # dep tree compiles on rust 1.90. Drop `--locked` so
-            # cargo resolves transitive deps fresh; with `--locked`
-            # we'd inherit tarpaulin's bundled Cargo.lock and
-            # re-introduce the MSRV gap.
-            # `--no-default-features` mirrors the NetBSD job to
-            # sidestep the openssl-sys build (we don't need
-            # coveralls).
-            cargo install cargo-tarpaulin --version "=0.34.1" --no-default-features
+            # `cargo-llvm-cov` instead of `cargo-tarpaulin`: tarpaulin
+            # 0.34+ transitively pulls in `cargo-platform 0.3.3`
+            # (rustc 1.91) which exceeds OpenBSD's pkg-shipped rust
+            # (currently 1.90). cargo-llvm-cov has a much smaller dep
+            # tree and stays compatible.
+            cargo install cargo-llvm-cov --locked
           run: |
+            # Prefer the `llvm-cov` / `llvm-profdata` shipped under
+            # OpenBSD's rustlib bin directory so the LLVM major
+            # version matches rustc's. Falls through to PATH
+            # discovery if the rustlib copy isn't present.
+            RUST_BIN=$(find /usr/local/lib/rustlib -type d -name bin 2>/dev/null | head -1)
+            if [ -x "$RUST_BIN/llvm-cov" ] && [ -x "$RUST_BIN/llvm-profdata" ]; then
+              export LLVM_COV="$RUST_BIN/llvm-cov"
+              export LLVM_PROFDATA="$RUST_BIN/llvm-profdata"
+            fi
             mkdir -p coverage/openbsd
-            cargo tarpaulin --all-features --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/openbsd -j 1
+            cargo llvm-cov --all-features --cobertura --output-path coverage/openbsd/cobertura.xml -- --nocapture
 
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/openbsd/cobertura.xml') != ''
@@ -191,19 +200,12 @@ jobs:
           copyback: true
           prepare: |
             pkg install -y rust
-            # DragonFly's pkg-shipped Rust is currently 1.85.1.
-            # Pin to 0.31.5 (March 2025) — the last cargo-tarpaulin
-            # release whose dep tree compiles on rust < 1.86.
-            # Anything 0.32+ pulls in `cargo_metadata 0.20+` /
-            # `gimli 0.32+` whose own deps require ≥ 1.86; 0.35+
-            # additionally needs `cargo-platform 0.3.3` (≥ 1.91).
-            # Drop `--locked` so cargo resolves transitive deps fresh
-            # against the installed toolchain rather than the bundled
-            # lockfile (which would re-introduce the MSRV gap).
-            # `--no-default-features` skips the openssl-pulling
-            # `coveralls` feature.
-            # Bump these pins once DragonFly's pkg catches up.
-            cargo install cargo-tarpaulin --version "=0.31.5" --no-default-features
+            # `cargo-llvm-cov` instead of `cargo-tarpaulin`: tarpaulin
+            # 0.32+ transitively pulls in `cargo_metadata 0.20+` /
+            # `gimli 0.32+` whose own deps require ≥ 1.86, and DragonFly's
+            # pkg-shipped rust is currently 1.85.1. cargo-llvm-cov has a
+            # much smaller dep tree and stays compatible with older rustc.
+            cargo install cargo-llvm-cov --locked
           run: |
             # DragonFly's pkg-shipped Rust is 1.85.x — same MSRV
             # workaround as `test-dragonflybsd` in `ci.yml`: pin
@@ -213,6 +215,14 @@ jobs:
             cargo generate-lockfile
             cargo update -p smol_str --precise 0.3.2
             cargo update -p criterion --precise 0.7.0
+            # Prefer the `llvm-cov` / `llvm-profdata` shipped under
+            # DragonFly's rustlib bin directory so the LLVM major
+            # version matches rustc's.
+            RUST_BIN=$(find /usr/local/lib/rustlib -type d -name bin 2>/dev/null | head -1)
+            if [ -x "$RUST_BIN/llvm-cov" ] && [ -x "$RUST_BIN/llvm-profdata" ]; then
+              export LLVM_COV="$RUST_BIN/llvm-cov"
+              export LLVM_PROFDATA="$RUST_BIN/llvm-profdata"
+            fi
             mkdir -p coverage/dragonflybsd
             # Lib-only on DragonFly for the same reason as
             # `test-dragonflybsd` in `ci.yml`: the vmactions VM has a
@@ -220,7 +230,7 @@ jobs:
             # `tests/interfaces.rs` assertions, and the
             # `interface_by_index` re-lookup in `ifis` flakes due to
             # interface churn.
-            cargo tarpaulin --all-features --run-types Lib --out xml --output-dir coverage/dragonflybsd -j 1
+            cargo llvm-cov --all-features --lib --cobertura --output-path coverage/dragonflybsd/cobertura.xml -- --nocapture
 
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/dragonflybsd/cobertura.xml') != ''
