@@ -33,7 +33,7 @@ getifs = "0.5"
 - **Gateway discovery** - Find IPv4 and IPv6 gateway addresses
 - **Routing table** - Enumerate kernel routing-table entries
 - **RFC-based filtering** - Filter addresses by RFC classification
-- **High performance** - Up to 189x faster than alternatives on macOS (see benchmarks)
+- **High performance** - Up to 72x faster than alternatives on macOS (see benchmarks)
 - **Cross-platform** - Linux, macOS, BSD, Windows support
 
 ## Quick Start
@@ -94,10 +94,10 @@ Existing network interface crates have limitations:
 - Minimizing allocations with `SmallVec` and `SmolStr`
 - Providing comprehensive interface information including MTU and multicast support
 - Achieving **significantly better performance** than alternatives:
-  - **Up to 189x faster** on macOS (`interface_by_index`)
-  - **Up to 37x faster** on macOS (list interfaces)
+  - **Up to 72x faster** on macOS (`interface_by_index`)
+  - **Up to 22x faster** on macOS (list interfaces)
   - **2.4–2.8x faster** on Linux (interface enumeration)
-  - **~7x faster** local-IP lookup on Linux
+  - **~6.8x faster** local-IP lookup on Linux
   - Comparable performance on Windows (`GetAdaptersAddresses` overhead dominates)
 
 ## Roadmap
