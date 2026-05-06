@@ -85,7 +85,16 @@ fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
     }
     let _g2 = IfaceGuard(iface_ptr);
 
-    let mut iface_metric: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    // Per-interface state: `(metric, connected)`. We need both —
+    // metric for effective-route ranking, `Connected` to drop routes
+    // pinned to admin-down / unplugged adapters that the Windows
+    // forwarding table can still hold (a static default for a VPN
+    // interface that's currently disconnected, for example). Without
+    // this filter, such a stale route can win the metric race and
+    // make `best_local_*` return addresses on an interface the
+    // kernel won't use for outbound traffic.
+    let mut iface_state: std::collections::HashMap<u32, (u32, bool)> =
+      std::collections::HashMap::new();
     if !iface_ptr.is_null() {
       let it = &*iface_ptr;
       let rows = core::slice::from_raw_parts(
@@ -93,7 +102,7 @@ fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
         it.NumEntries as usize,
       );
       for r in rows {
-        iface_metric.insert(r.InterfaceIndex, r.Metric);
+        iface_state.insert(r.InterfaceIndex, (r.Metric, r.Connected));
       }
     }
 
@@ -111,11 +120,20 @@ fn best_default_route_interface(family: u16) -> io::Result<Option<u32>> {
         if row.ValidLifetime == 0 || row.Loopback {
           continue;
         }
+        // Drop candidates whose interface is either absent from the
+        // IP-interface table (kernel state divergence) or marked
+        // `Connected = FALSE` (link down / admin disabled). The
+        // kernel won't use such a route for outbound traffic, so
+        // selecting it here would hand back addresses on an
+        // unusable adapter.
+        let if_m = match iface_state.get(&row.InterfaceIndex) {
+          Some(&(metric, connected)) if connected => metric as u64,
+          _ => continue,
+        };
         // Effective metric per Microsoft's documented routing model:
         // the kernel sums route metric + interface metric and picks
         // the row with the smallest sum. Promote to u64 so the
         // addition can't wrap on a pathological u32+u32.
-        let if_m = iface_metric.get(&row.InterfaceIndex).copied().unwrap_or(0) as u64;
         let eff = row.Metric as u64 + if_m;
         match best {
           None => best = Some((eff, row.InterfaceIndex)),

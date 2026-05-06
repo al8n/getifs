@@ -156,13 +156,22 @@ where
   os::local_addrs_by_filter(f)
 }
 
-/// Returns the IPv4 addresses from the interface with the best default route.
+/// Returns the IPv4 addresses from the interface(s) with the best default route.
 /// The "best" interface is determined by the routing metrics of default routes (`0.0.0.0`).
 ///
 /// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
 /// `default`) are consulted; hosts with unconstrained custom `ip rule`
 /// policies ahead of `main` may have outbound traffic routed via a
 /// custom table this call does not see.
+///
+/// Best-effort on FreeBSD / macOS / NetBSD / DragonFly: those kernels
+/// don't expose a documented routing priority on `rt_msghdr` — only
+/// OpenBSD does (`rtm_priority`). On the others, every default route
+/// is treated as equal-best, so a host with multiple defaults (VPN +
+/// physical link, primary + backup WAN) gets addresses from *all* of
+/// them rather than the single one the kernel would actually pick;
+/// callers needing kernel-equivalent selection should issue
+/// `RTM_GET` over `PF_ROUTE` themselves.
 ///
 /// See also [`local_ipv4_addrs`].
 ///
@@ -180,13 +189,21 @@ pub fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
   os::best_local_ipv4_addrs()
 }
 
-/// Returns the IPv6 addresses from the interface with the best default route.
+/// Returns the IPv6 addresses from the interface(s) with the best default route.
 /// The "best" interface is determined by the routing metrics of default routes (`::`).
 ///
 /// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
 /// `default`) are consulted; hosts with unconstrained custom `ip rule`
 /// policies ahead of `main` may have outbound traffic routed via a
 /// custom table this call does not see.
+///
+/// Best-effort on FreeBSD / macOS / NetBSD / DragonFly: those kernels
+/// don't expose a documented routing priority on `rt_msghdr` — only
+/// OpenBSD does (`rtm_priority`). On the others, every default route
+/// is treated as equal-best, so a host with multiple defaults gets
+/// addresses from *all* of them rather than the single one the
+/// kernel would actually pick; callers needing kernel-equivalent
+/// selection should issue `RTM_GET` over `PF_ROUTE` themselves.
 ///
 /// See also [`local_ipv6_addrs`].
 ///
@@ -212,6 +229,14 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// `default`) are consulted; hosts with unconstrained custom `ip rule`
 /// policies ahead of `main` may have outbound traffic routed via a
 /// custom table this call does not see.
+///
+/// Best-effort on FreeBSD / macOS / NetBSD / DragonFly: those kernels
+/// don't expose a documented routing priority on `rt_msghdr` — only
+/// OpenBSD does (`rtm_priority`). On the others, every default route
+/// is treated as equal-best, so a host with multiple defaults gets
+/// addresses from *all* of them rather than the single one the
+/// kernel would actually pick; callers needing kernel-equivalent
+/// selection should issue `RTM_GET` over `PF_ROUTE` themselves.
 ///
 /// See also [`local_addrs`].
 ///
