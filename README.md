@@ -22,7 +22,7 @@ Cross-platform enumeration of network interfaces and their MTU, gateway, multica
 
 ```toml
 [dependencies]
-getifs = "0.5"
+getifs = "0.6"
 ```
 
 ## Features
@@ -99,10 +99,6 @@ Existing network interface crates have limitations:
   - **2.4–2.8x faster** on Linux (interface enumeration)
   - **~6.8x faster** local-IP lookup on Linux
   - Comparable performance on Windows (`GetAdaptersAddresses` overhead dominates)
-
-## Roadmap
-
-- [x] Support fetching routing tables
 
 ## Benchmarks
 
