@@ -103,8 +103,11 @@ mod tests {
   }
 
   // Covers the success arm by round-tripping a real interface
-  // (looked up via `interfaces()` first). Every supported platform
-  // has at least loopback.
+  // (looked up via `interfaces()` first). Skipped on DragonFly:
+  // its vmactions VM has interface churn during test runs, so a
+  // name from `interfaces()` may not still resolve a moment later
+  // (same root cause as the cfg-gate on `tests/interfaces.rs::ifis`).
+  #[cfg(not(target_os = "dragonfly"))]
   #[test]
   fn round_trip_first_interface() {
     let ift = crate::interfaces().unwrap();

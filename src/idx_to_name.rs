@@ -115,7 +115,10 @@ mod tests {
   }
 
   // Covers the success arm by round-tripping the first interface
-  // returned by `interfaces()`.
+  // returned by `interfaces()`. Skipped on DragonFly because of
+  // vmactions interface churn — see the matching gate on
+  // `name_to_idx::tests::round_trip_first_interface`.
+  #[cfg(not(target_os = "dragonfly"))]
   #[test]
   fn round_trip_first_interface() {
     let ift = crate::interfaces().unwrap();

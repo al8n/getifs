@@ -308,8 +308,8 @@ mod address_trait_tests {
     assert_eq!(<Ifv4Addr as Address>::addr(&a), v4([127, 0, 0, 1]));
     let made = <Ifv4Addr as Address>::try_from(3, v4([10, 0, 0, 1]));
     assert!(made.is_some());
-    // Wrong-family input → None (this is the `_ => None` arm at
-    // src/lib.rs:109).
+    // Wrong-family input → None (the `_ => None` arm of the
+    // `IpAddr` match in `Address::try_from`).
     let wrong = <Ifv4Addr as Address>::try_from(3, v6([0u8; 16]));
     assert!(wrong.is_none());
   }
@@ -363,13 +363,17 @@ mod address_trait_tests {
 
   #[test]
   fn ipv6addr_ext_classification() {
-    // Link-local fe80::/10 — `is_unicast_link_local` arm.
-    assert!(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1).is_unicast_link_local());
-    // fc00::/7 — `is_unique_local` arm.
-    assert!(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1).is_unique_local());
-    // Counter-cases.
-    assert!(!Ipv6Addr::LOCALHOST.is_unicast_link_local());
-    assert!(!Ipv6Addr::LOCALHOST.is_unique_local());
+    // Use UFCS so the calls resolve to the crate's `Ipv6AddrExt`
+    // trait impl unambiguously — without this, a future Rust
+    // release that stabilises identically-named inherent methods
+    // on `Ipv6Addr` would silently shadow our trait and the test
+    // would stop covering the crate code it's meant to exercise.
+    let ll = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+    let ula = Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 1);
+    assert!(Ipv6AddrExt::is_unicast_link_local(&ll));
+    assert!(Ipv6AddrExt::is_unique_local(&ula));
+    assert!(!Ipv6AddrExt::is_unicast_link_local(&Ipv6Addr::LOCALHOST));
+    assert!(!Ipv6AddrExt::is_unique_local(&Ipv6Addr::LOCALHOST));
   }
 
   #[test]
