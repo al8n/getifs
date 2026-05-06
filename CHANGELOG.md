@@ -1,5 +1,181 @@
 # RELEASED
 
+## 0.6.0 (May 6th, 2026)
+
+Post-`0.5.0` review pass. The crate's public surface stays
+source-compatible — every fix below tightens existing semantics
+(correctness, performance, robustness against kernel edge cases)
+without breaking the API. The minor bump rather than a patch reflects
+the breadth of behavioral changes (Linux RPDB-aware best-local
+selection, lazy nexthop dump, BSD source-route filtering, Windows
+forwarding-table walk, etc.) that callers exercising edge cases may
+notice.
+
+### Fixes — Linux
+
+- **Lazy `RTM_GETNEXTHOP` dump** in `netlink_walk_routes`,
+  `netlink_best_local_addrs_into`, and `rt_generic_addrs` (the gateway
+  walker). The dump only runs if the route walk actually encounters an
+  `RTA_NH_ID` reference. Hosts without `ip nexthop`-managed routes (the
+  common case) skip the round-trip entirely; transient `EINTR` /
+  `NLM_F_DUMP_INTR` from unrelated nexthop-subsystem churn no longer
+  fails ordinary `route_table()` / `best_local_*()` /
+  `gateway_addrs*()` calls.
+- **Per-family route walk** — `route_table_by_filter` issues separate
+  `AF_INET` and `AF_INET6` dumps instead of a single `AF_UNSPEC`
+  request. Some kernel versions return only IPv4 for `AF_UNSPEC` route
+  dumps; the per-family walk avoids silent IPv6 loss on dual-stack
+  hosts.
+- **`RT_TABLE_DEFAULT` (253) accepted** alongside `RT_TABLE_MAIN` (254)
+  and `RT_TABLE_LOCAL` (255). Hosts with a fallback default route
+  installed via `ip route add default ... table default` now surface it
+  correctly.
+- **RPDB precedence in best-local selection** — candidate key is now
+  `(table_rank, metric, pref_rank)` lexicographic. Lower table rank
+  wins regardless of metric (matching the kernel's rule chain
+  `local < main < default`); within a table, lower metric wins; RFC
+  4191 router preference (`RTA_PREF`) breaks equal-metric IPv6 ties
+  with `HIGH < MEDIUM < LOW`.
+- **ECMP correctness** — equal-key default candidates now extend
+  `best_oifs` instead of replacing it, so addresses from every winning
+  interface surface in `best_local_*`.
+- **`RTA_VIA` cross-family gateways are dropped, documented** —
+  `IpRoute` only models same-family `(dest, gateway)` pairs, so a route
+  whose next-hop family differs from the destination family used to
+  silently emit as `gateway = None` (on-link). They now skip cleanly;
+  the omission is noted in `route_table`'s rustdoc.
+- **Source-prefix and policy-table filtering** — routes with
+  `rtm_src_len != 0` or `RTA_SRC` set, plus routes from custom policy
+  tables, are filtered out. `route_table` / `best_local_*` rustdoc
+  carries a "best-effort" caveat for policy-routed hosts.
+- **Nexthop-group missing-member handling** — `resolve_nh_id` now
+  returns `None` when a group leaf is missing from the nexthop
+  snapshot (triggering the deferred-retry → `EINTR` path), instead of
+  silently dropping the leg.
+- **Malformed-attribute defence** — `dump_nexthops` filters nexthops
+  with malformed `NHA_GATEWAY` payloads instead of emitting them as
+  `gw = None`. Same defence for `RTA_DST` in best-local selection.
+- **Receive-buffer size** — route / nexthop walkers now use a 32 KiB
+  buffer (matching `iproute2`) instead of one OS page. Routes with
+  large `RTA_MULTIPATH` ECMP lists or deep `NHA_GROUP` payloads no
+  longer silently truncate.
+- **`NLM_F_DUMP_INTR` / family-unavailable handling in `rt_generic_addrs`**
+  — the gateway walker now mirrors the route walker. Interrupted
+  snapshots return `EINTR`; unsupported-family errors collapse to an
+  empty result.
+- **Big-endian byte order** — `rt_generic_addrs`'s IPv4 gateway decode
+  uses `Ipv4Addr::from([u8; 4])` instead of
+  `u32::from_ne_bytes(...).swap_bytes()`. The previous form happened to
+  work on little-endian Linux but produced byte-reversed addresses on
+  big-endian targets (powerpc64, riscv64gc, etc.) that recently joined
+  the cross-target CI matrix.
+
+### Fixes — BSD (macOS, FreeBSD, NetBSD, OpenBSD, DragonFly)
+
+- **`fetch()` truncation fix** — the `sysctl(NET_RT_*)` wrapper
+  truncates the buffer to the kernel-written length before parsing.
+  NetBSD and OpenBSD `NET_RT_IFLIST` dumps no longer surface as
+  `Err(InvalidData "invalid message")` on the trailing zero-padding.
+- **Source-specific routes filtered** — NetBSD's `RTF_SRC` flag and
+  OpenBSD's `RTAX_SRC` / `RTAX_SRCMASK` slot bits are respected.
+- **OpenBSD `rtm_priority` for best-local** — used as the
+  best-default selection key. Other BSDs have no documented per-route
+  priority; on those targets every default route ties and addresses
+  from all default-route interfaces are returned (documented as
+  best-effort).
+- **Per-family union APIs** — `best_local_addrs` /
+  `route_table_by_filter` walk `AF_INET` and `AF_INET6` separately so
+  single-stack hosts don't lose the populated family on
+  `EAFNOSUPPORT` / `EPROTONOSUPPORT` / `EOPNOTSUPP`.
+- **End-of-stream sentinel** — `walk_route_table`,
+  `best_local_addrs_in`, and `rt_generic_addrs_in` treat a zero-length
+  record header as end-of-stream padding instead of an error.
+- **Defensive netmask parsing** — `interface_addr_table_into` skips
+  individual addresses with non-canonical `RTAX_NETMASK` instead of
+  failing the whole walk (helps point-to-point / tunnel interfaces
+  that emit peer-address bytes in the mask slot).
+- **Big-endian IPv4 gateway fix** — same `swap_bytes()` byte-order
+  bug as the Linux walker, fixed identically.
+- **`compat::RtMsghdr` / `RtMetrics` layout assertions** — every BSD
+  `RtMsghdr` and per-platform `rt_metrics` struct now has compile-time
+  `size_of` and `offset_of!` checks against the kernel ABI for every
+  field we read. Catches version-skew silently breaking selection on
+  a future libc bump.
+- **DragonFly multicast** — `multicast_addrs()` returns
+  `Err(ErrorKind::Unsupported)` instead of pretending success with an
+  empty list (the DragonFly kernel has no `NET_RT_IFMALIST`).
+
+### Fixes — Windows
+
+- **`route_table()` support** — `route_table_by_filter` walks
+  `GetIpForwardTable2` and emits `IpRoute` entries. Filters expired
+  rows (`ValidLifetime == 0`), multicast / broadcast destinations,
+  loopback rows, and per-subnet directed-broadcast `/32` housekeeping
+  rows.
+- **Interface-keyed broadcast filter** — directed-broadcast suppression
+  set is `HashSet<(InterfaceIndex, Ipv4Addr)>` derived from
+  `GetUnicastIpAddressTable`. Multihomed hosts with a legitimate `/32`
+  host route to an address coincidentally equal to another adapter's
+  directed broadcast no longer get dropped. RFC 3021 `/31` prefixes
+  excluded; suppression only applies to
+  `PrefixLength == 32 && gw.is_none()` rows.
+- **`best_local_*` via documented forwarding-table walk** — replaces
+  the prior undocumented `GetBestRoute2(NULL, 0, ...)` /
+  `GetBestInterfaceEx(unspec)` calls. Walks `GetIpForwardTable2` for
+  `PrefixLength == 0 && ValidLifetime > 0 && !Loopback` rows, joins
+  per-interface `Connected` + `Metric` from `GetIpInterfaceTable`,
+  picks smallest *effective* metric (route metric + interface metric).
+- **Equal-cost defaults preserved** — `best_default_route_interface`
+  returns `SmallVec<u32>` instead of `Option<u32>`. Multi-homed hosts
+  with equal-cost defaults across two adapters now surface addresses
+  from every winning interface (matching Linux/BSD).
+- **`Connected = FALSE` filter** — stale defaults pinned to a
+  disconnected VPN / unplugged NIC can no longer win the metric race.
+
+### Fixes — MTU lookup
+
+- **Bulk path with per-interface fallback** — `get_ip_mtu` /
+  `get_ipv4_mtu` / `get_ipv6_mtu` first try a single
+  `interface_addrs()` dump, then fall back to per-interface iteration
+  if the bulk dump fails. One unrelated malformed kernel message no
+  longer aborts the whole lookup.
+
+### Performance
+
+- New `route` benchmark suite (`benches/route.rs`) covering
+  `route_ipv4_table`, `route_ipv6_table`, `route_table`, and
+  `route_table_by_filter(default_only)` on Linux / macOS / Windows.
+- Linux gateway operations regained their pre-branch latency after
+  the lazy nexthop fix:
+  - `gateway_ipv4_addrs`: 19.9 µs (was 30.4 µs mid-branch, 18.4 µs at
+    `0.5.0`)
+  - `gateway_ipv6_addrs`: 16.1 µs (was 26.7 µs mid-branch, 14.3 µs at
+    `0.5.0`)
+  - `gateway_addrs`: 24.1 µs (was 34.4 µs mid-branch, 22.4 µs at
+    `0.5.0`)
+
+### CI / chore
+
+- **Cross-target compile matrix** now covers Linux glibc/musl across
+  aarch64 / i686 / powerpc64 / riscv64gc, FreeBSD x86_64 / i686, NetBSD
+  x86_64, and Windows MinGW / MSVC i686 / x86_64.
+- **Runtime BSD VMs** — `test-freebsd`, `test-netbsd`, `test-openbsd`,
+  `test-dragonflybsd` jobs run inside `vmactions/*-vm@v1`. NetBSD and
+  DragonFly use `cargo test --lib` (doctests + integration tests
+  skipped); per-test cfg-gates in `tests/interfaces.rs` and
+  `tests/filter_variants.rs` document the platform-specific gaps.
+- **Coverage on all four BSDs** — `coverage-freebsd`, `coverage-netbsd`,
+  `coverage-openbsd`, `coverage-dragonflybsd` use cargo-tarpaulin
+  inside vmactions VMs (replacing the prior cargo-llvm-cov plumbing).
+- **Dedicated MSRV CI job removed** — `rust-version = "1.85.0"` is the
+  declared contract; users on Rust 1.85 follow the documented
+  `cargo update -p smol_str --precise 0.3.2` /
+  `cargo update -p criterion --precise 0.7.0` workaround. The DragonFly
+  CI job uses these pins because pkg-shipped Rust there is 1.85.1.
+- **`criterion` dev-dep range** relaxed from `^0.8` to `>=0.7, <0.9`
+  so the DragonFly CI's `cargo update --precise 0.7.0` satisfies the
+  constraint while normal users still resolve to the latest 0.8.x.
+
 ## 0.5.0 (April 15th, 2026)
 
 ### Fixes

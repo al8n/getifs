@@ -7,10 +7,16 @@ use smallvec_wrapper::SmallVec;
 
 use super::{os, IfNet, Ifv4Net, Ifv6Net};
 
-/// Returns all IPv4 addresses from interfaces that have valid routes (excluding loopback).
-/// This ensures we only return addresses that can be used for communication.
+/// Returns all non-loopback IPv4 addresses configured on every
+/// interface on the system.
 ///
-/// See also [`best_local_ipv4_addrs`] and [`local_ipv4_addrs_by_filter`].
+/// This enumerates all interface addresses and applies a
+/// loopback/link-local filter — it does **not** check whether the
+/// owning interface has a usable route. For a route-aware variant that
+/// returns only the addresses of the best-default-route interface,
+/// see [`best_local_ipv4_addrs`].
+///
+/// See also [`local_ipv4_addrs_by_filter`].
 ///
 /// ## Example
 ///
@@ -26,10 +32,16 @@ pub fn local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
   os::local_ipv4_addrs()
 }
 
-/// Returns all IPv6 addresses from interfaces that have valid routes (excluding loopback).
-/// This ensures we only return addresses that can be used for communication.
+/// Returns all non-loopback IPv6 addresses configured on every
+/// interface on the system.
 ///
-/// See also [`best_local_ipv6_addrs`] and [`local_ipv6_addrs_by_filter`].
+/// This enumerates all interface addresses and applies a
+/// loopback/link-local filter — it does **not** check whether the
+/// owning interface has a usable route. For a route-aware variant
+/// that returns only the addresses of the best-default-route
+/// interface, see [`best_local_ipv6_addrs`].
+///
+/// See also [`local_ipv6_addrs_by_filter`].
 ///
 /// ## Example
 ///
@@ -45,10 +57,16 @@ pub fn local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
   os::local_ipv6_addrs()
 }
 
-/// Returns all IP addresses (both IPv4 and IPv6) from interfaces that have valid routes (excluding loopback).
-/// This ensures we only return addresses that can be used for communication.
+/// Returns all non-loopback IP addresses (both IPv4 and IPv6)
+/// configured on every interface on the system.
 ///
-/// See also [`best_local_addrs`] and [`local_addrs_by_filter`].
+/// This enumerates all interface addresses and applies a
+/// loopback/link-local filter — it does **not** check whether the
+/// owning interface has a usable route. For a route-aware variant
+/// that returns only the addresses of the best-default-route
+/// interface, see [`best_local_addrs`].
+///
+/// See also [`local_addrs_by_filter`].
 ///
 /// ## Example
 ///
@@ -64,9 +82,12 @@ pub fn local_addrs() -> io::Result<SmallVec<IfNet>> {
   os::local_addrs()
 }
 
-/// Returns all IPv4 addresses from interfaces that have valid routes.
+/// Returns all non-loopback IPv4 addresses configured on every
+/// interface on the system, further refined by the provided filter.
 ///
-/// Use the provided filter to further refine the results.
+/// Like [`local_ipv4_addrs`], this does **not** check whether the
+/// owning interface has a usable route — see [`best_local_ipv4_addrs`]
+/// for the route-aware variant.
 ///
 /// ## Example
 ///
@@ -85,9 +106,12 @@ where
   os::local_ipv4_addrs_by_filter(f)
 }
 
-/// Returns all IPv6 addresses from interfaces that have valid routes.
+/// Returns all non-loopback IPv6 addresses configured on every
+/// interface on the system, further refined by the provided filter.
 ///
-/// Use the provided filter to further refine the results.
+/// Like [`local_ipv6_addrs`], this does **not** check whether the
+/// owning interface has a usable route — see [`best_local_ipv6_addrs`]
+/// for the route-aware variant.
 ///
 /// ## Example
 ///
@@ -106,9 +130,13 @@ where
   os::local_ipv6_addrs_by_filter(f)
 }
 
-/// Returns all IP addresses (both IPv4 and IPv6) from interfaces that have valid routes.
+/// Returns all non-loopback IP addresses (both IPv4 and IPv6)
+/// configured on every interface on the system, further refined by
+/// the provided filter.
 ///
-/// Use the provided filter to further refine the results.
+/// Like [`local_addrs`], this does **not** check whether the owning
+/// interface has a usable route — see [`best_local_addrs`] for the
+/// route-aware variant.
 ///
 /// ## Example
 ///
@@ -128,8 +156,22 @@ where
   os::local_addrs_by_filter(f)
 }
 
-/// Returns the IPv4 addresses from the interface with the best default route.
+/// Returns the IPv4 addresses from the interface(s) with the best default route.
 /// The "best" interface is determined by the routing metrics of default routes (`0.0.0.0`).
+///
+/// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
+/// `default`) are consulted; hosts with unconstrained custom `ip rule`
+/// policies ahead of `main` may have outbound traffic routed via a
+/// custom table this call does not see.
+///
+/// Best-effort on FreeBSD / macOS / NetBSD / DragonFly: those kernels
+/// don't expose a documented routing priority on `rt_msghdr` — only
+/// OpenBSD does (`rtm_priority`). On the others, every default route
+/// is treated as equal-best, so a host with multiple defaults (VPN +
+/// physical link, primary + backup WAN) gets addresses from *all* of
+/// them rather than the single one the kernel would actually pick;
+/// callers needing kernel-equivalent selection should issue
+/// `RTM_GET` over `PF_ROUTE` themselves.
 ///
 /// See also [`local_ipv4_addrs`].
 ///
@@ -147,8 +189,21 @@ pub fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
   os::best_local_ipv4_addrs()
 }
 
-/// Returns the IPv6 addresses from the interface with the best default route.
+/// Returns the IPv6 addresses from the interface(s) with the best default route.
 /// The "best" interface is determined by the routing metrics of default routes (`::`).
+///
+/// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
+/// `default`) are consulted; hosts with unconstrained custom `ip rule`
+/// policies ahead of `main` may have outbound traffic routed via a
+/// custom table this call does not see.
+///
+/// Best-effort on FreeBSD / macOS / NetBSD / DragonFly: those kernels
+/// don't expose a documented routing priority on `rt_msghdr` — only
+/// OpenBSD does (`rtm_priority`). On the others, every default route
+/// is treated as equal-best, so a host with multiple defaults gets
+/// addresses from *all* of them rather than the single one the
+/// kernel would actually pick; callers needing kernel-equivalent
+/// selection should issue `RTM_GET` over `PF_ROUTE` themselves.
 ///
 /// See also [`local_ipv6_addrs`].
 ///
@@ -169,6 +224,19 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 
 /// Returns both IPv4 and IPv6 addresses from the interfaces with the best default routes.
 /// The "best" interfaces are determined by the routing metrics of default routes.
+///
+/// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
+/// `default`) are consulted; hosts with unconstrained custom `ip rule`
+/// policies ahead of `main` may have outbound traffic routed via a
+/// custom table this call does not see.
+///
+/// Best-effort on FreeBSD / macOS / NetBSD / DragonFly: those kernels
+/// don't expose a documented routing priority on `rt_msghdr` — only
+/// OpenBSD does (`rtm_priority`). On the others, every default route
+/// is treated as equal-best, so a host with multiple defaults gets
+/// addresses from *all* of them rather than the single one the
+/// kernel would actually pick; callers needing kernel-equivalent
+/// selection should issue `RTM_GET` over `PF_ROUTE` themselves.
 ///
 /// See also [`local_addrs`].
 ///

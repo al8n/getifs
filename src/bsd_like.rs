@@ -1,4 +1,4 @@
-use ipnet::ip_mask_to_prefix;
+use ipnet::{ip_mask_to_prefix, Ipv4Net, Ipv6Net};
 use libc::{
   c_void, if_msghdr, size_t, sysctl, AF_INET, AF_INET6, AF_LINK, AF_ROUTE, AF_UNSPEC, CTL_NET,
   NET_RT_IFLIST, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO, RTM_NEWADDR, RTM_VERSION,
@@ -17,17 +17,23 @@ use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 use std::{
   io, mem,
-  net::{IpAddr, Ipv6Addr},
+  net::{IpAddr, Ipv4Addr, Ipv6Addr},
   ptr::null_mut,
 };
 
-use super::{IfNet, Ifv4Net, Ifv6Net, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
+use super::{
+  IfNet, Ifv4Net, Ifv6Net, Interface, IpRoute, Ipv4Route, Ipv6Route, MacAddr, Net, MAC_ADDRESS_SIZE,
+};
 
 // `Address` / `IfAddr` / `Ifv4Addr` / `Ifv6Addr` are only referenced
 // inside the `cfg_bsd_multicast!`-gated `interface_multiaddr_table`
-// impls, which only expand for Apple and FreeBSD. Gating the import
-// to the same cfg keeps NetBSD/OpenBSD/DragonFly builds warning-free.
-#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+// impls. Keep this gate in lock-step with `cfg_bsd_multicast!`
+// (src/macros.rs) so NetBSD / OpenBSD builds stay warning-free.
+#[cfg(any(
+  target_vendor = "apple",
+  target_os = "freebsd",
+  target_os = "dragonfly"
+))]
 use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
 macro_rules! rt_generic_mod {
@@ -99,10 +105,210 @@ rt_generic_mod!(gateway(RTF_GATEWAY, RTA_GATEWAY),);
 
 pub(super) use local_addr::*;
 
+#[inline]
+fn build_routev4(
+  index: u32,
+  rtm_flags: libc::c_int,
+  dst: IpAddr,
+  gateway: Option<IpAddr>,
+  netmask: Option<IpAddr>,
+) -> Option<Ipv4Route> {
+  let dst_v4 = match dst {
+    IpAddr::V4(ip) => ip,
+    _ => return None,
+  };
+  // The public `route_table` contract is unicast/local routes only.
+  // BSD's `NET_RT_DUMP` happily includes the kernel's multicast cone
+  // (e.g. `224.0.0/4` on macOS) and the limited-broadcast entry as
+  // ordinary `RTM_GET` records — drop them here so they don't leak
+  // through. `Ipv4Addr::is_multicast()` covers `224.0.0.0/4`,
+  // `is_broadcast()` covers `255.255.255.255`.
+  if dst_v4.is_multicast() || dst_v4.is_broadcast() {
+    return None;
+  }
+  // Resolving `prefix_len` from the kernel's encoding is fiddly:
+  //
+  // - `Some(IpAddr::V4(m))` with a v4 dst: real netmask, decode it.
+  // - Anything else (`None`, or family-mismatched `Some(IpAddr::V6(_))`
+  //   from `parse_kernel_inet_addr`'s AF_UNSPEC fallback when the
+  //   kernel sent the mask in short kernel-form): the kernel didn't
+  //   give us a decodable explicit mask, so fall back to the
+  //   per-route default below.
+  //
+  // Default rules when the explicit mask is unavailable:
+  // - `dst.is_unspecified()`: BSD encodes the default route's mask
+  //   as `0.0.0.0` (or omits it entirely); treat as `/0`.
+  // - `RTF_HOST` set: explicit host route, prefix is `/32`.
+  // - Otherwise: a network route whose mask we can't decode — skip
+  //   rather than fabricate `/32` (Codex round-13 caught this turning
+  //   `fe80::/64` into `fe80::/128` in the IPv6 path).
+  let prefix_len = match netmask {
+    Some(IpAddr::V4(m)) => ip_mask_to_prefix(IpAddr::V4(m)).ok()?,
+    _ if dst_v4.is_unspecified() => 0,
+    _ if (rtm_flags & libc::RTF_HOST) != 0 => 32,
+    _ => return None,
+  };
+  let net = Ipv4Net::new(dst_v4, prefix_len).ok()?;
+  let gw = match gateway {
+    Some(IpAddr::V4(g)) if g != Ipv4Addr::UNSPECIFIED => Some(g),
+    _ => None,
+  };
+  Some(Ipv4Route::new(index, net, gw))
+}
+
+#[inline]
+fn build_routev6(
+  index: u32,
+  rtm_flags: libc::c_int,
+  dst: IpAddr,
+  gateway: Option<IpAddr>,
+  netmask: Option<IpAddr>,
+) -> Option<Ipv6Route> {
+  let dst_v6 = match dst {
+    IpAddr::V6(ip) => ip,
+    _ => return None,
+  };
+  // Same rationale as `build_routev4`: drop multicast destinations
+  // (`ff00::/8` on BSD/macOS) so the public `route_table` stays
+  // consistent with its unicast/local contract.
+  if dst_v6.is_multicast() {
+    return None;
+  }
+  // See `build_routev4` for the full per-arm rationale; the v6 case
+  // reads identically, with `/128` for host routes and `/0` for the
+  // unspecified destination. The `_` arm catches both `None` and the
+  // family-mismatched `Some(IpAddr::V4(_))` that
+  // `parse_kernel_inet_addr` produces when it can't decode the v6
+  // mask's short kernel-form encoding.
+  let prefix_len = match netmask {
+    Some(IpAddr::V6(m)) => ip_mask_to_prefix(IpAddr::V6(m)).ok()?,
+    _ if dst_v6.is_unspecified() => 0,
+    _ if (rtm_flags & libc::RTF_HOST) != 0 => 128,
+    _ => return None,
+  };
+  let net = Ipv6Net::new(dst_v6, prefix_len).ok()?;
+  let gw = match gateway {
+    Some(IpAddr::V6(g)) if g != Ipv6Addr::UNSPECIFIED => Some(g),
+    _ => None,
+  };
+  Some(Ipv6Route::new(index, net, gw))
+}
+
+/// `Ok(())` if the result is "this address-family stack isn't
+/// installed on this host" — `EAFNOSUPPORT`, `EPROTONOSUPPORT`, or
+/// `EOPNOTSUPP`. Anything else propagates. The numeric values for
+/// these errnos vary across BSDs (macOS `EOPNOTSUPP = 102` vs.
+/// FreeBSD/NetBSD/OpenBSD `EOPNOTSUPP = 45`), so we read them from
+/// `libc::E*` rather than hardcoding — `rustix` isn't a BSD dep.
+///
+/// Used by the two-family BSD union APIs (`route_table_by_filter`,
+/// `best_local_addrs`) so a single-stack host that successfully
+/// returns the populated family doesn't lose the result when the
+/// other family's `sysctl` dump comes back with one of the above.
+/// The single-family entry points (`route_ipv4_table_by_filter`,
+/// `best_local_ipv4_addrs`, etc.) deliberately keep propagating —
+/// asking for IPv6 routes on a v6-disabled host should not silently
+/// return `Ok([])`.
+pub(super) fn family_unavailable_to_empty(result: io::Result<()>) -> io::Result<()> {
+  match result {
+    Ok(()) => Ok(()),
+    Err(e) => match e.raw_os_error() {
+      Some(c) if c == libc::EAFNOSUPPORT || c == libc::EPROTONOSUPPORT || c == libc::EOPNOTSUPP => {
+        Ok(())
+      }
+      _ => Err(e),
+    },
+  }
+}
+
+pub(super) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<IpRoute>>
+where
+  F: FnMut(&IpRoute) -> bool,
+{
+  // Walk AF_INET and AF_INET6 separately rather than one AF_UNSPEC
+  // dump. BSD sysctl can omit `RTAX_DST` for the default-route entry
+  // (encoding the destination as "unspecified") — with a single
+  // AF_UNSPEC walk we can't recover the family from a message that
+  // omits dst, so a default route would silently disappear from the
+  // union API while the family-specific APIs (`route_ipv4_table_by_filter`
+  // / `route_ipv6_table_by_filter`) would still surface it. Two
+  // sysctl calls is the right tradeoff for keeping the union API
+  // consistent with its single-family counterparts.
+  let mut out: SmallVec<IpRoute> = SmallVec::new();
+  // Each family is wrapped so a single-stack host (no v4 OR no v6)
+  // gets the populated family back instead of `Err`. The
+  // family-specific entry points further down still propagate the
+  // error — see `family_unavailable_to_empty` for why.
+  family_unavailable_to_empty(route::walk_route_table(
+    AF_INET,
+    |index, flags, dst, gw, mask| {
+      let dst = dst.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+      if let Some(r) = build_routev4(index, flags, dst, gw, mask) {
+        let r = IpRoute::V4(r);
+        if f(&r) {
+          out.push(r);
+        }
+      }
+    },
+  ))?;
+  family_unavailable_to_empty(route::walk_route_table(
+    AF_INET6,
+    |index, flags, dst, gw, mask| {
+      let dst = dst.unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+      if let Some(r) = build_routev6(index, flags, dst, gw, mask) {
+        let r = IpRoute::V6(r);
+        if f(&r) {
+          out.push(r);
+        }
+      }
+    },
+  ))?;
+  Ok(out)
+}
+
+pub(super) fn route_ipv4_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ipv4Route>>
+where
+  F: FnMut(&Ipv4Route) -> bool,
+{
+  let mut out: SmallVec<Ipv4Route> = SmallVec::new();
+  route::walk_route_table(AF_INET, |index, flags, dst, gw, mask| {
+    // BSD sysctl can omit `RTAX_DST` for the default route — fold that
+    // case to `0.0.0.0` here so `build_routev4` can pair it with the
+    // implicit `/0` mask.
+    let dst = dst.unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    if let Some(r) = build_routev4(index, flags, dst, gw, mask) {
+      if f(&r) {
+        out.push(r);
+      }
+    }
+  })?;
+  Ok(out)
+}
+
+pub(super) fn route_ipv6_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ipv6Route>>
+where
+  F: FnMut(&Ipv6Route) -> bool,
+{
+  let mut out: SmallVec<Ipv6Route> = SmallVec::new();
+  route::walk_route_table(AF_INET6, |index, flags, dst, gw, mask| {
+    // Same as the v4 path — missing `RTAX_DST` on AF_INET6 is BSD's
+    // way of describing the `::/0` default route.
+    let dst = dst.unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    if let Some(r) = build_routev6(index, flags, dst, gw, mask) {
+      if f(&r) {
+        out.push(r);
+      }
+    }
+  })?;
+  Ok(out)
+}
+
 #[path = "bsd_like/compat.rs"]
 mod compat;
 #[path = "bsd_like/local_addr.rs"]
 mod local_addr;
+#[path = "bsd_like/route.rs"]
+mod route;
 #[path = "bsd_like/rt_generic.rs"]
 mod rt_generic;
 
@@ -125,11 +331,6 @@ fn invalid_message() -> io::Error {
 
 fn message_too_short() -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, "message too short")
-}
-
-#[inline]
-fn invalid_mask(e: ipnet::PrefixLenError) -> io::Error {
-  io::Error::new(io::ErrorKind::InvalidData, e)
 }
 
 bitflags::bitflags! {
@@ -308,17 +509,65 @@ const fn roundup(l: usize) -> usize {
   (l + KERNAL_ALIGN - 1) & !(KERNAL_ALIGN - 1)
 }
 
-fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
-  const SOCK4: usize = size_of::<libc::sockaddr_in>();
-  const SOCK6: usize = size_of::<libc::sockaddr_in6>();
+const SOCK4: usize = size_of::<libc::sockaddr_in>();
+const SOCK6: usize = size_of::<libc::sockaddr_in6>();
 
+/// Decode a BSD route-message sockaddr whose `sa_len` is shorter than
+/// the full `sockaddr_in[6]` size. The kernel emits this compact form
+/// for netmasks where trailing zero bytes are omitted — e.g., a /24
+/// IPv4 netmask carries `sa_len = 8` (1 sa_len + 1 sa_family + 2 port +
+/// 4 sin_addr) but only the three significant bytes of the mask. We
+/// zero-pad to the full struct shape and then read the address bytes
+/// at the same offset the full-length decoder would.
+///
+/// `sa` is the slice covering exactly `sa_len` bytes; the caller has
+/// already verified `b.len() >= sa_len`.
+fn parse_short_inet_addr(af: i32, sa: &[u8]) -> io::Result<IpAddr> {
+  match af {
+    AF_INET => {
+      // sockaddr_in layout: sa_len, sa_family, sin_port (2), sin_addr (4), sin_zero (8)
+      const OFF: usize = 4;
+      let mut ip = [0u8; 4];
+      if sa.len() > OFF {
+        let n = (sa.len() - OFF).min(4);
+        ip[..n].copy_from_slice(&sa[OFF..OFF + n]);
+      }
+      Ok(IpAddr::V4(ip.into()))
+    }
+    AF_INET6 => {
+      // sockaddr_in6 layout: sa_len, sa_family, sin6_port (2), sin6_flowinfo (4), sin6_addr (16), sin6_scope_id (4)
+      const OFF: usize = 8;
+      let mut ip = [0u8; 16];
+      if sa.len() > OFF {
+        let n = (sa.len() - OFF).min(16);
+        ip[..n].copy_from_slice(&sa[OFF..OFF + n]);
+      }
+      Ok(IpAddr::V6(Ipv6Addr::from(ip)))
+    }
+    _ => Err(invalid_address()),
+  }
+}
+
+fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
+  // Sysctl returns a `Vec<u8>`, which only formally guarantees u8
+  // alignment for its data pointer. The kernel pads each routing
+  // message to KERNAL_ALIGN bytes (4 on Apple, 8 elsewhere), so the
+  // sockaddr offsets happen to land on a usable boundary in practice
+  // — but creating `&libc::sockaddr_in[6]` from `b.as_ptr()` is still
+  // UB by the language rules whenever `b` isn't aligned for the
+  // target type. `read_unaligned` copies into an aligned local
+  // without that assumption; the resulting load is the same on x86 /
+  // ARM, but defined behaviour everywhere (including strict-alignment
+  // targets like SPARC). All BSD callers — gateway, address, route,
+  // and multicast walkers — go through this function.
   match af {
     AF_INET => {
       if b.len() < SOCK4 {
         return Err(invalid_address());
       }
 
-      let sockaddr = unsafe { &*(b.as_ptr() as *const libc::sockaddr_in) };
+      let sockaddr: libc::sockaddr_in =
+        unsafe { core::ptr::read_unaligned(b.as_ptr() as *const libc::sockaddr_in) };
       Ok((
         SOCK4,
         IpAddr::V4(sockaddr.sin_addr.s_addr.to_ne_bytes().into()),
@@ -329,7 +578,8 @@ fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
         return Err(invalid_address());
       }
 
-      let sockaddr = unsafe { &*(b.as_ptr() as *const libc::sockaddr_in6) };
+      let sockaddr: libc::sockaddr_in6 =
+        unsafe { core::ptr::read_unaligned(b.as_ptr() as *const libc::sockaddr_in6) };
 
       let mut ip = sockaddr.sin6_addr.s6_addr;
       // TODO: create own Ipv6Addr
@@ -356,17 +606,30 @@ fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
   }
 }
 
-fn parse_addrs(addrs: u32, mut b: &[u8]) -> io::Result<[Option<IpAddr>; RTAX_MAX as usize]> {
+pub(super) fn parse_addrs(
+  addrs: u32,
+  mut b: &[u8],
+) -> io::Result<[Option<IpAddr>; RTAX_MAX as usize]> {
   let mut as_ = [None; RTAX_MAX as usize];
 
   #[allow(clippy::needless_range_loop)]
   for i in 0..RTAX_MAX as usize {
-    if b.len() < KERNAL_ALIGN {
-      break;
-    }
-
     if addrs & (1 << i) == 0 {
       continue;
+    }
+
+    // The kernel claimed slot `i` is present, so a sockaddr is
+    // expected. Bailing here on `b.len() < KERNAL_ALIGN` (the previous
+    // pre-loop break) silently turned a truncated message — for
+    // instance a route record advertising `RTAX_DST` with no body —
+    // into `as_[RTAX_DST] = None`, which the route_table builder then
+    // folded into a synthetic `0.0.0.0/0` / `::/0` default route.
+    // Surface as a malformed message instead of fabricating data.
+    if b.len() < KERNAL_ALIGN {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "message too short",
+      ));
     }
 
     if i <= RTAX_BRD as usize {
@@ -382,15 +645,41 @@ fn parse_addrs(addrs: u32, mut b: &[u8]) -> io::Result<[Option<IpAddr>; RTAX_MAX
           b = &b[l..];
         }
         AF_INET | AF_INET6 => {
-          let (_, addr) = parse_inet_addr(b[1] as i32, b)?;
-          as_[i] = Some(addr);
-          let l = roundup(b[0] as usize);
-          if b.len() < l {
+          let af = b[1] as i32;
+          let sa_len = b[0] as usize;
+          let needed = if af == AF_INET { SOCK4 } else { SOCK6 };
+          let l = roundup(sa_len);
+          if b.len() < l || b.len() < sa_len {
             return Err(io::Error::new(
               io::ErrorKind::InvalidData,
               "message too short",
             ));
           }
+          // BSD's NET_RT_DUMP encodes netmasks as truncated sockaddrs:
+          // `sa_family = AF_INET[6]` but `sa_len` is short and only the
+          // leading address bytes that differ from zero are present.
+          // The full-length `parse_inet_addr` rejects those because it
+          // requires `b.len() >= size_of::<sockaddr_in[6]>()`. The
+          // short-form decoder zero-extends the trailing bytes —
+          // correct semantics for a netmask, but wrong for any other
+          // slot (a short RTAX_DST or RTAX_GATEWAY would silently
+          // become an unspecified address, which the route builder
+          // would happily turn into a fake default route or a fake
+          // on-link gateway). Restrict the short-form fallback to
+          // `RTAX_NETMASK`; for every other slot, a sub-`SOCK4`/`SOCK6`
+          // length is a malformed message → `InvalidData`.
+          let addr = if sa_len >= needed {
+            let (_, a) = parse_inet_addr(af, b)?;
+            a
+          } else if i == RTAX_NETMASK as usize {
+            parse_short_inet_addr(af, &b[..sa_len])?
+          } else {
+            return Err(io::Error::new(
+              io::ErrorKind::InvalidData,
+              "short sockaddr outside RTAX_NETMASK",
+            ));
+          };
+          as_[i] = Some(addr);
           b = &b[l..];
         }
         _ => {
@@ -429,7 +718,10 @@ fn fetch(family: i32, rt: i32, flag: i32) -> io::Result<Vec<u8>> {
       return Err(io::Error::last_os_error());
     }
 
-    // Allocate buffer
+    // Allocate buffer. The first sysctl is a *size estimate*; the
+    // kernel can write fewer bytes on the second call when something
+    // (an interface, route, etc.) goes away in the gap. We re-read
+    // the updated `len` after the second call and truncate.
     let mut buf = vec![0u8; len];
     if sysctl(
       mib.as_mut_ptr(),
@@ -442,6 +734,15 @@ fn fetch(family: i32, rt: i32, flag: i32) -> io::Result<Vec<u8>> {
     {
       return Err(io::Error::last_os_error());
     }
+
+    // Truncate to the actually-written prefix. Without this, the
+    // tail of `buf` is the zero-init padding from `vec![0u8; len]`,
+    // and the walker reads the leading 2 bytes of that as a
+    // zero-length message header — surfacing as
+    // `Err(InvalidData "invalid message")` on platforms where the
+    // kernel routinely writes less than the size estimate
+    // (especially NetBSD/OpenBSD `NET_RT_IFLIST`).
+    buf.truncate(len);
 
     Ok(buf)
   }
@@ -468,9 +769,20 @@ pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
       }
 
       if src[3] as i32 == libc::RTM_IFINFO {
-        let ifm = &*(src.as_ptr() as *const if_msghdr);
+        const HEADER_SIZE: usize = size_of::<if_msghdr>();
+        // The outer `src.len() < l` guard only proves the message fits
+        // in the sysctl buffer. We *also* need `l >= HEADER_SIZE` so
+        // the upcoming `read_unaligned` doesn't read past the message
+        // and the slice below can't underflow.
+        if l < HEADER_SIZE {
+          return Err(message_too_short());
+        }
+        // SAFETY: `src` is a `Vec<u8>` from sysctl which only
+        // formally guarantees u8 alignment; `read_unaligned` copies
+        // into an aligned local without that requirement.
+        let ifm: if_msghdr = core::ptr::read_unaligned(src.as_ptr() as *const if_msghdr);
         if ifm.ifm_type as i32 == RTM_IFINFO {
-          let (name, mac) = parse(&src[size_of::<if_msghdr>()..l])?;
+          let (name, mac) = parse(&src[HEADER_SIZE..l])?;
           let interface = Interface {
             index: ifm.ifm_index as u32,
             // `ifi_mtu` is `u_int32_t` on Apple, `u_long` on FreeBSD/
@@ -515,7 +827,25 @@ where
   interface_addr_table(AF_UNSPEC, idx, f)
 }
 
-pub(super) fn interface_addr_table<T, F>(family: i32, idx: u32, mut f: F) -> io::Result<SmallVec<T>>
+pub(super) fn interface_addr_table<T, F>(family: i32, idx: u32, f: F) -> io::Result<SmallVec<T>>
+where
+  T: Net,
+  F: FnMut(&IpAddr) -> bool,
+{
+  let mut out = SmallVec::new();
+  interface_addr_table_into(family, idx, f, &mut out)?;
+  Ok(out)
+}
+
+/// Variant of [`interface_addr_table`] that pushes results into the
+/// caller's buffer. Used by `best_local_addrs()` to merge per-family
+/// walks without intermediate `SmallVec`s.
+pub(super) fn interface_addr_table_into<T, F>(
+  family: i32,
+  idx: u32,
+  mut f: F,
+  results: &mut SmallVec<T>,
+) -> io::Result<()>
 where
   T: Net,
   F: FnMut(&IpAddr) -> bool,
@@ -524,12 +854,21 @@ where
 
   unsafe {
     let buf = fetch(family, NET_RT_IFLIST, idx as i32)?;
-    let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {
-      let ifam = &*(b.as_ptr() as *const ifa_msghdr);
+      // SAFETY: u8-aligned sysctl buffer; copy header out before reading fields.
+      let ifam: ifa_msghdr = core::ptr::read_unaligned(b.as_ptr() as *const ifa_msghdr);
       let len = ifam.ifam_msglen as usize;
+
+      // The outer `b.len() > HEADER_SIZE` guard proves we could read
+      // the header, but the kernel-reported `len` still needs its own
+      // checks: it must be at least `HEADER_SIZE` (so the slice
+      // `&b[HEADER_SIZE..len]` can't underflow), and at most `b.len()`
+      // (so the trailing `b = &b[len..]` won't slice past the buffer).
+      if len < HEADER_SIZE || len > b.len() {
+        return Err(message_too_short());
+      }
 
       if (ifam.ifam_version as i32 != RTM_VERSION) || (ifam.ifam_index as u32 != idx && idx != 0) {
         b = &b[len..];
@@ -544,13 +883,21 @@ where
 
         let ip: Option<IpAddr> = addrs[RTAX_IFA as usize].as_ref().map(|ip| *ip);
 
-        if let (Some(ip), Some(mask)) = (ip, mask) {
-          if let Some(ifa) = T::try_from_with_filter(
-            ifam.ifam_index as u32,
-            ip,
-            mask.map_err(invalid_mask)?,
-            |addr| f(addr),
-          ) {
+        // A non-contiguous mask (`PrefixLenError` from `ipnet`) is
+        // skipped per-address rather than failing the whole walk.
+        // BSD kernels — especially NetBSD — can emit a non-canonical
+        // `RTAX_NETMASK` for point-to-point and tunnel interfaces
+        // (the mask slot sometimes carries peer-address bytes
+        // instead of a clean prefix mask). Propagating that error
+        // killed `interfaces()` / `Interface::addrs()` entirely on
+        // those hosts even though the rest of the addresses were
+        // perfectly readable. A skipped address is strictly better
+        // than no addresses; if the caller only cares about a
+        // single interface they can detect the gap themselves.
+        if let (Some(ip), Some(Ok(prefix))) = (ip, mask) {
+          if let Some(ifa) =
+            T::try_from_with_filter(ifam.ifam_index as u32, ip, prefix, |addr| f(addr))
+          {
             results.push(ifa);
           }
         }
@@ -559,7 +906,7 @@ where
       b = &b[len..];
     }
 
-    Ok(results)
+    Ok(())
   }
 }
 
@@ -617,8 +964,15 @@ cfg_apple!(
       let mut b = buf.as_slice();
 
       while b.len() > HEADER_SIZE {
-        let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr2);
+        // SAFETY: u8-aligned sysctl buffer; copy header out before reading fields.
+        let ifam: libc::ifma_msghdr2 =
+          core::ptr::read_unaligned(b.as_ptr() as *const libc::ifma_msghdr2);
         let len = ifam.ifmam_msglen as usize;
+
+        // Same per-message length checks as `interface_addr_table`.
+        if len < HEADER_SIZE || len > b.len() {
+          return Err(message_too_short());
+        }
 
         if ifam.ifmam_version as i32 != RTM_VERSION {
           b = &b[len..];
@@ -644,6 +998,10 @@ cfg_apple!(
   }
 );
 
+// FreeBSD has both `NET_RT_IFMALIST` and the `ifma_msghdr` struct
+// exported via libc, so this is the real walker. DragonFly has a
+// separate stub below — its kernel doesn't expose multicast group
+// enumeration via sysctl at all.
 #[cfg(target_os = "freebsd")]
 pub(super) fn interface_multiaddr_table<T, F>(
   family: i32,
@@ -654,16 +1012,24 @@ where
   T: Address,
   F: FnMut(&IpAddr) -> bool,
 {
-  const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr>();
+  use compat::{IfmaMsghdr, NET_RT_IFMALIST};
+
+  const HEADER_SIZE: usize = mem::size_of::<IfmaMsghdr>();
 
   unsafe {
-    let buf = fetch(family, libc::NET_RT_IFMALIST, idx as i32)?;
+    let buf = fetch(family, NET_RT_IFMALIST, idx as i32)?;
     let mut results = SmallVec::new();
     let mut b = buf.as_slice();
 
     while b.len() > HEADER_SIZE {
-      let ifam = &*(b.as_ptr() as *const libc::ifma_msghdr);
+      // SAFETY: u8-aligned sysctl buffer; copy header out before reading fields.
+      let ifam: IfmaMsghdr = core::ptr::read_unaligned(b.as_ptr() as *const IfmaMsghdr);
       let len = ifam.ifmam_msglen as usize;
+
+      // Same per-message length checks as `interface_addr_table`.
+      if len < HEADER_SIZE || len > b.len() {
+        return Err(message_too_short());
+      }
 
       if ifam.ifmam_version as i32 != RTM_VERSION {
         b = &b[len..];
@@ -685,4 +1051,35 @@ where
 
     Ok(results)
   }
+}
+
+// DragonFly stub: the kernel does not expose multicast group
+// enumeration via sysctl. `<sys/socket.h>` defines only four route
+// selectors (`NET_RT_DUMP` / `NET_RT_FLAGS` / `NET_RT_IFLIST` /
+// `NET_RT_MAXID = 4`); there is no `NET_RT_IFMALIST` to call.
+//
+// The public API still surfaces on DragonFly so cross-platform
+// callers compile and link without target-specific cfgs, but a real
+// call returns `ErrorKind::Unsupported` rather than a misleading
+// empty `Ok` — `Ok(SmallVec::new())` would be indistinguishable from
+// a host with multicast enumeration available but no current
+// memberships, which is wrong-by-default semantics for everyone
+// reading the result. Callers can match on `ErrorKind::Unsupported`
+// when they want to treat DragonFly the same way as platforms with
+// the kernel API absent.
+#[cfg(target_os = "dragonfly")]
+pub(super) fn interface_multiaddr_table<T, F>(
+  _family: i32,
+  _idx: u32,
+  _f: F,
+) -> io::Result<SmallVec<T>>
+where
+  T: Address,
+  F: FnMut(&IpAddr) -> bool,
+{
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "multicast group enumeration is not supported on DragonFly \
+     (no NET_RT_IFMALIST sysctl selector)",
+  ))
 }

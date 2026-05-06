@@ -47,15 +47,110 @@ jobs:
         run: |
           mkdir -p coverage
           cargo tarpaulin --all-features --engine llvm --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/${{ matrix.os }} -j 1
-        continue-on-error: true
       - name: Upload Coverage Report as Artifact
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.os }}
           path: coverage/${{ matrix.os }}/cobertura.xml
 
+  # BSD coverage: only FreeBSD has a viable coverage job. NetBSD,
+  # OpenBSD, and DragonFly all ship rust packages built without the
+  # `profiler_builtins` crate, so any `-Cinstrument-coverage` build
+  # fails with `error[E0463]: can't find crate for profiler_builtins`.
+  # That requirement is shared by both cargo-tarpaulin and
+  # cargo-llvm-cov — they both rely on rustc's source-based
+  # coverage instrumentation. rustup doesn't support those host
+  # triples, so we can't swap in a profiler-enabled toolchain inside
+  # the vmactions VM. The `test-{netbsd,openbsd,dragonflybsd}` jobs
+  # in `ci.yml` exercise those code paths at runtime; coverage just
+  # isn't measurable.
+  #
+  # FreeBSD uses rustup, which gives us a profiler-enabled toolchain.
+  # Doctests are skipped here because tarpaulin's doctest-build path
+  # triggers a rustup component download that has flaked; Tests + Lib
+  # cover every public API call surface anyway.
+  #
+  # Earlier revisions tried (a) cargo-llvm-cov on the non-FreeBSD
+  # BSDs to sidestep tarpaulin's MSRV issues, (b) older tarpaulin
+  # pins to predate the cargo-platform 0.3.3 / cargo_metadata 0.20
+  # MSRV cliff, and (c) `--no-default-features` to drop the
+  # reqwest → openssl-sys chain on OpenBSD's LibreSSL 4.0. All of
+  # those got far enough to start compiling — and then surfaced the
+  # same `profiler_builtins` error. The toolchain limitation is the
+  # actual blocker.
+  coverage-freebsd:
+    name: Generate Coverage for freebsd
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate coverage on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          copyback: true
+          prepare: |
+            pkg install -y curl
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
+            . $HOME/.cargo/env
+            cargo install cargo-tarpaulin --locked
+          run: |
+            . $HOME/.cargo/env
+            mkdir -p coverage/freebsd
+            # Doctests skipped on BSDs — tarpaulin's doctest build
+            # path triggers a rustup component download that has
+            # flaked here. Tests + Lib give the same coverage of
+            # every public API call surface.
+            cargo tarpaulin --all-features --run-types Tests --run-types Lib --out xml --output-dir coverage/freebsd -j 1
+
+      - name: Upload Coverage Report as Artifact
+        if: hashFiles('coverage/freebsd/cobertura.xml') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: freebsd
+          path: coverage/freebsd/cobertura.xml
+
+  # NetBSD coverage isn't viable: the pkgsrc-shipped `rust` package is
+  # built without `profiler_builtins`, which `-Cinstrument-coverage`
+  # requires. tarpaulin's coverage compile fails with
+  # `error[E0463]: can't find crate for profiler_builtins / the
+  # compiler may have been built without the profiler runtime`.
+  # rustup doesn't support NetBSD as a host triple, so there's no way
+  # to swap in a profiler-enabled toolchain inside the vmactions VM.
+  # The runtime test pass in `ci.yml`'s `test-netbsd` job exercises
+  # the netbsdlike code path; coverage just isn't measurable here.
+
+  # OpenBSD coverage isn't viable for the same reason as NetBSD and
+  # DragonFly: the pkg-shipped `rust` package is built without
+  # `profiler_builtins`, so `-Cinstrument-coverage` fails with
+  # `error[E0463]: can't find crate for profiler_builtins`. rustup
+  # doesn't support OpenBSD as a host triple. The runtime test pass
+  # in `ci.yml`'s `test-openbsd` job exercises the netbsdlike code
+  # path with OpenBSD-specific quirks (`rtm_priority`,
+  # `RTAX_SRC` / `RTAX_SRCMASK`, etc.); coverage just isn't
+  # measurable here.
+
+  # DragonFly coverage isn't viable for the same reason as NetBSD:
+  # the pkg-shipped `rust` package is built without
+  # `profiler_builtins`, so `-Cinstrument-coverage` fails with
+  # `error[E0463]: can't find crate for profiler_builtins`. rustup
+  # doesn't support DragonFly as a host triple. The runtime test
+  # pass in `ci.yml`'s `test-dragonflybsd` job exercises the
+  # freebsdlike-with-DragonFly-quirks code path.
+
   upload-codecov:
-    needs: coverage-report
+    # `needs:` waits on every coverage producer. The
+    # `if: always() && !cancelled()` predicate opts the upload step
+    # into running even if a producer fails or is skipped — without
+    # it, GitHub Actions would short-circuit the whole upload on any
+    # missing dependency, and a single VM hiccup on FreeBSD/NetBSD
+    # would silently kill the entire coverage signal. The
+    # `download-artifact@v6` step picks up whatever artifacts were
+    # actually produced; a missing BSD report just means the
+    # codecov.io merge runs without that platform's data for that
+    # commit.
+    needs: [coverage-report, coverage-freebsd]
+    if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -64,7 +159,7 @@ jobs:
         with:
           path: reports/
       - name: List contents of the reports directory
-        run: ls -a reports
+        run: ls -a reports || true
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v6
         with:

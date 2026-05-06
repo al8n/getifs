@@ -31,8 +31,9 @@ getifs = "0.5"
 - **MTU information** - Get interface MTU values
 - **Multicast addresses** - Fetch multicast group memberships
 - **Gateway discovery** - Find IPv4 and IPv6 gateway addresses
+- **Routing table** - Enumerate kernel routing-table entries
 - **RFC-based filtering** - Filter addresses by RFC classification
-- **High performance** - Up to 189x faster than alternatives on macOS (see benchmarks)
+- **High performance** - Up to 72x faster than alternatives on macOS (see benchmarks)
 - **Cross-platform** - Linux, macOS, BSD, Windows support
 
 ## Quick Start
@@ -67,6 +68,7 @@ for gateway in gateways {
 - Fetching all interface addresses (excluding multicast addrs): [examples/addrs.rs](./examples/addrs.rs)
 - Fetching all interface multicast addresses: [examples/multicast_addrs.rs](./examples/multicast_addrs.rs)
 - Fetching gateway addresses: [examples/gateway.rs](./examples/gateway.rs)
+- Fetching the routing table: [examples/route.rs](./examples/route.rs)
 - Fetching local ip addresses: [examples/local_ip_addrs.rs](./examples/local_ip_addrs.rs)
 - Fetching ip addresses by RFC: [examples/filter_by_rfc.rs](./examples/filter_by_rfc.rs)
 
@@ -92,15 +94,15 @@ Existing network interface crates have limitations:
 - Minimizing allocations with `SmallVec` and `SmolStr`
 - Providing comprehensive interface information including MTU and multicast support
 - Achieving **significantly better performance** than alternatives:
-  - **Up to 189x faster** on macOS (`interface_by_index`)
-  - **Up to 37x faster** on macOS (list interfaces)
+  - **Up to 72x faster** on macOS (`interface_by_index`)
+  - **Up to 22x faster** on macOS (list interfaces)
   - **2.4–2.8x faster** on Linux (interface enumeration)
-  - **~7x faster** local-IP lookup on Linux
+  - **~6.8x faster** local-IP lookup on Linux
   - Comparable performance on Windows (`GetAdaptersAddresses` overhead dominates)
 
 ## Roadmap
 
-- [ ] Support fetching routing tables
+- [x] Support fetching routing tables
 
 ## Benchmarks
 
@@ -112,56 +114,51 @@ All benchmarks are run with [Criterion.rs](https://github.com/bheisler/criterion
 
 Numbers below compare `getifs` against `network-interface 2` and
 `local-ip-address 0.6`. Each row reports median `cargo bench` time
-(Criterion, 100 samples).
-
-- **macOS (Apple M4 Pro)** — measured on a bare-metal laptop, not CI.
-  The GitHub Actions macOS runners are shared virtual machines with
-  highly variable latency (run-to-run wobble of ±30% on these ops),
-  which obscures the real cost difference.
-- **Linux (x64) / Windows (x64)** — measured on GitHub Actions
-  `ubuntu-latest` / `windows-latest` runners on 2026-04-15 03:34 UTC.
+(Criterion, 100 samples), measured on GitHub Actions
+`macos-latest` (ARM64) / `ubuntu-latest` (x64) / `windows-latest`
+(x64) runners on 2026-05-06.
 
 | Platform | Best Operation | `getifs` | Alternative | Speedup |
 |----------|----------------|----------|-------------|---------|
-| **macOS** (Apple M4 Pro) | Get interface by index | 1.7 μs | 314.2 μs | **189x faster** |
-| **macOS** (Apple M4 Pro) | List all interfaces | 8.4 μs | 313.0 μs | **37x faster** |
-| **Linux** (x64) | Local IPv4 lookup | 13.7 μs | 94.3 μs | **6.9x faster** |
-| **Linux** (x64) | List all interfaces | 41.5 μs | 111.7 μs | **2.7x faster** |
-| **Windows** (x64) | Gateway IPv4 | 30.2 μs | N/A | Unique feature |
+| **macOS** (ARM64) | Get interface by index | 2.6 μs | 187.4 μs | **72x faster** |
+| **macOS** (ARM64) | List all interfaces | 8.5 μs | 187.7 μs | **22x faster** |
+| **Linux** (x64) | Local IPv4 lookup | 13.7 μs | 93.3 μs | **6.8x faster** |
+| **Linux** (x64) | List all interfaces | 42.7 μs | 113.7 μs | **2.7x faster** |
+| **Windows** (x64) | Gateway IPv4 | 35.5 μs | N/A | Unique feature |
 
 ### Detailed Results
 
 #### Interface Operations
 
-**macOS (Apple M4 Pro, 24 GB, local bare-metal)**
+**macOS (GitHub Actions ARM64)**
 
 | Operation | `getifs` | Alternative | Speedup |
 |-----------|----------|-------------|---------|
-| List all interfaces | 8.4 μs | 313.0 μs (`network-interface`) | **37x faster** |
-| Get interface by index | 1.7 μs | 314.2 μs (`network-interface`) | **189x faster** |
-| Get interface by name | 10.4 μs | 314.1 μs (`network-interface`) | **30x faster** |
-| Get interface addresses | 8.4 μs | - | - |
-| Get multicast addresses | 2.9 μs | - | - |
+| List all interfaces | 8.5 μs | 187.7 μs (`network-interface`) | **22x faster** |
+| Get interface by index | 2.6 μs | 187.4 μs (`network-interface`) | **72x faster** |
+| Get interface by name | 11.4 μs | 187.8 μs (`network-interface`) | **17x faster** |
+| Get interface addresses | 8.5 μs | - | - |
+| Get multicast addresses | 4.6 μs | - | - |
 
 **Linux (GitHub Actions x64)**
 
 | Operation | `getifs` | Alternative | Speedup |
 |-----------|----------|-------------|---------|
-| List all interfaces | 41.5 μs | 111.7 μs (`network-interface`) | **2.7x faster** |
-| Get interface by index | 40.3 μs | 111.9 μs (`network-interface`) | **2.8x faster** |
-| Get interface by name | 46.1 μs | 111.9 μs (`network-interface`) | **2.4x faster** |
-| Get interface addresses | 17.3 μs | - | - |
-| Get multicast addresses | 31.4 μs | - | - |
+| List all interfaces | 42.7 μs | 113.7 μs (`network-interface`) | **2.7x faster** |
+| Get interface by index | 40.7 μs | 113.4 μs (`network-interface`) | **2.8x faster** |
+| Get interface by name | 46.4 μs | 113.5 μs (`network-interface`) | **2.4x faster** |
+| Get interface addresses | 17.2 μs | - | - |
+| Get multicast addresses | 31.6 μs | - | - |
 
 **Windows (GitHub Actions x64)**
 
 | Operation | `getifs` | Alternative | Notes |
 |-----------|----------|-------------|-------|
-| List all interfaces | 974 μs | 967 μs (`network-interface`) | Within noise |
-| Get interface by index | 954 μs | 976 μs (`network-interface`) | Within noise |
-| Get interface by name | 1011 μs | 969 μs (`network-interface`) | Within noise |
-| Get interface addresses | 958 μs | - | - |
-| Get multicast addresses | 966 μs | - | - |
+| List all interfaces | 1119 μs | 1108 μs (`network-interface`) | Within noise |
+| Get interface by index | 1101 μs | 1110 μs (`network-interface`) | Within noise |
+| Get interface by name | 1167 μs | 1109 μs (`network-interface`) | Within noise |
+| Get interface addresses | 1094 μs | - | - |
+| Get multicast addresses | 1104 μs | - | - |
 
 *Note: the Win32 `GetAdaptersAddresses` API has an inherent ~1 ms floor
 that dominates every implementation — `getifs` and `network-interface`
@@ -169,37 +166,51 @@ end up within measurement noise of each other on Windows.*
 
 #### Local IP Address Operations
 
-**macOS (Apple M4 Pro, 24 GB, local bare-metal)**
+**macOS (GitHub Actions ARM64)**
 
 | Operation | `getifs` | Alternative | Speedup |
 |-----------|----------|-------------|---------|
-| Get local IPv4 address | 6.5 μs | 9.8 μs (`local-ip-address`) | **1.5x faster** |
-| Get local IPv6 address | 7.9 μs | 9.8 μs (`local-ip-address`) | **1.2x faster** |
+| Get local IPv4 address | 6.2 μs | 9.9 μs (`local-ip-address`) | **1.6x faster** |
+| Get local IPv6 address | 7.8 μs | 9.5 μs (`local-ip-address`) | **1.2x faster** |
 
 **Linux (GitHub Actions x64)**
 
 | Operation | `getifs` | Alternative | Speedup |
 |-----------|----------|-------------|---------|
-| Get local IPv4 address | 13.7 μs | 94.3 μs (`local-ip-address`) | **6.9x faster** |
-| Get local IPv6 address | 11.2 μs | - | No IPv6 result from alternative |
+| Get local IPv4 address | 13.7 μs | 93.3 μs (`local-ip-address`) | **6.8x faster** |
+| Get local IPv6 address | 11.3 μs | - | No IPv6 result from alternative |
 
 **Windows (GitHub Actions x64)**
 
 | Operation | `getifs` | Alternative | Notes |
 |-----------|----------|-------------|-------|
-| Get local IPv4 address | 963 μs | 919 μs (`local-ip-address`) | Win32 ~1 ms floor |
-| Get local IPv6 address | 992 μs | 972 μs (`local-ip-address`) | Win32 ~1 ms floor |
+| Get local IPv4 address | 1110 μs | 1062 μs (`local-ip-address`) | Win32 ~1 ms floor |
+| Get local IPv6 address | 1104 μs | 1120 μs (`local-ip-address`) | Win32 ~1 ms floor |
 
 #### Gateway Operations
 
 | Platform | IPv4 Gateways | IPv6 Gateways | All Gateways |
 |----------|---------------|---------------|--------------|
-| **macOS** (M4 Pro, local) | 17.5 μs | 2.4 μs | 19.8 μs |
-| **Linux** (x64, CI) | 18.4 μs | 14.3 μs | 22.4 μs |
-| **Windows** (x64, CI) | 30.2 μs | 18.0 μs | 48.5 μs |
+| **macOS** (ARM64, CI) | 24.3 μs | 3.4 μs | 26.8 μs |
+| **Linux** (x64, CI) | 19.9 μs | 16.1 μs | 24.1 μs |
+| **Windows** (x64, CI) | 35.5 μs | 21.8 μs | 58.4 μs |
 
 *Note: No direct alternatives available for gateway discovery, so these
 are reported as absolute times rather than as speedups.*
+
+#### Route Table Operations
+
+| Platform | IPv4 routes | IPv6 routes | All routes | Default-only filter |
+|----------|-------------|-------------|------------|---------------------|
+| **macOS** (ARM64, CI) | 28.1 μs | 12.2 μs | 41.0 μs | 40.8 μs |
+| **Linux** (x64, CI) | 30.1 μs | 26.6 μs | 34.8 μs | 34.6 μs |
+| **Windows** (x64, CI) | 65.1 μs | 22.5 μs | 81.7 μs | 80.8 μs |
+
+*Note: The `default_only` filter result is essentially identical to the
+unfiltered `route_table` because the closure runs after each row is
+built — the dominant cost is the kernel dump itself, not the per-row
+filter. No direct alternatives expose a routing-table API for
+comparison.*
 
 **Why is `getifs` faster?**
 
@@ -210,15 +221,17 @@ are reported as absolute times rather than as speedups.*
 
 **Platform Performance Notes:**
 
-- **macOS**: Shows the largest speedups (30–189x on bare metal) due to
-  the efficient sysctl-based implementation avoiding `getifaddrs`'s
-  per-call overhead. On shared CI runners the absolute numbers are
-  noisier but the ordering holds.
+- **macOS**: Shows the largest speedups (17–72x on the ARM64 CI
+  runners) due to the efficient sysctl-based implementation avoiding
+  `getifaddrs`'s per-call overhead.
 - **Linux**: 2.4–2.8x faster interface enumeration via direct netlink,
-  and ~7x faster local-IP lookup from avoiding the test-socket round
+  and ~6.8x faster local-IP lookup from avoiding the test-socket round
   trip that `local-ip-address` performs.
 - **Windows**: Similar performance to alternatives — `GetAdaptersAddresses`
   has an inherent ~1 ms floor that dominates every implementation.
+  Gateway and route-table queries skip that path entirely (~36 μs
+  gateway / ~80 μs full table); `getifs` only — the alternatives don't
+  expose them.
 
 ## Sister crates
 

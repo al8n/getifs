@@ -1,13 +1,13 @@
 [package]
 name = "getifs"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 repository = "https://github.com/al8n/getifs"
 homepage = "https://github.com/al8n/getifs"
 documentation = "https://docs.rs/getifs"
 description = "Cross-platform enumeration of network interfaces and their MTU, gateway, multicast, and local/private/public IP addresses."
 license = "MIT OR Apache-2.0"
-rust-version = "1.64.0"
+rust-version = "1.85.0"
 keywords = ["getifaddrs", "network-interface", "local-ip-address", "gateway", "mtu"]
 categories = ["network-programming"]
 
@@ -24,6 +24,11 @@ harness = false
 [[bench]]
 path = "benches/gateway.rs"
 name = "gateway"
+harness = false
+
+[[bench]]
+path = "benches/route.rs"
+name = "route"
 harness = false
 
 [features]
@@ -60,7 +65,12 @@ windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32
 widestring = "1"
 
 [dev-dependencies]
-criterion = "0.8"
+# `>=0.7, <0.9` instead of `^0.8` so the DragonFly CI's
+# `cargo update -p criterion --precise 0.7.0` (driven by the
+# pkg-shipped Rust 1.85.1, while criterion 0.8+ requires 1.86) can
+# satisfy the constraint. Cargo still resolves to the latest
+# matching version (0.8.x) for everyone else.
+criterion = ">=0.7, <0.9"
 network-interface = "2"
 local-ip-address = "0.6"
 which = "8"
@@ -71,7 +81,10 @@ scopeguard = "1"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 rust_2018_idioms = "warn"
 single_use_lifetimes = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [

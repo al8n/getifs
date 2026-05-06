@@ -81,10 +81,20 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
   match crate::utils::friendly_name(name_buf.as_mut_ptr()) {
     Some(name) => Ok(name),
     None => {
+      // Last-ditch fallback via `if_indextoname`. Guard against a null
+      // return — feeding that straight into `CStr::from_ptr` is UB.
       let mut name_buf = [0u8; 256];
+      // SAFETY: `if_indextoname` writes into `name_buf` (≥ IF_NAMESIZE)
+      // and returns either a pointer into that buffer or null.
       let hname = unsafe {
         windows_sys::Win32::NetworkManagement::IpHelper::if_indextoname(idx, name_buf.as_mut_ptr())
       };
+      if hname.is_null() {
+        return Err(io::Error::last_os_error());
+      }
+      // SAFETY: non-null `hname` points into `name_buf`, which is
+      // alive for the duration of this call and holds a NUL-terminated
+      // C string produced by `if_indextoname`.
       unsafe { Ok(CStr::from_ptr(hname as _).to_string_lossy().into()) }
     }
   }
