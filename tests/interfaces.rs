@@ -136,11 +136,11 @@ fn check_unicast_stats(ifstats: &IfStats, uni_stats: &RouteStats) -> std::io::Re
 // Multicast helpers and the `if_multicast_addrs` test below are gated
 // to the same platforms as `Interface::multicast_addrs` (see
 // `cfg_multicast!` in src/macros.rs). NetBSD / OpenBSD have no API at
-// all so the symbol is absent there. DragonFly's stub returns an
-// empty list (the kernel doesn't expose multicast group enumeration
-// via sysctl) — the test still compiles and exercises the call path,
-// but the "v6 multi must be > 0 when v6 uni > 1" assertion is
-// skipped, since it would always trip on DragonFly.
+// all so the symbol is absent there. DragonFly returns
+// `Err(ErrorKind::Unsupported)` from `multicast_addrs()` (the kernel
+// doesn't expose multicast group enumeration via sysctl) — the test
+// compiles there and exercises the call path, with the explicit
+// `Err(Unsupported)` arm below treated as a per-platform skip.
 #[cfg(any(
   target_vendor = "apple",
   target_os = "freebsd",

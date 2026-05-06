@@ -39,8 +39,8 @@ macro_rules! cfg_bsd_multicast {
       // (`NET_RT_IFMALIST` doesn't exist; the kernel's
       // `NET_RT_MAXID = 4` confirms there are only 4 selectors,
       // none of them multicast). The DragonFly impl in
-      // `bsd_like.rs::interface_multiaddr_table` is a stub that
-      // returns `Ok([])` — see the doc comment there.
+      // `bsd_like.rs::interface_multiaddr_table` returns
+      // `Err(ErrorKind::Unsupported)` — see the doc comment there.
       #[cfg(any(
         target_vendor = "apple",
         target_os = "freebsd",

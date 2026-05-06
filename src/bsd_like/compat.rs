@@ -315,9 +315,9 @@ const _: () = {
 // via sysctl at all — `<sys/socket.h>` only defines four selectors
 // (`NET_RT_DUMP`, `NET_RT_FLAGS`, `NET_RT_IFLIST`, `NET_RT_MAXID`),
 // no `NET_RT_IFMALIST`. The DragonFly impl of
-// `interface_multiaddr_table` is therefore a stub that returns
-// `Ok([])` (see `bsd_like.rs`). It does not need an `IfmaMsghdr` or
-// a sysctl selector, so we don't define them here.
+// `interface_multiaddr_table` therefore returns
+// `Err(ErrorKind::Unsupported)` (see `bsd_like.rs`). It does not need
+// an `IfmaMsghdr` or a sysctl selector, so we don't define them here.
 
 #[cfg(target_os = "freebsd")]
 pub(super) use libc::ifma_msghdr as IfmaMsghdr;

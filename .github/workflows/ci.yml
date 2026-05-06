@@ -289,11 +289,12 @@ jobs:
   #     0.7.0 (last release supporting 1.80+).
   # Drop these `cargo update` lines once DragonFly's pkg catches up.
   #
-  # The multicast surface on DragonFly is intentionally a stub
-  # (returns `Ok([])`) because the kernel doesn't expose
-  # `NET_RT_IFMALIST`. The `if_multicast_addrs` test compiles and
-  # runs on DragonFly but skips the "v6 multi must be > 0" count
-  # assertion — see tests/interfaces.rs.
+  # DragonFly's `multicast_addrs()` returns
+  # `Err(ErrorKind::Unsupported)` because the kernel doesn't expose
+  # multicast-group enumeration via sysctl (no `NET_RT_IFMALIST`).
+  # The `if_multicast_addrs` test compiles and runs on DragonFly,
+  # treating the documented `Unsupported` error as a per-platform
+  # skip — see tests/interfaces.rs.
   test-dragonflybsd:
     name: test (dragonflybsd)
     runs-on: ubuntu-latest
