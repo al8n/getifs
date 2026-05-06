@@ -65,7 +65,12 @@ windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32
 widestring = "1"
 
 [dev-dependencies]
-criterion = "0.8"
+# `>=0.7, <0.9` instead of `^0.8` so the DragonFly CI's
+# `cargo update -p criterion --precise 0.7.0` (driven by the
+# pkg-shipped Rust 1.85.1, while criterion 0.8+ requires 1.86) can
+# satisfy the constraint. Cargo still resolves to the latest
+# matching version (0.8.x) for everyone else.
+criterion = ">=0.7, <0.9"
 network-interface = "2"
 local-ip-address = "0.6"
 which = "8"
