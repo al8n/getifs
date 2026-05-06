@@ -69,8 +69,9 @@ impl Drop for ForwardTable {
 }
 
 /// Compute the set of directed-broadcast IPv4 addresses for every
-/// locally-configured unicast prefix on this host
-/// (`network | host_mask` for each `(addr, prefix_len)` pair).
+/// locally-configured unicast prefix on this host, keyed by
+/// `(InterfaceIndex, Ipv4Addr)` so the suppression is tied to the
+/// adapter that owns the prefix.
 ///
 /// Windows' `GetIpForwardTable2` returns per-subnet directed-broadcast
 /// `/32` rows alongside ordinary unicast routes — `192.168.1.0/24`
@@ -84,12 +85,27 @@ impl Drop for ForwardTable {
 /// signal is to derive the broadcast addresses from the host's own
 /// unicast addresses + prefix lengths and filter rows that match.
 ///
+/// **Why interface-keyed:** if the set were keyed by address alone,
+/// a multihomed host with a legitimate `/32` host route to address X
+/// on interface A would be silently dropped if some *other*
+/// interface B's prefix happened to compute X as its directed
+/// broadcast. Pairing the set with `InterfaceIndex` confines the
+/// suppression to "the kernel-installed broadcast row for this
+/// adapter's own prefix" — exactly what the housekeeping rows
+/// represent.
+///
+/// **`/31` exclusion:** RFC 3021 point-to-point links (and any
+/// `/31`) have no broadcast address — the prefix only contains two
+/// host addresses, both usable for unicast. Computing
+/// `network | host_mask` there produces the second host address,
+/// which is a legitimate peer. Skipping `/31` prevents that.
+///
 /// Returns an empty set on `GetUnicastIpAddressTable` failure rather
 /// than propagating — the cost is at worst a handful of extra
 /// directed-broadcast rows leaking through, vs. the alternative of
 /// turning a real syscall hiccup into an empty `route_table`.
-unsafe fn directed_broadcast_set() -> HashSet<Ipv4Addr> {
-  let mut out: HashSet<Ipv4Addr> = HashSet::new();
+unsafe fn directed_broadcast_set() -> HashSet<(u32, Ipv4Addr)> {
+  let mut out: HashSet<(u32, Ipv4Addr)> = HashSet::new();
   let mut ptr: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
   if GetUnicastIpAddressTable(AF_INET, &mut ptr) != NO_ERROR {
     return out;
@@ -107,13 +123,12 @@ unsafe fn directed_broadcast_set() -> HashSet<Ipv4Addr> {
       continue;
     }
     let prefix = r.OnLinkPrefixLength;
-    // `OnLinkPrefixLength` of 0 (unconfigured) and 32 (host route)
-    // can't generate a meaningful broadcast — `host_mask = 0` for
-    // /0 → `network | 0 = network`, which is the address itself
-    // (not a broadcast); /32 → `host_mask = 0`, same thing. Skip
-    // both rather than add the host's own address to the broadcast
-    // set, which would suppress legitimate /32 host routes.
-    if prefix == 0 || prefix >= 32 {
+    // Skip prefix lengths that don't generate a meaningful broadcast:
+    //   - `/0`: `host_mask = 0` → broadcast == network address, not
+    //     a broadcast.
+    //   - `/31` (RFC 3021): point-to-point, both addresses are unicast.
+    //   - `/32`: host route, no broadcast concept.
+    if prefix == 0 || prefix >= 31 {
       continue;
     }
     let v4 = r.Address.Ipv4;
@@ -125,14 +140,17 @@ unsafe fn directed_broadcast_set() -> HashSet<Ipv4Addr> {
     let host_mask: u32 = !((!0u32) << (32 - prefix));
     let addr_u32 = u32::from(addr);
     let broadcast = Ipv4Addr::from(addr_u32 | host_mask);
-    out.insert(broadcast);
+    out.insert((r.InterfaceIndex, broadcast));
   }
   FreeMibTable(ptr as *mut _);
   out
 }
 
 #[inline]
-fn build_routev4(row: &MIB_IPFORWARD_ROW2, broadcasts: &HashSet<Ipv4Addr>) -> Option<Ipv4Route> {
+fn build_routev4(
+  row: &MIB_IPFORWARD_ROW2,
+  broadcasts: &HashSet<(u32, Ipv4Addr)>,
+) -> Option<Ipv4Route> {
   // `ValidLifetime` is the kernel's "seconds this row is still
   // usable" counter; `0xffffffff` means "infinite" (statically
   // configured / never expires), `0` means the entry is past its
@@ -165,16 +183,29 @@ fn build_routev4(row: &MIB_IPFORWARD_ROW2, broadcasts: &HashSet<Ipv4Addr>) -> Op
   if dst_v4.is_multicast() || dst_v4.is_broadcast() {
     return None;
   }
-  if row.DestinationPrefix.PrefixLength == 32 && broadcasts.contains(&dst_v4) {
-    return None;
-  }
-  let net = Ipv4Net::new(dst_v4, row.DestinationPrefix.PrefixLength).ok()?;
 
   let gw_ip = sockaddr_to_ipaddr(AF_UNSPEC, &row.NextHop as *const _ as *const SOCKADDR);
   let gw = match gw_ip {
     Some(IpAddr::V4(g)) if g != Ipv4Addr::UNSPECIFIED => Some(g),
     _ => None,
   };
+
+  // Directed-broadcast suppression — applied only to the *exact
+  // shape* the kernel installs for these housekeeping rows: a `/32`
+  // route on the same interface that owns the matching unicast
+  // prefix, with an unspecified next hop (on-link). Without these
+  // qualifiers a legitimate user-installed `/32` host route to an
+  // address that coincidentally equals another adapter's directed
+  // broadcast would be dropped silently. Match against the
+  // `(InterfaceIndex, dst)` pair so suppression is interface-scoped
+  // — see `directed_broadcast_set` for the keying rationale.
+  if row.DestinationPrefix.PrefixLength == 32
+    && gw.is_none()
+    && broadcasts.contains(&(row.InterfaceIndex, dst_v4))
+  {
+    return None;
+  }
+  let net = Ipv4Net::new(dst_v4, row.DestinationPrefix.PrefixLength).ok()?;
 
   Some(Ipv4Route::new(row.InterfaceIndex, net, gw))
 }
