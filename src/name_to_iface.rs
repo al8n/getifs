@@ -78,3 +78,55 @@ pub fn ifname_to_iface(name: &str) -> io::Result<(Option<Ipv4Addr>, Option<u32>)
     None => Ok((None, v6_iface)),
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // Round-trip every public function against the first interface
+  // returned by `interfaces()`. Hits the success arm, the
+  // `iface.ipv4_addrs_by_filter` call, and the
+  // `Some(iface) => ...` match arm of each entry point.
+  #[test]
+  fn ifname_to_v4_iface_first_interface() {
+    let ift = crate::interfaces().unwrap();
+    let first = ift.iter().next().unwrap();
+    // Result may be None (loopback has no non-link-local v4 on
+    // many CI hosts), but the call itself must succeed.
+    let _ = ifname_to_v4_iface(first.name()).unwrap();
+  }
+
+  #[test]
+  fn ifname_to_v6_iface_round_trips() {
+    let ift = crate::interfaces().unwrap();
+    let first = ift.iter().next().unwrap();
+    let v6 = ifname_to_v6_iface(first.name()).unwrap();
+    assert_eq!(v6, Some(first.index()));
+  }
+
+  #[test]
+  fn ifname_to_iface_round_trips() {
+    let ift = crate::interfaces().unwrap();
+    let first = ift.iter().next().unwrap();
+    let (_, v6) = ifname_to_iface(first.name()).unwrap();
+    assert_eq!(v6, Some(first.index()));
+  }
+
+  // Error path: non-existent name surfaces from the
+  // `ifname_to_index` lookup with `?` and never reaches the match
+  // arms.
+  #[test]
+  fn ifname_to_v4_iface_unknown_name_errors() {
+    assert!(ifname_to_v4_iface("nonexistent_iface_xyz_12345").is_err());
+  }
+
+  #[test]
+  fn ifname_to_v6_iface_unknown_name_errors() {
+    assert!(ifname_to_v6_iface("nonexistent_iface_xyz_12345").is_err());
+  }
+
+  #[test]
+  fn ifname_to_iface_unknown_name_errors() {
+    assert!(ifname_to_iface("nonexistent_iface_xyz_12345").is_err());
+  }
+}

@@ -123,3 +123,54 @@ pub fn get_ipv6_mtu(ip: Ipv6Addr) -> io::Result<u32> {
   }
   Err(interface_not_found_for_ip())
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // Hits the `interface_not_found_for_ip()` constructor and the
+  // trailing `Err(...)` returns in each of the three lookup
+  // functions. Uses a documentation-reserved IP that's guaranteed
+  // not to be assigned to any local interface (RFC 5737 TEST-NET-3
+  // for IPv4; RFC 3849 documentation prefix for IPv6).
+  #[test]
+  fn get_ip_mtu_unknown_returns_not_found() {
+    let v4 = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1));
+    let v6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+    assert!(get_ip_mtu(v4).is_err());
+    assert!(get_ip_mtu(v6).is_err());
+  }
+
+  #[test]
+  fn get_ipv4_mtu_unknown_returns_not_found() {
+    let ip = Ipv4Addr::new(203, 0, 113, 2);
+    assert!(get_ipv4_mtu(ip).is_err());
+  }
+
+  #[test]
+  fn get_ipv6_mtu_unknown_returns_not_found() {
+    let ip = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2);
+    assert!(get_ipv6_mtu(ip).is_err());
+  }
+
+  // Happy path through the bulk lookup. The loopback address (v4
+  // and v6) is universally configured on every supported platform,
+  // so this hits the bulk-find branch and the
+  // `addrs.find()...map(|i| i.mtu())` chain.
+  #[test]
+  fn get_ip_mtu_loopback_succeeds() {
+    let v4 = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    assert!(get_ip_mtu(v4).is_ok());
+    let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    // IPv6 loopback may not be present on every CI runner; only
+    // assert positively when it is.
+    if let Ok(mtu) = get_ip_mtu(v6) {
+      assert!(mtu > 0);
+    }
+  }
+
+  #[test]
+  fn get_ipv4_mtu_loopback_succeeds() {
+    assert!(get_ipv4_mtu(Ipv4Addr::LOCALHOST).is_ok());
+  }
+}

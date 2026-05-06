@@ -87,3 +87,29 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
     }
   })
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // Covers the `Err(...)` arm on every platform: a name that
+  // doesn't correspond to any interface should surface as
+  // `Err(io::Error)`. Uses an obviously-fake string with characters
+  // most kernels reject for ifnames.
+  #[test]
+  fn nonexistent_name_returns_err() {
+    let r = ifname_to_index("nonexistent_iface_xyz_12345");
+    assert!(r.is_err());
+  }
+
+  // Covers the success arm by round-tripping a real interface
+  // (looked up via `interfaces()` first). Every supported platform
+  // has at least loopback.
+  #[test]
+  fn round_trip_first_interface() {
+    let ift = crate::interfaces().unwrap();
+    let first = ift.iter().next().unwrap();
+    let idx = ifname_to_index(first.name()).unwrap();
+    assert_eq!(idx, first.index());
+  }
+}

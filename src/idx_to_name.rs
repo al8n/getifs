@@ -99,3 +99,28 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // Covers the `Err(...)` arm — a wildly out-of-range index has no
+  // matching interface on any platform, so `if_indextoname` /
+  // `ConvertInterfaceIndexToLuid` returns null/non-zero and we
+  // surface the OS error.
+  #[test]
+  fn out_of_range_index_returns_err() {
+    // 0xFFFE_FFFE is far above any real interface index on any host.
+    assert!(ifindex_to_name(0xFFFE_FFFE).is_err());
+  }
+
+  // Covers the success arm by round-tripping the first interface
+  // returned by `interfaces()`.
+  #[test]
+  fn round_trip_first_interface() {
+    let ift = crate::interfaces().unwrap();
+    let first = ift.iter().next().unwrap();
+    let name = ifindex_to_name(first.index()).unwrap();
+    assert_eq!(first.name(), &name);
+  }
+}

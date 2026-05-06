@@ -264,3 +264,28 @@ where
 {
   interface_addresses(None, |addr| f(addr) && local_ip_filter(addr))
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // Pure-function unit test for `classify_table_error`. Covers
+  // every arm of the whitelist match plus the catch-all error
+  // path. Live tarpaulin runs only ever hit this when a Win32
+  // table API actually fails on the host, so the branches stayed
+  // uncovered.
+  #[test]
+  fn classify_table_error_whitelist_returns_empty() {
+    for code in [50u32, 1168u32, 1231u32] {
+      let r = classify_table_error(code).unwrap();
+      assert!(r.is_empty(), "expected empty result for whitelisted {code}");
+    }
+  }
+
+  #[test]
+  fn classify_table_error_unknown_propagates() {
+    let r = classify_table_error(0xDEAD);
+    assert!(r.is_err());
+    assert_eq!(r.unwrap_err().raw_os_error(), Some(0xDEAD));
+  }
+}
