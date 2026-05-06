@@ -47,7 +47,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo tarpaulin --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/${{ matrix.os }} -j 1
-        continue-on-error: true
+
       - name: Upload Coverage Report as Artifact
         uses: actions/upload-artifact@v7
         with:
@@ -89,7 +89,7 @@ jobs:
             . $HOME/.cargo/env
             mkdir -p coverage/freebsd
             cargo tarpaulin --all-features --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/freebsd -j 1
-        continue-on-error: true
+
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/freebsd/cobertura.xml') != ''
         uses: actions/upload-artifact@v7
@@ -121,7 +121,7 @@ jobs:
             # `RTM_NEWADDR` slot encoding. Lib coverage alone is
             # enough to exercise the netbsdlike code path.
             cargo tarpaulin --all-features --run-types Lib --out xml --output-dir coverage/netbsd -j 1
-        continue-on-error: true
+
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/netbsd/cobertura.xml') != ''
         uses: actions/upload-artifact@v7
@@ -146,7 +146,7 @@ jobs:
           run: |
             mkdir -p coverage/openbsd
             cargo tarpaulin --all-features --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/openbsd -j 1
-        continue-on-error: true
+
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/openbsd/cobertura.xml') != ''
         uses: actions/upload-artifact@v7
@@ -185,7 +185,7 @@ jobs:
             # `interface_by_index` re-lookup in `ifis` flakes due to
             # interface churn.
             cargo tarpaulin --all-features --run-types Lib --out xml --output-dir coverage/dragonflybsd -j 1
-        continue-on-error: true
+
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/dragonflybsd/cobertura.xml') != ''
         uses: actions/upload-artifact@v7
