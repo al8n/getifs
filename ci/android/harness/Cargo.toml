@@ -1,0 +1,17 @@
+[package]
+name = "getifs-android-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "getifs_android_harness"
+crate-type = ["cdylib"]
+
+[dependencies]
+getifs = { path = "../../.." }
+jni = "0.21"
+
+# Detached from the getifs workspace: its own (empty) [workspace] table so
+# this crate never affects the getifs lockfile, build, or docs.rs.
+[workspace]
