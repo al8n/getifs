@@ -67,6 +67,7 @@ macro_rules! cfg_multicast {
         target_os = "freebsd",
         target_os = "dragonfly",
         target_os = "linux",
+        target_os = "android",
         windows
       ))]
       #[cfg_attr(
@@ -76,6 +77,7 @@ macro_rules! cfg_multicast {
           target_os = "freebsd",
           target_os = "dragonfly",
           target_os = "linux",
+          target_os = "android",
           windows
         )))
       )]

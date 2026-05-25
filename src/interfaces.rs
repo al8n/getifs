@@ -20,6 +20,7 @@ use super::{
   target_os = "freebsd",
   target_os = "dragonfly",
   target_os = "linux",
+  target_os = "android",
   windows
 ))]
 use super::{IfAddr, Ifv4Addr, Ifv6Addr};
