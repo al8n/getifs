@@ -12,6 +12,16 @@
 //! name / MTU / flags via ioctl. MAC addresses are privacy-restricted on
 //! Android (apps read all-zero), so `mac_addr` is left `None`.
 //!
+//! Limitation: because the index list comes from the address dump,
+//! enumerating *all* interfaces (`interface_table(0)`, i.e. `interfaces()`)
+//! on this denied path omits any interface that currently has no address
+//! (e.g. a down or freshly-created tunnel interface). There is no permitted
+//! alternative for an untrusted app — `/sys/class/net` and `if_nameindex`
+//! (which itself uses `RTM_GETLINK`) are equally restricted, and `getifaddrs`
+//! is deliberately not used. Looking an interface up by a known index or name
+//! (`interface_table(idx)`) goes straight to the ioctl path, so
+//! `interface_by_index` / `interface_by_name` are unaffected.
+//!
 //! Reached only as a fallback from [`super::interface_table`] when the
 //! netlink path is denied; Android versions / app domains that still allow
 //! `RTM_GETLINK` keep the richer netlink result (including the MAC address).

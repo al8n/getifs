@@ -419,6 +419,17 @@ impl Interface {
 ///   println!("Interface: {:?}", interface);
 /// }
 /// ```
+///
+/// ## Android
+///
+/// On Android 11+ an app in the `untrusted_app` SELinux domain is denied the
+/// `RTM_GETLINK` netlink dump that enumerates interfaces, so getifs falls
+/// back to listing the interfaces discovered from their addresses
+/// (`RTM_GETADDR`, which stays permitted). On those versions this therefore
+/// returns only interfaces that currently have at least one address, and
+/// their [`Interface::mac_addr`] is `None`. [`interface_by_index`] and
+/// [`interface_by_name`] resolve a known interface directly and are not
+/// affected by this limitation.
 pub fn interfaces() -> io::Result<TinyVec<Interface>> {
   cfg_if::cfg_if! {
     if #[cfg(windows)] {
