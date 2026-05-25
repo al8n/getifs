@@ -17,6 +17,10 @@ use jni::JNIEnv;
 /// succeed.
 #[no_mangle]
 pub extern "system" fn Java_dev_getifs_androidharness_NativeBridge_runChecks<'local>(
+  // jni 0.21's `JNIEnv::new_string` takes `&self`, so `env` is intentionally
+  // not `mut` (a `mut` here warns as unused under the pinned 0.21.x). The
+  // harness builds clean via cargo-ndk in CI; do not add `mut` to match a
+  // newer jni major's docs (which renamed the type to `Env`).
   env: JNIEnv<'local>,
   _class: JClass<'local>,
 ) -> jstring {

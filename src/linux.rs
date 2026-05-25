@@ -3,6 +3,9 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
+// Only the /proc/net/igmp* parsers use xtoi2, and those are not compiled on
+// Android (see the parser stubs below).
+#[cfg(not(target_os = "android"))]
 use hardware_address::xtoi2;
 use ipnet::{Ipv4Net, Ipv6Net};
 use rustix::net::AddressFamily;
@@ -354,6 +357,24 @@ where
   )
 }
 
+// Android 10+ denies apps access to /proc/net, so the parsers that read
+// /proc/net/igmp* are not compiled there. The Android stubs return
+// `Unsupported` (matching the DragonFly multicast stub in bsd_like.rs): the
+// public `interface_multicast_*` surface still exists for cross-platform
+// callers, but a real call reports the limitation instead of a misleading
+// empty result or a raw permission error.
+#[cfg(target_os = "android")]
+fn parse_proc_net_igmp<F>(_path: &str, _ifi: u32, _f: F) -> std::io::Result<SmallVec<Ifv4Addr>>
+where
+  F: FnMut(&Ipv4Addr) -> bool,
+{
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "multicast group enumeration is unavailable on Android (/proc/net is restricted for apps)",
+  ))
+}
+
+#[cfg(not(target_os = "android"))]
 fn parse_proc_net_igmp<F>(path: &str, ifi: u32, mut f: F) -> std::io::Result<SmallVec<Ifv4Addr>>
 where
   F: FnMut(&Ipv4Addr) -> bool,
@@ -417,6 +438,18 @@ where
   Ok(ifmat)
 }
 
+#[cfg(target_os = "android")]
+fn parse_proc_net_igmp6<F>(_path: &str, _ifi: u32, _f: F) -> io::Result<SmallVec<Ifv6Addr>>
+where
+  F: FnMut(&Ipv6Addr) -> bool,
+{
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "multicast group enumeration is unavailable on Android (/proc/net is restricted for apps)",
+  ))
+}
+
+#[cfg(not(target_os = "android"))]
 fn parse_proc_net_igmp6<F>(path: &str, ifi: u32, mut f: F) -> io::Result<SmallVec<Ifv6Addr>>
 where
   F: FnMut(&Ipv6Addr) -> bool,
