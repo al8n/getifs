@@ -429,7 +429,9 @@ impl Interface {
 /// returns only interfaces that currently have at least one address, and
 /// their [`Interface::mac_addr`] is `None`. [`interface_by_index`] and
 /// [`interface_by_name`] resolve a known interface directly and are not
-/// affected by this limitation.
+/// affected by this limitation. This fallback also requires the app to hold
+/// `android.permission.INTERNET` (it opens a datagram socket to issue the
+/// `SIOCGIF*` ioctls).
 pub fn interfaces() -> io::Result<TinyVec<Interface>> {
   cfg_if::cfg_if! {
     if #[cfg(windows)] {

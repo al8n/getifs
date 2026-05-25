@@ -25,6 +25,15 @@
 //! Reached only as a fallback from [`super::interface_table`] when the
 //! netlink path is denied; Android versions / app domains that still allow
 //! `RTM_GETLINK` keep the richer netlink result (including the MAC address).
+//!
+//! Permission note: the `SIOCGIF*` ioctls are issued on an `AF_INET` datagram
+//! socket, and Android gates inet-socket creation on
+//! `android.permission.INTERNET`, so this path requires that permission. The
+//! device ioctls themselves work on any socket, but moving to a non-INET
+//! family would trade the INTERNET requirement for less certain netlink /
+//! SELinux-`ioctl` behaviour that can't be verified off-device; any app
+//! enumerating interfaces realistically already holds INTERNET, so the
+//! `AF_INET` handle is kept and the requirement documented.
 
 use std::{collections::BTreeSet, io};
 
@@ -72,7 +81,9 @@ impl Ifreq {
 
 pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   // Datagram socket used purely as an ioctl handle; SIOCGIF* on it is
-  // permitted for untrusted_app (unlike RTM_GETLINK).
+  // permitted for untrusted_app (unlike RTM_GETLINK). AF_INET creation
+  // requires android.permission.INTERNET — see the module-level permission
+  // note.
   let sock = socket(AddressFamily::INET, SocketType::DGRAM, None)?;
 
   let mut out = TinyVec::new();
