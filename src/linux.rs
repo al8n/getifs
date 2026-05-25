@@ -22,6 +22,10 @@ mod netlink;
 #[path = "linux/local_addr.rs"]
 mod local_addr;
 
+#[cfg(target_os = "android")]
+#[path = "linux/android.rs"]
+mod android;
+
 use netlink::{netlink_addr, netlink_interface, netlink_walk_routes};
 
 macro_rules! rt_generic_mod {
@@ -267,8 +271,24 @@ bitflags::bitflags! {
   }
 }
 
+#[cfg(not(target_os = "android"))]
 pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   netlink_interface(AddressFamily::UNSPEC, index)
+}
+
+#[cfg(target_os = "android")]
+pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
+  // Android 11+ untrusted_app is denied RTM_GETLINK (it needs the SELinux
+  // `nlmsg_readpriv` permission, neverallowed for apps targeting API >= 30),
+  // so the netlink interface dump fails with PermissionDenied even though
+  // the bind is gone. Fall back to the RTM_GETADDR + SIOCGIF* ioctl path
+  // (see linux/android.rs) — the same combination bionic's getifaddrs and
+  // Go's net package use. Older Android / app domains that still permit
+  // RTM_GETLINK keep the richer netlink result (including the MAC address).
+  match netlink_interface(AddressFamily::UNSPEC, index) {
+    Err(e) if e.kind() == io::ErrorKind::PermissionDenied => android::interface_table(index),
+    other => other,
+  }
 }
 
 pub(super) fn interface_ipv4_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<Ifv4Net>>
