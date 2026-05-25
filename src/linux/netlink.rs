@@ -297,7 +297,17 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
         let msg_buf = &received[NLMSG_HDRLEN..hlen];
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => break 'outer,
+          NLMSG_DONE => {
+            // A dump the kernel marked interrupted (NLM_F_DUMP_INTR) may be
+            // missing entries because the link table changed mid-walk;
+            // returning a partial snapshot as success would be a silent
+            // wrong answer. Surface EINTR so the caller can retry, matching
+            // the route walkers.
+            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
+              return Err(rustix::io::Errno::INTR.into());
+            }
+            break 'outer;
+          }
           // Decode the errno instead of flattening every NLMSG_ERROR to
           // EINVAL: a denial delivered in-band (e.g. RTM_GETLINK ->
           // -EACCES/-EPERM for Android's untrusted_app) must surface as
@@ -468,7 +478,18 @@ where
         let msg_buf = &received[NLMSG_HDRLEN..hlen];
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => break 'outer,
+          NLMSG_DONE => {
+            // A dump the kernel marked interrupted (NLM_F_DUMP_INTR) may be
+            // missing addresses because the table changed mid-walk (DHCP /
+            // VPN / interface flap). The Android interface fallback derives
+            // its interface list from this dump, so a partial-but-`Ok`
+            // result would silently drop interfaces. Surface EINTR so the
+            // caller can retry, matching the route walkers.
+            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
+              return Err(rustix::io::Errno::INTR.into());
+            }
+            break 'outer;
+          }
           // Decode the errno rather than flattening to EINVAL, mirroring the
           // route walkers — a real error (e.g. EACCES/EPERM) propagates with
           // its `ErrorKind` intact instead of becoming InvalidInput.
