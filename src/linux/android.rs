@@ -78,7 +78,7 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   let mut out = TinyVec::new();
 
   if index != 0 {
-    if let Some(ifi) = build_interface(sock.as_fd(), index) {
+    if let Some(ifi) = build_interface(sock.as_fd(), index)? {
       out.push(ifi);
     }
     return Ok(out);
@@ -91,7 +91,7 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   for net in &addrs {
     let idx = net.index();
     if idx != 0 && seen.insert(idx) {
-      if let Some(ifi) = build_interface(sock.as_fd(), idx) {
+      if let Some(ifi) = build_interface(sock.as_fd(), idx)? {
         out.push(ifi);
       }
     }
@@ -100,13 +100,19 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
 }
 
 /// Build one [`Interface`] from its index via `SIOCGIFNAME` + `SIOCGIFMTU` +
-/// `SIOCGIFFLAGS`. Returns `None` if the interface vanished between the
-/// address dump and these calls.
-fn build_interface(sock: BorrowedFd<'_>, index: u32) -> Option<Interface> {
+/// `SIOCGIFFLAGS`.
+///
+/// Returns `Ok(None)` *only* when the interface vanished between the address
+/// dump and these calls (`ENODEV`/`ENXIO`). Any other ioctl failure — a
+/// permission denial, a bad opcode, an unsupported call, a transient kernel
+/// error — is propagated rather than masked as a zeroed or missing
+/// interface, so a real problem can't pass as a successful-but-wrong result.
+fn build_interface(sock: BorrowedFd<'_>, index: u32) -> io::Result<Option<Interface>> {
   // `index_to_name_inlined` issues SIOCGIFNAME, permitted for untrusted_app.
   let name = match index_to_name_inlined(sock, index) {
     Ok(n) => SmolStr::new(n.as_str()),
-    Err(_) => return None,
+    Err(e) if vanished(e) => return Ok(None),
+    Err(e) => return Err(e.into()),
   };
 
   let mut ifr = Ifreq::for_name(&name);
@@ -114,7 +120,8 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> Option<Interface> {
   // SIOCGIFMTU writes the MTU (an int) into the front of the ifru union.
   let mtu = match unsafe { ioctl::ioctl(sock, Updater::<SIOCGIFMTU, Ifreq>::new(&mut ifr)) } {
     Ok(()) => i32::from_ne_bytes(ifr.ifr_ifru[..4].try_into().unwrap()) as u32,
-    Err(_) => 0,
+    Err(e) if vanished(e) => return Ok(None),
+    Err(e) => return Err(e.into()),
   };
 
   // SIOCGIFFLAGS writes the flags (a short) into the front of the union.
@@ -123,10 +130,11 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> Option<Interface> {
       let raw = i16::from_ne_bytes(ifr.ifr_ifru[..2].try_into().unwrap()) as u16;
       Flags::from_bits_truncate(raw as u32)
     }
-    Err(_) => Flags::empty(),
+    Err(e) if vanished(e) => return Ok(None),
+    Err(e) => return Err(e.into()),
   };
 
-  Some(Interface {
+  Ok(Some(Interface {
     index,
     mtu,
     name,
@@ -134,5 +142,13 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> Option<Interface> {
     // not attempt SIOCGIFHWADDR.
     mac_addr: None,
     flags,
-  })
+  }))
+}
+
+/// An interface can disappear between the address dump and these per-index
+/// lookups (DHCP renewal, VPN connect/disconnect). The kernel reports that
+/// as `ENODEV` / `ENXIO`; only those are treated as "skip this index". Every
+/// other errno is a real failure that must propagate.
+fn vanished(e: rustix::io::Errno) -> bool {
+  e == rustix::io::Errno::NODEV || e == rustix::io::Errno::NXIO
 }

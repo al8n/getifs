@@ -22,9 +22,36 @@ pub extern "system" fn Java_dev_getifs_androidharness_NativeBridge_runChecks<'lo
 ) -> jstring {
   let mut errors: Vec<String> = Vec::new();
 
-  if let Err(e) = getifs::interfaces() {
-    errors.push(format!("interfaces: {e}"));
+  // Enumeration must not only succeed but be semantically sane: at least
+  // loopback is present, a known index round-trips through
+  // `interface_by_index`, and at least one interface reports a real MTU.
+  // Checking only `Ok` would let the ioctl fallback pass while silently
+  // returning empty or zeroed data.
+  match getifs::interfaces() {
+    Err(e) => errors.push(format!("interfaces: {e}")),
+    Ok(ifaces) => match ifaces.first() {
+      None => errors.push("interfaces() returned none (expected at least loopback)".to_string()),
+      Some(first) => {
+        match getifs::interface_by_index(first.index()) {
+          Ok(Some(found)) if found.index() == first.index() => {}
+          Ok(Some(found)) => errors.push(format!(
+            "interface_by_index({}) returned index {}",
+            first.index(),
+            found.index()
+          )),
+          Ok(None) => errors.push(format!(
+            "interface_by_index({}) returned None for an enumerated interface",
+            first.index()
+          )),
+          Err(e) => errors.push(format!("interface_by_index: {e}")),
+        }
+        if !ifaces.iter().any(|i| i.mtu() > 0) {
+          errors.push("no interface reported a non-zero MTU".to_string());
+        }
+      }
+    },
   }
+
   if let Err(e) = getifs::interface_addrs() {
     errors.push(format!("interface_addrs: {e}"));
   }
