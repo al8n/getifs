@@ -3,8 +3,8 @@ use linux_raw_sys::{
   netlink::{self, NLM_F_DUMP, NLM_F_DUMP_INTR, NLM_F_REQUEST},
 };
 use rustix::net::{
-  bind, getsockname, netlink::SocketAddrNetlink, recvfrom, sendto, socket, AddressFamily,
-  RecvFlags, SendFlags, SocketType,
+  getsockname, netlink::SocketAddrNetlink, recvfrom, sendto, socket, AddressFamily, RecvFlags,
+  SendFlags, SocketType,
 };
 
 use smallvec_wrapper::{SmallVec, TinyVec};
@@ -194,12 +194,21 @@ struct Handle {
 
 impl Handle {
   unsafe fn new() -> io::Result<Self> {
-    // Create socket
+    // Create the netlink socket. We deliberately do NOT bind() it.
+    //
+    // The kernel auto-binds a unique portid on the first sendto()
+    // (netlink_autobind), and that path does not pass through the SELinux
+    // `bind` permission check that an explicit bind() triggers. Android's
+    // `untrusted_app` domain denies `bind` on netlink_route_socket
+    // (b/155595000) but allows the autobind-on-send that getifaddrs() and
+    // Go's net package rely on — so skipping the explicit bind is what lets
+    // this crate run inside an Android app. There is no behavioural change
+    // on other platforms: the socket ends up with the same kernel-assigned
+    // portid either way, and every entry point sends before calling
+    // getsockname(), so the portid is set before the nlmsg_pid filter reads
+    // it.
     let sock = socket(AddressFamily::NETLINK, SocketType::RAW, None)?;
-
     let sa = SocketAddrNetlink::new(0, 0);
-    bind(&sock, &sa)?;
-
     Ok(Self { fd: sock, sa })
   }
 
@@ -2340,5 +2349,37 @@ fn decode_nlmsghdr(src: &[u8]) -> MessageHeader {
     nlmsg_flags: hflags,
     nlmsg_seq: hseq,
     nlmsg_pid: hpid,
+  }
+}
+
+#[cfg(test)]
+mod autobind_tests {
+  use super::*;
+
+  // Regression guard for Android support (issue #4). `Handle::new()`
+  // intentionally does NOT bind(): the kernel autobinds a portid on the
+  // first send(), and that path bypasses the SELinux `bind` check that
+  // Android's untrusted_app domain denies on netlink_route_socket
+  // (b/155595000). This pins the invariant the per-message nlmsg_pid
+  // filter depends on:
+  //   * before the first send the socket is unbound (portid 0), and
+  //   * the kernel assigns a non-zero portid on send.
+  // If someone reintroduces an eager bind, the first assertion fails
+  // (the socket would already be bound before the send).
+  #[test]
+  fn autobind_assigns_portid_on_send() {
+    unsafe {
+      let handle = Handle::new().expect("create netlink handle");
+
+      let before = handle.sock().expect("getsockname before send");
+      assert_eq!(before.pid(), 0, "socket must be unbound before first send");
+
+      let req =
+        NetlinkRouteRequest::new(RTM_GETLINK as u16, 1, AddressFamily::UNSPEC.as_raw() as u8, 0);
+      handle.send(&req).expect("send RTM_GETLINK");
+
+      let after = handle.sock().expect("getsockname after send");
+      assert_ne!(after.pid(), 0, "kernel must autobind a portid on first send");
+    }
   }
 }
