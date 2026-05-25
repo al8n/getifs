@@ -298,7 +298,18 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
 
         match h.nlmsg_type as u32 {
           NLMSG_DONE => break 'outer,
-          NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
+          // Decode the errno instead of flattening every NLMSG_ERROR to
+          // EINVAL: a denial delivered in-band (e.g. RTM_GETLINK ->
+          // -EACCES/-EPERM for Android's untrusted_app) must surface as
+          // PermissionDenied so the ioctl fallback in
+          // `super::interface_table` can engage. Mirrors the route walkers.
+          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
+            NlmsgErrOutcome::Ack => {
+              received = &received[l..];
+              continue;
+            }
+            NlmsgErrOutcome::FamilyUnavailable => break 'outer,
+          },
           val if val == RTM_NEWLINK => {
             let info_hdr = IfInfoMessageHeader::parse(msg_buf)?;
             let mut info_data = &msg_buf[IfInfoMessageHeader::SIZE..];
@@ -458,7 +469,16 @@ where
 
         match h.nlmsg_type as u32 {
           NLMSG_DONE => break 'outer,
-          NLMSG_ERROR => return Err(rustix::io::Errno::INVAL.into()),
+          // Decode the errno rather than flattening to EINVAL, mirroring the
+          // route walkers — a real error (e.g. EACCES/EPERM) propagates with
+          // its `ErrorKind` intact instead of becoming InvalidInput.
+          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
+            NlmsgErrOutcome::Ack => {
+              received = &received[l..];
+              continue;
+            }
+            NlmsgErrOutcome::FamilyUnavailable => break 'outer,
+          },
           val if val == RTM_NEWADDR => {
             let ifam = IfNetMessageHeader::parse(msg_buf)?;
             let mut ifa_msg_data = &msg_buf[IfNetMessageHeader::SIZE..];
@@ -2353,7 +2373,7 @@ fn decode_nlmsghdr(src: &[u8]) -> MessageHeader {
 }
 
 #[cfg(test)]
-mod autobind_tests {
+mod netlink_tests {
   use super::*;
 
   // Regression guard for Android support (issue #4). `Handle::new()`
@@ -2381,5 +2401,24 @@ mod autobind_tests {
       let after = handle.sock().expect("getsockname after send");
       assert_ne!(after.pid(), 0, "kernel must autobind a portid on first send");
     }
+  }
+
+  // Codex round 3: an in-band RTM_GETLINK denial arrives as
+  // NLMSG_ERROR(-EACCES/-EPERM). `decode_nlmsgerr` must surface the real
+  // errno as PermissionDenied (not flatten it to EINVAL) so the Android
+  // ioctl fallback in `super::interface_table` actually engages.
+  #[test]
+  fn nlmsgerr_decodes_eacces_as_permission_denied() {
+    use std::io::ErrorKind;
+
+    let eacces = rustix::io::Errno::ACCESS.raw_os_error();
+    // The `nlmsgerr` body is a 4-byte signed (negative) errno following the
+    // netlink header.
+    let mut buf = vec![0u8; NLMSG_HDRLEN + 4];
+    buf[NLMSG_HDRLEN..NLMSG_HDRLEN + 4].copy_from_slice(&(-eacces).to_ne_bytes());
+
+    let err =
+      decode_nlmsgerr(&buf, NLMSG_HDRLEN + 4).expect_err("a negative errno must be an error");
+    assert_eq!(err.kind(), ErrorKind::PermissionDenied);
   }
 }
