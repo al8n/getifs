@@ -126,6 +126,13 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> io::Result<Option<Interf
   let name = match index_to_name_inlined(sock, index) {
     Ok(n) => SmolStr::new(n.as_str()),
     Err(e) if vanished(e) => return Ok(None),
+    // rustix returns ILSEQ for a non-UTF8 interface name. Linux names are
+    // arbitrary bytes, so rather than abort the whole enumeration for one
+    // exotic/vendor name, skip just this interface. (The netlink path keeps
+    // such names via lossy conversion; re-implementing SIOCGIFNAME to
+    // preserve raw bytes isn't worth the unverifiable complexity for this
+    // rare case.)
+    Err(e) if e == rustix::io::Errno::ILSEQ => return Ok(None),
     Err(e) => return Err(e.into()),
   };
 
