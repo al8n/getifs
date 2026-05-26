@@ -1,5 +1,114 @@
 # RELEASED
 
+## 0.6.1 (May 26th, 2026)
+
+Adds Android as a supported platform. The autobind change in the
+netlink-socket setup applies to every Linux target as well — the
+socket's end state is identical and one syscall is saved per call — and
+two netlink-error-handling fixes in `netlink_interface` / `netlink_addr`
+benefit all Linux callers. The public API is unchanged on every
+platform, so this is a patch bump.
+
+### Android — new platform support
+
+Apps in Android's `untrusted_app` SELinux domain face two restrictions
+that previously kept `getifs` from running there. Both are handled
+transparently:
+
+- **`bind()` on `netlink_route_socket` is denied** (Android bug
+  [b/155595000](https://issuetracker.google.com/issues/155595000)).
+  `Handle::new()` no longer issues an explicit `bind` — the kernel
+  auto-binds a unique port id on the first `sendto()`, and that path
+  bypasses the SELinux `bind` hook (the same path `getifaddrs()` and
+  Go's `net` package rely on). The change is unconditional (Linux too);
+  the socket's end state is identical, one syscall is saved per call,
+  and Linux behaviour is unchanged.
+- **`RTM_GETLINK` is denied for apps targeting API level 30+** (it
+  requires the `nlmsg_readpriv` SELinux permission, neverallowed for
+  `untrusted_app`). On Android the interface table falls back, on
+  `PermissionDenied`, to discovering interface indices via
+  `RTM_GETADDR` (which stays permitted) and reading name / MTU /
+  flags with `SIOCGIFNAME` / `SIOCGIFMTU` / `SIOCGIFFLAGS` /
+  `SIOCGIFINDEX` ioctls on a datagram socket —
+  bionic-`getifaddrs`-style. The fallback uses `rustix` end-to-end
+  (no `libc`, no `getifaddrs`). Older Android / app domains that
+  still permit `RTM_GETLINK` keep the richer netlink result
+  (including the MAC address).
+
+Documented caveats on Android 11+ (API level 30+):
+
+- `interfaces()` lists only interfaces that currently have an address
+  — there is no app-permitted way to enumerate address-less ones
+  without `getifaddrs`. `interface_by_index()` /
+  `interface_by_name()` go straight to the ioctl path and are
+  unaffected.
+- `Interface::mac_addr()` is `None` (Android restricts the hardware
+  address for apps).
+- Interfaces with a non-UTF-8 name are skipped — one bad name no
+  longer aborts the whole enumeration.
+- `interface_multicast_*` returns `ErrorKind::Unsupported` —
+  `/proc/net` is not readable by apps on Android 10+ (mirrors the
+  existing DragonFly multicast stub).
+- The ioctl socket requires `android.permission.INTERNET` (which any
+  networking app already holds).
+
+### Fixes — Linux netlink (also benefit the Android path)
+
+- **`NLMSG_ERROR` decoded.** `netlink_interface` and `netlink_addr`
+  used to flatten every `NLMSG_ERROR` reply to `EINVAL`. They now
+  use the same `decode_nlmsgerr` helper as the route walkers and
+  propagate the real errno — so an in-band `RTM_GETLINK` denial that
+  arrives as `NLMSG_ERROR(-EACCES)` surfaces as `PermissionDenied`
+  (which the Android fallback keys on), and callers anywhere can
+  pattern-match `ErrorKind` instead of seeing `InvalidInput`.
+- **`NLM_F_DUMP_INTR` honoured.** Both walkers now return `EINTR`
+  when the kernel marks a dump interrupted (table changed mid-walk —
+  DHCP renewal, VPN connect/disconnect, interface flap) instead of
+  silently returning a truncated list. Matches the existing
+  route-walker behaviour.
+- **Multicast surface compiles on Android.** `cfg_multicast!` (and
+  the matching `IfAddr` import gate in `interfaces.rs`) now includes
+  `target_os = "android"`, so the cross-platform multicast public
+  API exists on Android — and returns `Unsupported` as described
+  above.
+
+### CI / chore
+
+- **Android in the `cross` matrix** — `ci.yml`'s compile-check
+  matrix now covers `aarch64-linux-android` and
+  `x86_64-linux-android` alongside the other Linux / BSD / Windows
+  targets (`cargo check`, no NDK required).
+- **Instrumented-APK emulator test.** A new `test-android` job in
+  `ci.yml` builds a minimal JNI shim crate (`ci/android/harness`)
+  with `cargo-ndk`, packages it into an `androidTest` APK, and runs
+  `connectedAndroidTest` on an x86_64 emulator via
+  `reactivecircus/android-emulator-runner`. The test asserts that
+  `interfaces()`, `interface_by_index()`, `interface_addrs()`, and
+  `gateway_addrs()` all return `Ok` inside a real `untrusted_app`
+  process, plus semantic checks (non-empty enumeration, non-zero MTU
+  somewhere, index round-trip). Running the same code via
+  `adb shell` runs in the `shell` SELinux domain, which can bind
+  netlink sockets, so it wouldn't reproduce the app-sandbox
+  restrictions — the instrumented APK is the only context that does.
+- **`x86_64-unknown-linux-musl` coverage** in `coverage.yml` — the
+  pure-Rust / static-musl target. Tarpaulin (Tests + Lib) runs on
+  the ubuntu coverage runner with `musl-tools` for linking, and the
+  report is merged into the codecov upload alongside the other
+  platforms.
+- **Coverage artifact uploads tolerate transient flakes** — every
+  `actions/upload-artifact` step in `coverage.yml` is
+  `continue-on-error: true`, so a one-off GitHub artifact-service
+  hiccup can no longer redden the coverage workflow. The
+  coverage-generation step remains the real pass/fail signal, and
+  `upload-codecov` already merges whatever artifacts actually made
+  it.
+- **README** documents the Android platform support and per-platform
+  caveats in a dedicated `### Android` subsection; the OS / approach
+  table now includes the Android row.
+- **Published crate excludes `/ci` and `/docs`** (via
+  `[package] exclude`) so the harness scaffolding and local planning
+  artifacts are not shipped to crates.io.
+
 ## 0.6.0 (May 6th, 2026)
 
 Post-`0.5.0` review pass. The crate's public surface stays
