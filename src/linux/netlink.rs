@@ -2415,12 +2415,20 @@ mod netlink_tests {
       let before = handle.sock().expect("getsockname before send");
       assert_eq!(before.pid(), 0, "socket must be unbound before first send");
 
-      let req =
-        NetlinkRouteRequest::new(RTM_GETLINK as u16, 1, AddressFamily::UNSPEC.as_raw() as u8, 0);
+      let req = NetlinkRouteRequest::new(
+        RTM_GETLINK as u16,
+        1,
+        AddressFamily::UNSPEC.as_raw() as u8,
+        0,
+      );
       handle.send(&req).expect("send RTM_GETLINK");
 
       let after = handle.sock().expect("getsockname after send");
-      assert_ne!(after.pid(), 0, "kernel must autobind a portid on first send");
+      assert_ne!(
+        after.pid(),
+        0,
+        "kernel must autobind a portid on first send"
+      );
     }
   }
 
