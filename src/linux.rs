@@ -3,6 +3,9 @@ use std::{
   net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
+// Only the /proc/net/igmp* parsers use xtoi2, and those are not compiled on
+// Android (see the parser stubs below).
+#[cfg(not(target_os = "android"))]
 use hardware_address::xtoi2;
 use ipnet::{Ipv4Net, Ipv6Net};
 use rustix::net::AddressFamily;
@@ -21,6 +24,10 @@ mod netlink;
 
 #[path = "linux/local_addr.rs"]
 mod local_addr;
+
+#[cfg(target_os = "android")]
+#[path = "linux/android.rs"]
+mod android;
 
 use netlink::{netlink_addr, netlink_interface, netlink_walk_routes};
 
@@ -267,8 +274,24 @@ bitflags::bitflags! {
   }
 }
 
+#[cfg(not(target_os = "android"))]
 pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   netlink_interface(AddressFamily::UNSPEC, index)
+}
+
+#[cfg(target_os = "android")]
+pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
+  // Android 11+ untrusted_app is denied RTM_GETLINK (it needs the SELinux
+  // `nlmsg_readpriv` permission, neverallowed for apps targeting API >= 30),
+  // so the netlink interface dump fails with PermissionDenied even though
+  // the bind is gone. Fall back to the RTM_GETADDR + SIOCGIF* ioctl path
+  // (see linux/android.rs) — the same combination bionic's getifaddrs and
+  // Go's net package use. Older Android / app domains that still permit
+  // RTM_GETLINK keep the richer netlink result (including the MAC address).
+  match netlink_interface(AddressFamily::UNSPEC, index) {
+    Err(e) if e.kind() == io::ErrorKind::PermissionDenied => android::interface_table(index),
+    other => other,
+  }
 }
 
 pub(super) fn interface_ipv4_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<Ifv4Net>>
@@ -334,6 +357,24 @@ where
   )
 }
 
+// Android 10+ denies apps access to /proc/net, so the parsers that read
+// /proc/net/igmp* are not compiled there. The Android stubs return
+// `Unsupported` (matching the DragonFly multicast stub in bsd_like.rs): the
+// public `interface_multicast_*` surface still exists for cross-platform
+// callers, but a real call reports the limitation instead of a misleading
+// empty result or a raw permission error.
+#[cfg(target_os = "android")]
+fn parse_proc_net_igmp<F>(_path: &str, _ifi: u32, _f: F) -> std::io::Result<SmallVec<Ifv4Addr>>
+where
+  F: FnMut(&Ipv4Addr) -> bool,
+{
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "multicast group enumeration is unavailable on Android (/proc/net is restricted for apps)",
+  ))
+}
+
+#[cfg(not(target_os = "android"))]
 fn parse_proc_net_igmp<F>(path: &str, ifi: u32, mut f: F) -> std::io::Result<SmallVec<Ifv4Addr>>
 where
   F: FnMut(&Ipv4Addr) -> bool,
@@ -397,6 +438,18 @@ where
   Ok(ifmat)
 }
 
+#[cfg(target_os = "android")]
+fn parse_proc_net_igmp6<F>(_path: &str, _ifi: u32, _f: F) -> io::Result<SmallVec<Ifv6Addr>>
+where
+  F: FnMut(&Ipv6Addr) -> bool,
+{
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "multicast group enumeration is unavailable on Android (/proc/net is restricted for apps)",
+  ))
+}
+
+#[cfg(not(target_os = "android"))]
 fn parse_proc_net_igmp6<F>(path: &str, ifi: u32, mut f: F) -> io::Result<SmallVec<Ifv6Addr>>
 where
   F: FnMut(&Ipv6Addr) -> bool,

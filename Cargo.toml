@@ -1,6 +1,6 @@
 [package]
 name = "getifs"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 repository = "https://github.com/al8n/getifs"
 homepage = "https://github.com/al8n/getifs"
@@ -10,6 +10,9 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.85.0"
 keywords = ["getifaddrs", "network-interface", "local-ip-address", "gateway", "mtu"]
 categories = ["network-programming"]
+# The Android CI harness and local design docs are not part of the
+# published crate.
+exclude = ["/ci", "/docs"]
 
 [[bench]]
 path = "benches/interfaces.rs"

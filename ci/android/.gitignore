@@ -1,0 +1,17 @@
+# Rust build artifacts for the detached harness crate
+/harness/target/
+/harness/Cargo.lock
+
+# Native libs are built by cargo-ndk in CI, never committed
+/app/src/main/jniLibs/
+
+# Gradle build outputs
+.gradle/
+build/
+/app/build/
+local.properties
+
+# Gradle wrapper is generated in CI (the wrapper jar is binary)
+gradlew
+gradlew.bat
+gradle/
