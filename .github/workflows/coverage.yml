@@ -48,6 +48,12 @@ jobs:
           mkdir -p coverage
           cargo tarpaulin --all-features --engine llvm --run-types Doctests --run-types Tests --run-types Lib --out xml --output-dir coverage/${{ matrix.os }} -j 1
       - name: Upload Coverage Report as Artifact
+        # Artifact uploads can hit transient GitHub artifact-service errors
+        # (the Windows runner flaked once at this step while the other four
+        # jobs uploaded fine). A flaky upload shouldn't redden the whole
+        # coverage run — the generation step above is the real signal, and
+        # upload-codecov merges whatever artifacts actually made it.
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.os }}
@@ -82,6 +88,7 @@ jobs:
           cargo tarpaulin --all-features --engine llvm --target x86_64-unknown-linux-musl --run-types Tests --run-types Lib --out xml --output-dir coverage/linux-musl -j 1
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/linux-musl/cobertura.xml') != ''
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: linux-musl
@@ -139,6 +146,7 @@ jobs:
 
       - name: Upload Coverage Report as Artifact
         if: hashFiles('coverage/freebsd/cobertura.xml') != ''
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: freebsd
