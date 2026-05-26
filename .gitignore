@@ -19,3 +19,6 @@ Cargo.lock
 **.claude/
 **target-review/
 
+# Local planning / brainstorming artifacts — not part of the repo.
+/docs/
+
