@@ -40,7 +40,10 @@ use std::{collections::BTreeSet, io};
 use rustix::{
   fd::{AsFd, BorrowedFd},
   ioctl::{self, Opcode, Updater},
-  net::{netdevice::index_to_name_inlined, socket, AddressFamily, SocketType},
+  net::{
+    netdevice::{index_to_name_inlined, name_to_index},
+    socket, AddressFamily, SocketType,
+  },
 };
 use smallvec_wrapper::TinyVec;
 use smol_str::SmolStr;
@@ -144,6 +147,19 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> io::Result<Option<Interf
     Err(e) if vanished(e) => return Ok(None),
     Err(e) => return Err(e.into()),
   };
+
+  // Guard against a name being reassigned between the index->name resolution
+  // and the by-name SIOCGIF* ioctls (TOCTOU): the ioctls operate by name, so
+  // if `index` was deleted and another interface took its name, the MTU/flags
+  // just read would belong to that other device. Re-resolve the name and
+  // require it still maps to the requested index; on mismatch (or a vanished
+  // name) treat this index as gone.
+  match name_to_index(sock, name.as_str()) {
+    Ok(i) if i == index => {}
+    Ok(_) => return Ok(None),
+    Err(e) if vanished(e) => return Ok(None),
+    Err(e) => return Err(e.into()),
+  }
 
   Ok(Some(Interface {
     index,
