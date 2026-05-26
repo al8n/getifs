@@ -189,6 +189,11 @@ jobs:
           - i686-pc-windows-gnu
           - x86_64-pc-windows-gnu
           - x86_64-pc-windows-msvc
+
+          # --- Android (the `linux_like` path + the SIOCGIF* ioctl
+          #     fallback in src/linux/android.rs) ----------------------
+          - aarch64-linux-android
+          - x86_64-linux-android
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -322,3 +327,51 @@ jobs:
             # `ifis` flakes due to interface churn during test runs.
             # The per-test cfg gates stay in place defensively.
             cargo test --all-features --lib -- --nocapture
+
+  # Run the public API inside a real Android app process (the
+  # `untrusted_app` SELinux domain) on an x86_64 emulator — the only
+  # context that reproduces the SELinux restrictions the Android support
+  # works around: the `bind` denial on `netlink_route_socket`
+  # (b/155595000) and the `RTM_GETLINK` denial that drives the `SIOCGIF*`
+  # ioctl fallback in `src/linux/android.rs`. The `cross` job above only
+  # compile-checks the `*-linux-android` targets; this exercises them at
+  # runtime. `cargo-ndk` builds the JNI shim crate (`ci/android/harness`)
+  # into the app's `jniLibs`, and an instrumented test calls
+  # `interfaces()` / `interface_by_index()` / `interface_addrs()` /
+  # `gateway_addrs()` inside the app sandbox and asserts they succeed.
+  test-android:
+    name: test (android)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set NDK home for cargo-ndk
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
+      - name: Rust android target
+        run: rustup target add x86_64-linux-android
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+      - name: Build native shim into app jniLibs
+        working-directory: ci/android/harness
+        run: cargo ndk -t x86_64 -o ../app/src/main/jniLibs build --release
+      - name: Generate Gradle wrapper (pinned)
+        working-directory: ci/android
+        run: gradle wrapper --gradle-version 8.9
+      - name: Run instrumented test on emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          working-directory: ci/android
+          script: ./gradlew connectedAndroidTest
