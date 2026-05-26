@@ -34,7 +34,7 @@ getifs = "0.6"
 - **Routing table** - Enumerate kernel routing-table entries
 - **RFC-based filtering** - Filter addresses by RFC classification
 - **High performance** - Up to 72x faster than alternatives on macOS (see benchmarks)
-- **Cross-platform** - Linux, macOS, BSD, Windows support
+- **Cross-platform** - Linux, macOS, BSD, Windows, and Android support
 
 ## Quick Start
 
@@ -77,8 +77,41 @@ for gateway in gateways {
 OS | Approach
 --- | ---
 Linux (no `libc`) | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
+Android (no `libc`) | netlink with kernel auto-bind + `SIOCGIF*` ioctl fallback — see [Android](#android)
 BSD-like | `sysctl`
 Windows | `GetAdaptersAddresses`
+
+### Android
+
+Android runs the same libc-free netlink backend as Linux, but apps in the
+`untrusted_app` SELinux domain hit two extra restrictions, both handled
+transparently by `getifs`:
+
+- **`bind()` on `netlink_route_socket` is denied** (Android bug b/155595000).
+  `getifs` never binds explicitly; the kernel auto-binds a unique port id on
+  the first send — the same path `getifaddrs()` and Go's `net` package rely on.
+- **`RTM_GETLINK` is denied** for apps targeting API level 30+ (it needs the
+  `nlmsg_readpriv` permission). Interface metadata therefore falls back to
+  discovering indices via `RTM_GETADDR` (which stays permitted) and reading the
+  name / MTU / flags with `SIOCGIF*` ioctls on a datagram socket.
+
+Working inside the `untrusted_app` sandbox: `interfaces()`,
+`interface_by_index()`, `interface_by_name()`, MTU, every address query
+(`interface_addrs()`, `local_addrs()`, `private_addrs()`, `public_addrs()`),
+gateways, and the routing table.
+
+Caveats on Android 11+ (API level 30+):
+
+- `interfaces()` lists only interfaces that currently have an address — there
+  is no app-permitted way to enumerate address-less ones without `getifaddrs`.
+  (`interface_by_index()` / `interface_by_name()` are unaffected.)
+- The hardware (MAC) address is reported as `None` (Android restricts it for
+  apps).
+- Interfaces with a non-UTF-8 name are skipped.
+- Multicast group enumeration returns `io::ErrorKind::Unsupported` —
+  `/proc/net` is not readable by apps on Android 10+.
+- The ioctl socket requires the `android.permission.INTERNET` permission
+  (which any networking app already holds).
 
 ## Why `getifs`?
 
