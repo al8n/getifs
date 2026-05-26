@@ -53,6 +53,40 @@ jobs:
           name: ${{ matrix.os }}
           path: coverage/${{ matrix.os }}/cobertura.xml
 
+  # Coverage for the pure-Rust musl target (x86_64-unknown-linux-musl).
+  # getifs uses rustix's `linux_raw` backend on Linux, so the musl build
+  # links no libc — this exercises that pure-Rust static path. The musl
+  # test binary is statically linked and runs natively on the ubuntu
+  # runner, so no emulator is needed: just the musl linker (`musl-tools`,
+  # which also provides the `musl-gcc` that the `alloca` dev-dependency's
+  # build script needs) and the rustup target. Doctests are skipped
+  # (Tests + Lib cover the API surface), matching the FreeBSD job.
+  coverage-linux-musl:
+    name: Generate Coverage for linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install latest nightly + musl target
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          target: x86_64-unknown-linux-musl
+          override: true
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Run Coverage and Generate Report
+        run: |
+          mkdir -p coverage/linux-musl
+          cargo tarpaulin --all-features --engine llvm --target x86_64-unknown-linux-musl --run-types Tests --run-types Lib --out xml --output-dir coverage/linux-musl -j 1
+      - name: Upload Coverage Report as Artifact
+        if: hashFiles('coverage/linux-musl/cobertura.xml') != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-musl
+          path: coverage/linux-musl/cobertura.xml
+
   # BSD coverage: only FreeBSD has a viable coverage job. NetBSD,
   # OpenBSD, and DragonFly all ship rust packages built without the
   # `profiler_builtins` crate, so any `-Cinstrument-coverage` build
@@ -149,7 +183,7 @@ jobs:
     # actually produced; a missing BSD report just means the
     # codecov.io merge runs without that platform's data for that
     # commit.
-    needs: [coverage-report, coverage-freebsd]
+    needs: [coverage-report, coverage-freebsd, coverage-linux-musl]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
