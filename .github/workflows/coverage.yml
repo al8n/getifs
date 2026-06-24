@@ -35,7 +35,7 @@ jobs:
           - macos-latest
           - windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
@@ -71,7 +71,7 @@ jobs:
     name: Generate Coverage for linux-musl
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install latest nightly + musl target
         uses: actions-rs/toolchain@v1
         with:
@@ -124,7 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Generate coverage on FreeBSD
         uses: vmactions/freebsd-vm@v1
         with:
@@ -195,7 +195,7 @@ jobs:
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Download all coverage reports
         uses: actions/download-artifact@v8
         with:
