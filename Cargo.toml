@@ -39,7 +39,7 @@ default = []
 [dependencies]
 bitflags = "2"
 cfg-if = "1"
-hardware-address = "0.3"
+hardware-address = "1"
 iprobe = "0.1"
 ipnet = "2"
 iprfc = ">=0.2.3, <0.3"

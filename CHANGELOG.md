@@ -88,6 +88,13 @@
   advisory, not a known vulnerability, and transitive `paste` remains outside
   this crate's control. Remove the unused `triomphe` dependency and inactive
   serde scaffolding.
+- Require `hardware-address` 1.0. `MacAddr` and `ParseMacAddrError` are
+  re-exported, and `MacAddr` is returned by `Interface::mac_addr()`, so this
+  is part of the release's breaking changes: `MacAddr` is now the 1.0 type,
+  and `ParseMacAddrError` is `#[non_exhaustive]` with a new
+  `UnsupportedAddressSize` variant. `hardware-address` 1.0 uses `pastey`, so
+  the unmaintained `paste` now enters only through `iprfc` and
+  `smallvec-wrapper`.
 - Restrict the Linux backend cfg to Linux and Android. Other unsupported
   targets now fail with a clear compile-time error instead of compiling a
   meaningless Linux path.
