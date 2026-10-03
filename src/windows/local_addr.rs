@@ -53,9 +53,7 @@ use windows_sys::Win32::Networking::WinSock::*;
 /// kernel uses.
 fn best_default_route_interface(family: u16) -> io::Result<SmallVec<u32>> {
   // SAFETY: `GetIpForwardTable2` is an IP Helper table getter.
-  let forward = match unsafe {
-    OwnedMibTable::fetch(|table| GetIpForwardTable2(family, table))
-  } {
+  let forward = match unsafe { OwnedMibTable::fetch(|table| GetIpForwardTable2(family, table)) } {
     Ok(table) => table,
     Err(status) => return classify_table_error(status),
   };
@@ -65,9 +63,8 @@ fn best_default_route_interface(family: u16) -> io::Result<SmallVec<u32>> {
   // metric. Missing rows fall back to 0 — that matches what the
   // kernel does on interfaces without an explicit metric.
   // SAFETY: `GetIpInterfaceTable` is an IP Helper table getter.
-  let interfaces = match unsafe {
-    OwnedMibTable::fetch(|table| GetIpInterfaceTable(family, table))
-  } {
+  let interfaces = match unsafe { OwnedMibTable::fetch(|table| GetIpInterfaceTable(family, table)) }
+  {
     Ok(table) => table,
     Err(status) => return classify_table_error(status),
   };

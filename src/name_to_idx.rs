@@ -34,7 +34,9 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
 
 #[cfg(linux_like)]
 fn ifname_to_index_in(name: &str) -> io::Result<u32> {
-  use rustix::net::{netdevice::name_to_index, socket_with, AddressFamily, SocketFlags, SocketType};
+  use rustix::net::{
+    netdevice::name_to_index, socket_with, AddressFamily, SocketFlags, SocketType,
+  };
 
   let socket_fd = socket_with(
     AddressFamily::INET,

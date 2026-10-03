@@ -51,12 +51,11 @@ use super::{
 fn directed_broadcast_set() -> HashSet<(u32, Ipv4Addr)> {
   let mut out: HashSet<(u32, Ipv4Addr)> = HashSet::new();
   // SAFETY: `GetUnicastIpAddressTable` is an IP Helper table getter.
-  let table = match unsafe {
-    OwnedMibTable::fetch(|table| GetUnicastIpAddressTable(AF_INET, table))
-  } {
-    Ok(table) => table,
-    Err(_) => return out,
-  };
+  let table =
+    match unsafe { OwnedMibTable::fetch(|table| GetUnicastIpAddressTable(AF_INET, table)) } {
+      Ok(table) => table,
+      Err(_) => return out,
+    };
   for r in table.rows() {
     // SAFETY: `Address` is a `SOCKADDR_INET` union, and `si_family`
     // overlays the family field that every member starts with.

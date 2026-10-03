@@ -307,9 +307,7 @@ mod tests {
     let mut data = vec![0u8; roundup(full_v6_len)];
     data[0] = full_v6_len as u8;
     data[1] = AF_INET6 as u8;
-    data[8..24].copy_from_slice(&[
-      0xfe, 0x80, 0x00, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    ]);
+    data[8..24].copy_from_slice(&[0xfe, 0x80, 0x00, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
     let frame = take_sockaddr_frame(&data).unwrap();
     assert_eq!(

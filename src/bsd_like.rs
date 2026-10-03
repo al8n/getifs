@@ -1633,8 +1633,7 @@ mod tests {
     message[12..16].copy_from_slice(&(addrs_mask as i32).to_ne_bytes());
 
     // Compact IPv4 /8 netmask followed by a full 127.0.0.1 sockaddr.
-    message[HEADER_SIZE..HEADER_SIZE + 8]
-      .copy_from_slice(&[8, AF_INET as u8, 0, 0, 255, 0, 0, 0]);
+    message[HEADER_SIZE..HEADER_SIZE + 8].copy_from_slice(&[8, AF_INET as u8, 0, 0, 255, 0, 0, 0]);
     message[HEADER_SIZE + 8..].copy_from_slice(&[
       16,
       AF_INET as u8,
