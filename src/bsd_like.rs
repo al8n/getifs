@@ -557,6 +557,47 @@ fn parse_short_inet_addr(af: i32, sa: &[u8]) -> io::Result<IpAddr> {
   }
 }
 
+/// Decode a BSD route-message sockaddr from exactly its declared `sa_len`
+/// bytes, `sa`, without requiring the full `sockaddr_in[6]` size. A kernel
+/// can store a gateway or destination compactly, e.g. a `sockaddr_in` with
+/// `sin_len = 8` that ends right after `sin_addr`.
+///
+/// Returns `None` unless `sa` holds every address byte. Unlike the netmask
+/// short form, the missing bytes of an address are unknown rather than zero,
+/// so this never zero-extends.
+fn decode_full_inet_addr(af: i32, sa: &[u8]) -> Option<IpAddr> {
+  match af {
+    // sockaddr_in: sa_len, sa_family, sin_port (2), sin_addr (4), ...
+    AF_INET => {
+      let ip: [u8; 4] = sa.get(4..8)?.try_into().ok()?;
+      Some(IpAddr::V4(ip.into()))
+    }
+    // sockaddr_in6: sa_len, sa_family, sin6_port (2), sin6_flowinfo (4), sin6_addr (16), ...
+    AF_INET6 => {
+      let ip: [u8; 16] = sa.get(8..24)?.try_into().ok()?;
+      Some(IpAddr::V6(strip_kame_scope(ip)))
+    }
+    _ => None,
+  }
+}
+
+fn strip_kame_scope(mut ip: [u8; 16]) -> Ipv6Addr {
+  if ip[0] == 0xfe && ip[1] & 0xc0 == 0x80
+    || ip[0] == 0xff && (ip[1] & 0x0f == 0x01 || ip[1] & 0x0f == 0x02)
+  {
+    // KAME based IPv6 protocol stack usually
+    // embeds the interface index in the
+    // interface-local or link-local address as
+    // the kernel-internal form.
+    let id = u16::from_be_bytes([ip[2], ip[3]]);
+    if id != 0 {
+      ip[2] = 0;
+      ip[3] = 0;
+    }
+  }
+  ip.into()
+}
+
 pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
   // Sysctl returns a `Vec<u8>`, which only formally guarantees u8
   // alignment for its data pointer. The kernel pads each routing
@@ -567,8 +608,8 @@ pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> 
   // target type. `read_unaligned` copies into an aligned local
   // without that assumption; the resulting load is the same on x86 /
   // ARM, but defined behaviour everywhere (including strict-alignment
-  // targets like SPARC). All BSD callers — gateway, address, route,
-  // and multicast walkers — go through this function.
+  // targets like SPARC). The address, route, and multicast walkers
+  // decode every full-size sockaddr through this function.
   match af {
     AF_INET => {
       if b.len() < SOCK4 {
@@ -590,24 +631,9 @@ pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> 
       let sockaddr: libc::sockaddr_in6 =
         unsafe { core::ptr::read_unaligned(b.as_ptr() as *const libc::sockaddr_in6) };
 
-      let mut ip = sockaddr.sin6_addr.s6_addr;
       // TODO: create own Ipv6Addr
       let _zone_id = sockaddr.sin6_scope_id;
-      let mut addr: Ipv6Addr = ip.into();
-      if ip[0] == 0xfe && ip[1] & 0xc0 == 0x80
-        || ip[0] == 0xff && (ip[1] & 0x0f == 0x01 || ip[1] & 0x0f == 0x02)
-      {
-        // KAME based IPv6 protocol stack usually
-        // embeds the interface index in the
-        // interface-local or link-local address as
-        // the kernel-internal form.
-        let id = u16::from_be_bytes([ip[2], ip[3]]);
-        if id != 0 {
-          ip[2] = 0;
-          ip[3] = 0;
-          addr = ip.into();
-        }
-      }
+      let addr = strip_kame_scope(sockaddr.sin6_addr.s6_addr);
 
       Ok((SOCK6, addr.into()))
     }
@@ -675,13 +701,17 @@ pub(super) fn parse_addrs(
           // become an unspecified address, which the route builder
           // would happily turn into a fake default route or a fake
           // on-link gateway). Restrict the short-form fallback to
-          // `RTAX_NETMASK`; for every other slot, a sub-`SOCK4`/`SOCK6`
-          // length is a malformed message → `InvalidData`.
+          // `RTAX_NETMASK`. Any other slot accepts a sub-`SOCK4`/`SOCK6`
+          // length only when the declared bytes still hold the whole
+          // address (a compact `sin_len = 8` gateway, for instance);
+          // anything shorter is a malformed message → `InvalidData`.
           let addr = if sa_len >= needed {
             let (_, a) = parse_inet_addr(af, b)?;
             a
           } else if i == RTAX_NETMASK as usize {
             parse_short_inet_addr(af, &b[..sa_len])?
+          } else if let Some(a) = decode_full_inet_addr(af, &b[..sa_len]) {
+            a
           } else {
             return Err(io::Error::new(
               io::ErrorKind::InvalidData,
@@ -738,6 +768,8 @@ pub(crate) fn fuzz_bsd_parsers(data: &[u8]) {
   let _ = parse_short_inet_addr(AF_INET6, data);
   let _ = parse_inet_addr(AF_INET, data);
   let _ = parse_inet_addr(AF_INET6, data);
+  let _ = decode_full_inet_addr(AF_INET, data);
+  let _ = decode_full_inet_addr(AF_INET6, data);
   rt_generic::fuzz_sockaddr_frame(data);
 }
 
@@ -1139,6 +1171,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use libc::{RTAX_DST, RTAX_GATEWAY};
 
   // Pure-function unit tests for the BSD parser helpers and the
   // `family_unavailable_to_empty` errno classifier. These run on
@@ -1248,6 +1281,93 @@ mod tests {
 
     let (_, addr) = parse_inet_addr(libc::AF_INET6, &buf).unwrap();
     assert_eq!(addr, IpAddr::V6("fe80::1".parse().unwrap()));
+  }
+
+  /// The `rtm_addrs`-style bitmask that marks each `RTAX_*` slot present.
+  fn addrs_mask(slots: &[libc::c_int]) -> u32 {
+    slots.iter().fold(0, |mask, &slot| mask | 1 << slot)
+  }
+
+  /// `sa` followed by the alignment padding its `sa_len` (first byte) implies.
+  fn padded_sockaddr(sa: &[u8]) -> Vec<u8> {
+    let mut padded = sa.to_vec();
+    padded.resize(roundup(sa[0] as usize), 0);
+    padded
+  }
+
+  fn sockaddr_in(ip: Ipv4Addr) -> Vec<u8> {
+    let mut sa = vec![0u8; SOCK4];
+    sa[0] = SOCK4 as u8;
+    sa[1] = AF_INET as u8;
+    sa[4..8].copy_from_slice(&ip.octets());
+    padded_sockaddr(&sa)
+  }
+
+  #[test]
+  fn parse_addrs_decodes_compact_v4_gateway() {
+    // A full destination, a `sin_len = 8` gateway that ends right after
+    // `sin_addr`, and a compact /24 netmask.
+    let mut b = sockaddr_in(Ipv4Addr::new(198, 51, 100, 0));
+    b.extend(padded_sockaddr(&[8, AF_INET as u8, 0, 0, 192, 0, 2, 1]));
+    b.extend(padded_sockaddr(&[7, AF_INET as u8, 0, 0, 255, 255, 255]));
+
+    let addrs = parse_addrs(addrs_mask(&[RTAX_DST, RTAX_GATEWAY, RTAX_NETMASK]), &b).unwrap();
+    assert_eq!(
+      addrs[RTAX_DST as usize],
+      Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 0)))
+    );
+    assert_eq!(
+      addrs[RTAX_GATEWAY as usize],
+      Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+    );
+    assert_eq!(
+      addrs[RTAX_NETMASK as usize],
+      Some(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0)))
+    );
+  }
+
+  #[test]
+  fn parse_addrs_strips_kame_scope_from_compact_v6_gateway() {
+    // A 24-byte `sockaddr_in6` ends right after `sin6_addr`. KAME stores the
+    // interface index in bytes 2..4 of a link-local address.
+    let mut gateway = [0u8; 24];
+    gateway[0] = 24;
+    gateway[1] = AF_INET6 as u8;
+    gateway[8..24].copy_from_slice(&[0xfe, 0x80, 0x00, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+    let addrs = parse_addrs(addrs_mask(&[RTAX_GATEWAY]), &padded_sockaddr(&gateway)).unwrap();
+    assert_eq!(
+      addrs[RTAX_GATEWAY as usize],
+      Some(IpAddr::V6("fe80::1".parse().unwrap()))
+    );
+  }
+
+  #[test]
+  fn parse_addrs_rejects_gateway_without_whole_address() {
+    // Seven declared bytes stop one byte short of `sin_addr`, and twenty stop
+    // inside `sin6_addr`. The missing bytes are unknown, not zero.
+    let v4 = padded_sockaddr(&[7, AF_INET as u8, 0, 0, 192, 0, 2]);
+    let err = parse_addrs(addrs_mask(&[RTAX_GATEWAY]), &v4).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    let mut v6 = [0u8; 20];
+    v6[0] = 20;
+    v6[1] = AF_INET6 as u8;
+    let err = parse_addrs(addrs_mask(&[RTAX_GATEWAY]), &padded_sockaddr(&v6)).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+  }
+
+  #[test]
+  fn parse_addrs_zero_extends_only_the_netmask_short_form() {
+    // The same five declared bytes are a valid /8 netmask but an incomplete
+    // gateway address.
+    let short = padded_sockaddr(&[5, AF_INET as u8, 0, 0, 255]);
+    let addrs = parse_addrs(addrs_mask(&[RTAX_NETMASK]), &short).unwrap();
+    assert_eq!(
+      addrs[RTAX_NETMASK as usize],
+      Some(IpAddr::V4(Ipv4Addr::new(255, 0, 0, 0)))
+    );
+    assert!(parse_addrs(addrs_mask(&[RTAX_GATEWAY]), &short).is_err());
   }
 
   #[test]

@@ -52,6 +52,12 @@
 - BSD parsing handles compact sockaddrs and KAME-scoped IPv6 safely; NetBSD
   sysctl snapshots handle bounded `ENOMEM` retries and zero-sized results
   without weakening genuine malformed-data or permission errors.
+- BSD gateway, route, and best-local walks accept a compact `AF_INET` or
+  `AF_INET6` gateway or destination sockaddr whose declared length still
+  holds the whole address (such as a `sockaddr_in` with `sin_len = 8`)
+  instead of failing the whole call. A shorter one is never zero-extended:
+  `gateway_addrs()` skips it, and route and best-local walks keep reporting
+  it as malformed. Netmask short forms are unchanged.
 - Windows validates FFI buffer lengths and alignment before walking adapter
   records, and interface-name conversion skips unrepresentable Unicode names
   instead of poisoning a complete enumeration.

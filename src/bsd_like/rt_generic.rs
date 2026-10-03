@@ -1,9 +1,11 @@
 use std::{collections::HashSet, io, net::IpAddr};
 
-use libc::{AF_INET, AF_INET6, AF_UNSPEC, NET_RT_FLAGS, RTF_UP};
+use libc::{AF_UNSPEC, NET_RT_FLAGS, RTF_UP};
 use smallvec_wrapper::SmallVec;
 
-use super::{super::Address, compat::RtMsghdr, fetch, message_too_short, parse_inet_addr, roundup};
+use super::{
+  super::Address, compat::RtMsghdr, decode_full_inet_addr, fetch, message_too_short, roundup,
+};
 
 /// One length-delimited sockaddr from a BSD routing message.
 ///
@@ -46,15 +48,12 @@ fn take_sockaddr_frame(cur: &[u8]) -> io::Result<SockaddrFrame<'_>> {
   })
 }
 
-fn parse_sockaddr_ip(frame: &SockaddrFrame<'_>) -> io::Result<Option<IpAddr>> {
-  if frame.bytes.is_empty() {
-    return Ok(None);
-  }
-
-  match frame.family {
-    AF_INET | AF_INET6 => parse_inet_addr(frame.family, frame.bytes).map(|(_, ip)| Some(ip)),
-    _ => Ok(None),
-  }
+/// The frame's address, or `None` for a non-IP family or a frame whose
+/// declared bytes do not hold a whole address. A compact `sin_len = 8`
+/// gateway decodes; a shorter one is skipped, because completing it would
+/// borrow bytes from the next frame.
+fn parse_sockaddr_ip(frame: &SockaddrFrame<'_>) -> Option<IpAddr> {
+  decode_full_inet_addr(frame.family, frame.bytes)
 }
 
 pub(super) fn rt_generic_addrs_in<A, F>(
@@ -159,7 +158,7 @@ where
           if i == rta {
             let family_matches = family == AF_UNSPEC || family == frame.family;
             if family_matches {
-              if let Some(ip) = parse_sockaddr_ip(&frame)? {
+              if let Some(ip) = parse_sockaddr_ip(&frame) {
                 if !ip.is_unspecified() {
                   if let Some(addr) =
                     A::try_from_with_filter(rtm.rtm_index as u32, ip, |addr| f(addr))
@@ -198,6 +197,7 @@ pub(super) fn fuzz_sockaddr_frame(data: &[u8]) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use libc::{AF_INET, AF_INET6};
   use std::net::Ipv6Addr;
 
   #[test]
@@ -217,7 +217,7 @@ mod tests {
     let frame = take_sockaddr_frame(&data).unwrap();
     assert_eq!(frame.bytes.len(), 8);
     assert_eq!(frame.rest[0] as usize, full_v6_len);
-    assert!(parse_sockaddr_ip(&frame).is_err());
+    assert_eq!(parse_sockaddr_ip(&frame), None);
   }
 
   #[test]
@@ -232,7 +232,39 @@ mod tests {
 
     let frame = take_sockaddr_frame(&data).unwrap();
     assert_eq!(
-      parse_sockaddr_ip(&frame).unwrap(),
+      parse_sockaddr_ip(&frame),
+      Some(IpAddr::V6("fe80::1".parse().unwrap()))
+    );
+  }
+
+  #[test]
+  fn sockaddr_decode_accepts_compact_v4_gateway() {
+    // A `sockaddr_in` with `sin_len = 8` ends right after `sin_addr`.
+    let mut data = vec![0u8; roundup(8)];
+    data[0] = 8;
+    data[1] = AF_INET as u8;
+    data[4..8].copy_from_slice(&[192, 0, 2, 1]);
+
+    let frame = take_sockaddr_frame(&data).unwrap();
+    assert_eq!(frame.bytes.len(), 8);
+    assert_eq!(
+      parse_sockaddr_ip(&frame),
+      Some(IpAddr::V4([192, 0, 2, 1].into()))
+    );
+  }
+
+  #[test]
+  fn sockaddr_decode_normalizes_compact_kame_gateway() {
+    // A 24-byte `sockaddr_in6` ends right after `sin6_addr`.
+    let mut data = vec![0u8; roundup(24)];
+    data[0] = 24;
+    data[1] = AF_INET6 as u8;
+    data[8..24].copy_from_slice(&[0xfe, 0x80, 0x00, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+    let frame = take_sockaddr_frame(&data).unwrap();
+    assert_eq!(frame.bytes.len(), 24);
+    assert_eq!(
+      parse_sockaddr_ip(&frame),
       Some(IpAddr::V6("fe80::1".parse().unwrap()))
     );
   }
@@ -243,7 +275,7 @@ mod tests {
     let frame = take_sockaddr_frame(&data).unwrap();
     assert!(frame.bytes.is_empty());
     assert_eq!(frame.rest.len(), roundup(0));
-    assert_eq!(parse_sockaddr_ip(&frame).unwrap(), None);
+    assert_eq!(parse_sockaddr_ip(&frame), None);
   }
 
   #[test]
@@ -254,6 +286,6 @@ mod tests {
     assert_eq!(frame.bytes, &[1]);
     assert_eq!(frame.family, AF_UNSPEC);
     assert_eq!(frame.rest.len(), roundup(1));
-    assert_eq!(parse_sockaddr_ip(&frame).unwrap(), None);
+    assert_eq!(parse_sockaddr_ip(&frame), None);
   }
 }
