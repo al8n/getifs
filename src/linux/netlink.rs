@@ -194,7 +194,7 @@ struct Handle {
 }
 
 impl Handle {
-  unsafe fn new() -> io::Result<Self> {
+  fn new() -> io::Result<Self> {
     // Create the netlink socket. We deliberately do NOT bind() it.
     //
     // The kernel auto-binds a unique portid on the first sendto()
@@ -218,21 +218,21 @@ impl Handle {
     Ok(Self { fd: sock, sa })
   }
 
-  unsafe fn send(&self, req: &NetlinkRouteRequest) -> io::Result<usize> {
+  fn send(&self, req: &NetlinkRouteRequest) -> io::Result<usize> {
     self.send_bytes(req.as_bytes())
   }
 
-  unsafe fn send_bytes(&self, bytes: &[u8]) -> io::Result<usize> {
+  fn send_bytes(&self, bytes: &[u8]) -> io::Result<usize> {
     sendto(&self.fd, bytes, SendFlags::empty(), &self.sa).map_err(Into::into)
   }
 
-  unsafe fn sock(&self) -> io::Result<SocketAddrNetlink> {
+  fn sock(&self) -> io::Result<SocketAddrNetlink> {
     getsockname(&self.fd)
       .and_then(|addr| addr.try_into())
       .map_err(Into::into)
   }
 
-  unsafe fn recv(&self, dst: &mut [u8]) -> io::Result<usize> {
+  fn recv(&self, dst: &mut [u8]) -> io::Result<usize> {
     // A signal interrupts the receive before it consumes any data, and the
     // dump's progress lives on the socket, so re-issuing only the receive is
     // correct and keeps a signal from costing a whole-dump attempt.
@@ -438,106 +438,104 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
 }
 
 fn netlink_interface_once(family: AddressFamily, ifi: u32) -> io::Result<TinyVec<Interface>> {
-  unsafe {
-    let handle = Handle::new()?;
+  let handle = Handle::new()?;
 
-    // Create and send netlink request
-    let req = NetlinkRouteRequest::new(RTM_GETLINK as u16, 1, family.as_raw() as u8, ifi);
-    handle.send(&req)?;
+  // Create and send netlink request
+  let req = NetlinkRouteRequest::new(RTM_GETLINK as u16, 1, family.as_raw() as u8, ifi);
+  handle.send(&req)?;
 
-    // Get socket name
-    let lsa = handle.sock()?;
+  // Get socket name
+  let lsa = handle.sock()?;
 
-    // Receive and process messages
-    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
+  // Receive and process messages
+  let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
 
-    let mut interfaces = TinyVec::new();
+  let mut interfaces = TinyVec::new();
 
-    loop {
-      let nr = handle.recv(&mut rb)?;
-      let mut terminal = false;
+  loop {
+    let nr = handle.recv(&mut rb)?;
+    let mut terminal = false;
 
-      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
-        let message = message?;
-        if terminal {
-          continue;
-        }
-        match message {
-          DumpMessage::Done => {
-            terminal = true;
-          }
-          DumpMessage::Error(NlmsgErrOutcome::Ack) => {}
-          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => terminal = true,
-          DumpMessage::Message(h, message) => match h.nlmsg_type as u32 {
-            val if val == RTM_NEWLINK => {
-              // Bound the per-message slice to the netlink message rather than
-              // the rest of the datagram. Netlink dumps routinely pack multiple
-              // messages into one receive.
-              let msg_buf = &message[NLMSG_HDRLEN..];
-              let info_hdr = IfInfoMessageHeader::parse(msg_buf)?;
-              let mut info_data = &msg_buf[IfInfoMessageHeader::SIZE..];
-              if ifi != 0 && ifi != info_hdr.index as u32 {
-                continue;
-              }
-
-              let mut interface = Interface::new(
-                info_hdr.index as u32,
-                Flags::from_bits_retain(info_hdr.flags),
-              );
-              let mut invalid_name = false;
-              while info_data.len() >= RtAttr::SIZE {
-                let attr = RtAttr {
-                  len: u16::from_ne_bytes(info_data[..2].try_into().unwrap()),
-                  ty: u16::from_ne_bytes(info_data[2..4].try_into().unwrap()),
-                };
-                let attrlen = attr.len as usize;
-                if attrlen < RtAttr::SIZE || attrlen > info_data.len() {
-                  return Err(rustix::io::Errno::INVAL.into());
-                }
-
-                // Payload excludes the header and excludes any trailing
-                // padding (the padding is counted by `alen` for iterator
-                // advance but is not part of the attribute value).
-                let data = &info_data[RtAttr::SIZE..attrlen];
-                // Aligned length is used to walk to the next attribute,
-                // but must not be allowed to exceed the buffer — a
-                // malformed last attribute could otherwise make the
-                // slice below panic.
-                let alen = rta_align_of(attrlen).min(info_data.len());
-
-                match attr.ty as u32 {
-                  IFLA_MTU if data.len() >= 4 => {
-                    interface.mtu = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                  }
-                  IFLA_IFNAME => {
-                    // Kernel-emitted IFLA_IFNAME is null-terminated, but bound
-                    // the read to this attribute in case of malformed input.
-                    match interface_name_from_attr(data) {
-                      Some(name) => interface.name = name.into(),
-                      None => invalid_name = true,
-                    }
-                  }
-                  IFLA_ADDRESS => interface.mac_addr = mac_addr_from_attr(data),
-                  _ => {}
-                }
-
-                info_data = &info_data[alen..];
-              }
-              if !invalid_name {
-                interfaces.push(interface);
-              }
-            }
-            _ => {}
-          },
-        }
-      }
+    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+      let message = message?;
       if terminal {
-        break;
+        continue;
+      }
+      match message {
+        DumpMessage::Done => {
+          terminal = true;
+        }
+        DumpMessage::Error(NlmsgErrOutcome::Ack) => {}
+        DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => terminal = true,
+        DumpMessage::Message(h, message) => match h.nlmsg_type as u32 {
+          val if val == RTM_NEWLINK => {
+            // Bound the per-message slice to the netlink message rather than
+            // the rest of the datagram. Netlink dumps routinely pack multiple
+            // messages into one receive.
+            let msg_buf = &message[NLMSG_HDRLEN..];
+            let info_hdr = IfInfoMessageHeader::parse(msg_buf)?;
+            let mut info_data = &msg_buf[IfInfoMessageHeader::SIZE..];
+            if ifi != 0 && ifi != info_hdr.index as u32 {
+              continue;
+            }
+
+            let mut interface = Interface::new(
+              info_hdr.index as u32,
+              Flags::from_bits_retain(info_hdr.flags),
+            );
+            let mut invalid_name = false;
+            while info_data.len() >= RtAttr::SIZE {
+              let attr = RtAttr {
+                len: u16::from_ne_bytes(info_data[..2].try_into().unwrap()),
+                ty: u16::from_ne_bytes(info_data[2..4].try_into().unwrap()),
+              };
+              let attrlen = attr.len as usize;
+              if attrlen < RtAttr::SIZE || attrlen > info_data.len() {
+                return Err(rustix::io::Errno::INVAL.into());
+              }
+
+              // Payload excludes the header and excludes any trailing
+              // padding (the padding is counted by `alen` for iterator
+              // advance but is not part of the attribute value).
+              let data = &info_data[RtAttr::SIZE..attrlen];
+              // Aligned length is used to walk to the next attribute,
+              // but must not be allowed to exceed the buffer — a
+              // malformed last attribute could otherwise make the
+              // slice below panic.
+              let alen = rta_align_of(attrlen).min(info_data.len());
+
+              match attr.ty as u32 {
+                IFLA_MTU if data.len() >= 4 => {
+                  interface.mtu = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                }
+                IFLA_IFNAME => {
+                  // Kernel-emitted IFLA_IFNAME is null-terminated, but bound
+                  // the read to this attribute in case of malformed input.
+                  match interface_name_from_attr(data) {
+                    Some(name) => interface.name = name.into(),
+                    None => invalid_name = true,
+                  }
+                }
+                IFLA_ADDRESS => interface.mac_addr = mac_addr_from_attr(data),
+                _ => {}
+              }
+
+              info_data = &info_data[alen..];
+            }
+            if !invalid_name {
+              interfaces.push(interface);
+            }
+          }
+          _ => {}
+        },
       }
     }
-
-    Ok(interfaces)
+    if terminal {
+      break;
+    }
   }
+
+  Ok(interfaces)
 }
 
 pub(super) fn netlink_addr<N, F>(family: AddressFamily, ifi: u32, f: F) -> io::Result<SmallVec<N>>
@@ -582,114 +580,112 @@ where
   N: Net,
   F: FnMut(&IpAddr) -> bool,
 {
-  unsafe {
-    let handle = Handle::new()?;
+  let handle = Handle::new()?;
 
-    // Create and send netlink request
-    let req = NetlinkRouteRequest::new(RTM_GETADDR as u16, 1, family.as_raw() as u8, ifi);
-    handle.send(&req)?;
+  // Create and send netlink request
+  let req = NetlinkRouteRequest::new(RTM_GETADDR as u16, 1, family.as_raw() as u8, ifi);
+  handle.send(&req)?;
 
-    // Get socket name
-    let lsa = handle.sock()?;
+  // Get socket name
+  let lsa = handle.sock()?;
 
-    // Receive and process messages
-    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
+  // Receive and process messages
+  let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
 
-    loop {
-      let nr = handle.recv(&mut rb)?;
-      let mut terminal = false;
+  loop {
+    let nr = handle.recv(&mut rb)?;
+    let mut terminal = false;
 
-      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
-        let message = message?;
-        if terminal {
-          continue;
-        }
-        match message {
-          DumpMessage::Done => terminal = true,
-          DumpMessage::Error(NlmsgErrOutcome::Ack) => {}
-          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => terminal = true,
-          DumpMessage::Message(h, message) => match h.nlmsg_type as u32 {
-            val if val == RTM_NEWADDR => {
-              // See `netlink_interface` for why this is bounded to the
-              // current message rather than the rest of the datagram.
-              let msg_buf = &message[NLMSG_HDRLEN..];
-              let ifam = IfNetMessageHeader::parse(msg_buf)?;
-              let mut ifa_msg_data = &msg_buf[IfNetMessageHeader::SIZE..];
-              let mut point_to_point = false;
-              let mut attrs = SmallVec::new();
-              while ifa_msg_data.len() >= RtAttr::SIZE {
-                let attr = RtAttr {
-                  len: u16::from_ne_bytes(ifa_msg_data[..2].try_into().unwrap()),
-                  ty: u16::from_ne_bytes(ifa_msg_data[2..4].try_into().unwrap()),
-                };
-                let attrlen = attr.len as usize;
-                if attrlen < RtAttr::SIZE || attrlen > ifa_msg_data.len() {
-                  return Err(rustix::io::Errno::INVAL.into());
-                }
-                // `data` excludes trailing padding; `alen` (aligned) is
-                // used only to advance to the next attribute, and is
-                // clamped so a malformed last attribute cannot panic.
-                let data = &ifa_msg_data[RtAttr::SIZE..attrlen];
-                let alen = rta_align_of(attrlen).min(ifa_msg_data.len());
-
-                if ifi == 0 || ifi == ifam.index {
-                  attrs.push((attr, data));
-                }
-                ifa_msg_data = &ifa_msg_data[alen..];
+    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+      let message = message?;
+      if terminal {
+        continue;
+      }
+      match message {
+        DumpMessage::Done => terminal = true,
+        DumpMessage::Error(NlmsgErrOutcome::Ack) => {}
+        DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => terminal = true,
+        DumpMessage::Message(h, message) => match h.nlmsg_type as u32 {
+          val if val == RTM_NEWADDR => {
+            // See `netlink_interface` for why this is bounded to the
+            // current message rather than the rest of the datagram.
+            let msg_buf = &message[NLMSG_HDRLEN..];
+            let ifam = IfNetMessageHeader::parse(msg_buf)?;
+            let mut ifa_msg_data = &msg_buf[IfNetMessageHeader::SIZE..];
+            let mut point_to_point = false;
+            let mut attrs = SmallVec::new();
+            while ifa_msg_data.len() >= RtAttr::SIZE {
+              let attr = RtAttr {
+                len: u16::from_ne_bytes(ifa_msg_data[..2].try_into().unwrap()),
+                ty: u16::from_ne_bytes(ifa_msg_data[2..4].try_into().unwrap()),
+              };
+              let attrlen = attr.len as usize;
+              if attrlen < RtAttr::SIZE || attrlen > ifa_msg_data.len() {
+                return Err(rustix::io::Errno::INVAL.into());
               }
+              // `data` excludes trailing padding; `alen` (aligned) is
+              // used only to advance to the next attribute, and is
+              // clamped so a malformed last attribute cannot panic.
+              let data = &ifa_msg_data[RtAttr::SIZE..attrlen];
+              let alen = rta_align_of(attrlen).min(ifa_msg_data.len());
 
-              for (attr, _) in attrs.iter() {
-                if attr.ty == IFA_LOCAL as u16 {
-                  point_to_point = true;
-                  break;
-                }
+              if ifi == 0 || ifi == ifam.index {
+                attrs.push((attr, data));
               }
+              ifa_msg_data = &ifa_msg_data[alen..];
+            }
 
-              for (attr, data) in attrs.iter() {
-                if point_to_point && attr.ty == IFA_ADDRESS as u16 {
-                  continue;
-                }
-
-                match AddressFamily::from_raw(ifam.family as u16) {
-                  AddressFamily::INET if data.len() >= 4 => {
-                    let ip: [u8; 4] = data[..4].try_into().unwrap();
-                    if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
-                      if let Some(addr) =
-                        N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
-                          f(addr)
-                        })
-                      {
-                        addrs.push(addr);
-                      }
-                    }
-                  }
-                  AddressFamily::INET6 if data.len() >= 16 => {
-                    let ip: [u8; 16] = data[..16].try_into().unwrap();
-                    if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
-                      if let Some(addr) =
-                        N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
-                          f(addr)
-                        })
-                      {
-                        addrs.push(addr);
-                      }
-                    }
-                  }
-                  _ => {}
-                }
+            for (attr, _) in attrs.iter() {
+              if attr.ty == IFA_LOCAL as u16 {
+                point_to_point = true;
+                break;
               }
             }
-            _ => {}
-          },
-        }
-      }
-      if terminal {
-        break;
+
+            for (attr, data) in attrs.iter() {
+              if point_to_point && attr.ty == IFA_ADDRESS as u16 {
+                continue;
+              }
+
+              match AddressFamily::from_raw(ifam.family as u16) {
+                AddressFamily::INET if data.len() >= 4 => {
+                  let ip: [u8; 4] = data[..4].try_into().unwrap();
+                  if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
+                    if let Some(addr) =
+                      N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
+                        f(addr)
+                      })
+                    {
+                      addrs.push(addr);
+                    }
+                  }
+                }
+                AddressFamily::INET6 if data.len() >= 16 => {
+                  let ip: [u8; 16] = data[..16].try_into().unwrap();
+                  if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
+                    if let Some(addr) =
+                      N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
+                        f(addr)
+                      })
+                    {
+                      addrs.push(addr);
+                    }
+                  }
+                }
+                _ => {}
+              }
+            }
+          }
+          _ => {}
+        },
       }
     }
-
-    Ok(())
+    if terminal {
+      break;
+    }
   }
+
+  Ok(())
 }
 
 pub fn netlink_best_local_addrs<N>(family: AddressFamily) -> io::Result<SmallVec<N>>
@@ -726,371 +722,320 @@ fn netlink_best_local_addrs_into_once<N>(
 where
   N: Net,
 {
-  unsafe {
-    // Lazy nexthop-dump: don't pay the `RTM_GETNEXTHOP` round-trip
-    // unless the route walk actually encounters an `RTA_NH_ID`
-    // attribute on a default route. Most Linux hosts have no `ip
-    // nexthop`-managed routes (Linux 5.3+ opt-in feature); on those
-    // hosts `best_local_*` no longer fails when an unrelated nexthop
-    // dump returns `EINTR` / `NLM_F_DUMP_INTR` from concurrent
-    // nexthop-subsystem churn. Same pattern `netlink_walk_routes`
-    // and `rt_generic_addrs` already use; keeping all three
-    // consistent.
-    //
-    // Selection key for deferred candidates:
-    // `(table_rank, metric, pref_rank, nh_id)`. `table_rank` carries
-    // Linux RPDB precedence (`local` < `main` < `default`); within
-    // the same table, lower metric wins; within the same metric,
-    // lower pref_rank wins (HIGH < MEDIUM < LOW per RFC 4191). See
-    // `table_rank_for` and `pref_rank_for` below.
-    let mut deferred_best: Vec<(u8, u32, u8, u32)> = Vec::new();
+  // Lazy nexthop-dump: don't pay the `RTM_GETNEXTHOP` round-trip
+  // unless the route walk actually encounters an `RTA_NH_ID`
+  // attribute on a default route. Most Linux hosts have no `ip
+  // nexthop`-managed routes (Linux 5.3+ opt-in feature); on those
+  // hosts `best_local_*` no longer fails when an unrelated nexthop
+  // dump returns `EINTR` / `NLM_F_DUMP_INTR` from concurrent
+  // nexthop-subsystem churn. Same pattern `netlink_walk_routes`
+  // and `rt_generic_addrs` already use; keeping all three
+  // consistent.
+  //
+  // Selection key for deferred candidates:
+  // `(table_rank, metric, pref_rank, nh_id)`. `table_rank` carries
+  // Linux RPDB precedence (`local` < `main` < `default`); within
+  // the same table, lower metric wins; within the same metric,
+  // lower pref_rank wins (HIGH < MEDIUM < LOW per RFC 4191). See
+  // `table_rank_for` and `pref_rank_for` below.
+  let mut deferred_best: Vec<(u8, u32, u8, u32)> = Vec::new();
 
-    let handle = Handle::new()?;
+  let handle = Handle::new()?;
 
-    let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
-    handle.send(&req)?;
+  let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
+  handle.send(&req)?;
 
-    // Snapshot the kernel-assigned address so we can reject any reply
-    // that doesn't belong to this socket — same defence the other
-    // netlink walkers use.
-    let lsa = handle.sock()?;
+  // Snapshot the kernel-assigned address so we can reject any reply
+  // that doesn't belong to this socket — same defence the other
+  // netlink walkers use.
+  let lsa = handle.sock()?;
 
-    // Route walks must accept any single message the kernel emits —
-    // see `DUMP_RECV_BUF_SIZE` for why a page is too small here.
-    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
-    // Set of interfaces tied at `best_metric`. ECMP / nexthop-object
-    // groups can list multiple usable nexthops behind a single route,
-    // and equal-metric default routes on different interfaces are
-    // also valid; both should contribute their addresses. The
-    // previous `Option<u32>` form silently dropped every nexthop
-    // past the first, returning an order-dependent partial address
-    // set on multi-WAN hosts.
-    let mut best_oifs: SmallVec<u32> = SmallVec::new();
-    // Lex key for "best default": `(table_rank, metric)`. The kernel
-    // walks the RPDB rule chain in order — `0: lookup local`,
-    // `32766: lookup main`, `32767: lookup default` — so a
-    // higher-ranked table is queried first and any route there will
-    // be picked before the kernel ever consults a lower-ranked
-    // table, *regardless of metric*. Comparing on metric alone made
-    // a low-metric `RT_TABLE_DEFAULT` fallback beat a higher-metric
-    // `RT_TABLE_MAIN` default — even though the kernel would never
-    // do that. The lex key matches kernel selection exactly.
-    let mut best_rank: u8 = u8::MAX;
-    let mut best_metric: u32 = u32::MAX;
-    // Lex tier: RFC 4191 router preference rank. See `pref_rank_for`.
-    // `u8::MAX` is the "no candidate yet" sentinel; any real route
-    // will produce a strictly smaller value.
-    let mut best_pref_rank: u8 = u8::MAX;
-    let mut family_unavailable = false;
+  // Route walks must accept any single message the kernel emits —
+  // see `DUMP_RECV_BUF_SIZE` for why a page is too small here.
+  let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
+  // Set of interfaces tied at `best_metric`. ECMP / nexthop-object
+  // groups can list multiple usable nexthops behind a single route,
+  // and equal-metric default routes on different interfaces are
+  // also valid; both should contribute their addresses. The
+  // previous `Option<u32>` form silently dropped every nexthop
+  // past the first, returning an order-dependent partial address
+  // set on multi-WAN hosts.
+  let mut best_oifs: SmallVec<u32> = SmallVec::new();
+  // Lex key for "best default": `(table_rank, metric)`. The kernel
+  // walks the RPDB rule chain in order — `0: lookup local`,
+  // `32766: lookup main`, `32767: lookup default` — so a
+  // higher-ranked table is queried first and any route there will
+  // be picked before the kernel ever consults a lower-ranked
+  // table, *regardless of metric*. Comparing on metric alone made
+  // a low-metric `RT_TABLE_DEFAULT` fallback beat a higher-metric
+  // `RT_TABLE_MAIN` default — even though the kernel would never
+  // do that. The lex key matches kernel selection exactly.
+  let mut best_rank: u8 = u8::MAX;
+  let mut best_metric: u32 = u32::MAX;
+  // Lex tier: RFC 4191 router preference rank. See `pref_rank_for`.
+  // `u8::MAX` is the "no candidate yet" sentinel; any real route
+  // will produce a strictly smaller value.
+  let mut best_pref_rank: u8 = u8::MAX;
+  let mut family_unavailable = false;
 
-    loop {
-      let nr = handle.recv(&mut rb)?;
+  loop {
+    let nr = handle.recv(&mut rb)?;
 
-      let mut terminal = false;
-      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
-        let message = message?;
-        if terminal {
+    let mut terminal = false;
+    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+      let message = message?;
+      if terminal {
+        continue;
+      }
+      let (h, received) = match message {
+        DumpMessage::Done => {
+          terminal = true;
           continue;
         }
-        let (h, received) = match message {
-          DumpMessage::Done => {
-            terminal = true;
+        DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
+        DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
+          family_unavailable = true;
+          terminal = true;
+          continue;
+        }
+        DumpMessage::Message(h, message) => (h, message),
+      };
+      let hlen = received.len();
+
+      match h.nlmsg_type as u32 {
+        val if val == RTM_NEWROUTE => {
+          // See `netlink_interface` for why this is bounded to `hlen`.
+          let rtm = &received[NLMSG_HDRLEN..hlen];
+          let rtm_header = RtmMessageHeader::parse(rtm)?;
+
+          // Same eligibility checks as `netlink_walk_routes`. Without
+          // these a low-metric `blackhole default`, an `unreachable
+          // default`, or a TOS / source-constrained default could win
+          // `best_ifindex` and steer `best_local_*` at an interface
+          // the kernel would never use for ordinary traffic.
+          //
+          //   - rtm_type ∈ {RTN_UNICAST, RTN_LOCAL}: filters
+          //     blackhole / unreachable / prohibit / multicast / nat /
+          //     broadcast types.
+          //   - rtm_tos == 0: skip TOS-conditional routes.
+          //   - rtm_src_len == 0: skip source-prefix-constrained
+          //     policy routes.
+          // RTA_TABLE override (for table id > 255) and RTA_SRC are
+          // applied after the attribute walk below.
+          if rtm_header.rtm_type != RTN_UNICAST && rtm_header.rtm_type != RTN_LOCAL {
             continue;
           }
-          DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
-          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
-            family_unavailable = true;
-            terminal = true;
+          if rtm_header.rtm_tos != 0 || rtm_header.rtm_src_len != 0 {
             continue;
           }
-          DumpMessage::Message(h, message) => (h, message),
-        };
-        let hlen = received.len();
 
-        match h.nlmsg_type as u32 {
-          val if val == RTM_NEWROUTE => {
-            // See `netlink_interface` for why this is bounded to `hlen`.
-            let rtm = &received[NLMSG_HDRLEN..hlen];
-            let rtm_header = RtmMessageHeader::parse(rtm)?;
+          // We're hunting for the *default route*, not any gateway-
+          // bearing entry. A specific route like
+          // `10.0.0.0/8 via 10.0.0.1 dev eth1` would otherwise be
+          // treated as eligible here — combined with the
+          // metric-zero fallback below it could beat the actual
+          // default route on a different interface, so
+          // `best_local_ipv4_addrs()` would hand back addresses
+          // for an interface the kernel doesn't use for ordinary
+          // outbound traffic.
+          //
+          // The default route's defining property in rtnetlink is
+          // `rtm_dst_len == 0`. We do NOT additionally check
+          // `rtm_flags & RTF_UP`: rtnetlink's `rtm_flags` is the
+          // RTM_F_* set (NOTIFY, CLONED, PREFIX, ...) — not the
+          // BSD/legacy SIOCADDRT `RTF_*` set, where `RTF_UP` lives.
+          // Ordinary installed Linux defaults have `rtm_flags == 0`
+          // and would be incorrectly skipped. Reachability filters
+          // (RTN_UNICAST/RTN_LOCAL above, table-id and source
+          // constraints below, multipath / nh_id usability flags
+          // around `RTNH_F_DEAD` etc.) cover the "is it deliverable"
+          // question without mis-applying a BSD flag bit.
+          if rtm_header.rtm_dst_len != 0 {
+            continue;
+          }
 
-            // Same eligibility checks as `netlink_walk_routes`. Without
-            // these a low-metric `blackhole default`, an `unreachable
-            // default`, or a TOS / source-constrained default could win
-            // `best_ifindex` and steer `best_local_*` at an interface
-            // the kernel would never use for ordinary traffic.
-            //
-            //   - rtm_type ∈ {RTN_UNICAST, RTN_LOCAL}: filters
-            //     blackhole / unreachable / prohibit / multicast / nat /
-            //     broadcast types.
-            //   - rtm_tos == 0: skip TOS-conditional routes.
-            //   - rtm_src_len == 0: skip source-prefix-constrained
-            //     policy routes.
-            // RTA_TABLE override (for table id > 255) and RTA_SRC are
-            // applied after the attribute walk below.
-            if rtm_header.rtm_type != RTN_UNICAST && rtm_header.rtm_type != RTN_LOCAL {
-              continue;
+          let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
+          let mut current_metric = None;
+          // Output interfaces this route targets — populated from
+          // `RTA_OIF` (one entry), or from the resolved nexthop set
+          // for `RTA_MULTIPATH` / `RTA_NH_ID` routes (multiple).
+          let mut current_oifs: SmallVec<u32> = SmallVec::new();
+          // Track whether we found a top-level `RTA_OIF` so the
+          // post-walk multipath / nh_id resolution doesn't override
+          // an explicit oif.
+          let mut have_top_oif = false;
+          // `RTA_MULTIPATH` (ECMP) and `RTA_NH_ID` (nexthop-object)
+          // routes don't carry a top-level `RTA_OIF`. We capture the
+          // payload / id here and resolve them after the attribute
+          // walk so the best-interface selection covers the same
+          // route encodings `netlink_walk_routes` does — otherwise
+          // `best_local_*` returns empty on hosts whose only default
+          // is ECMP or `ip nexthop`-based.
+          let mut multipath: Option<&[u8]> = None;
+          let mut nh_id: Option<u32> = None;
+          // Effective table id (RTA_TABLE override for > 255) and
+          // source-constraint detection — shared with
+          // `netlink_walk_routes`.
+          let mut table_id: u32 = rtm_header.rtm_table as u32;
+          let mut has_src_constraint = false;
+          // Track whether RTA_DST claimed a non-unspecified address.
+          // The outer guard already required `rtm_dst_len == 0`, so
+          // a sane default route either omits RTA_DST entirely or
+          // emits 0.0.0.0 / ::. A kernel-emitted route with
+          // `dst_len == 0` but `RTA_DST = 192.0.2.1` is malformed —
+          // skip it rather than steer best-local at the wrong oif.
+          let mut dst_specific = false;
+          // Separately track "RTA_DST present but failed to parse"
+          // (truncated payload, wrong-family). Without this, a
+          // malformed RTA_DST returned `None` from
+          // `parse_rta_ipaddr`, which left `dst_specific = false`
+          // and the row stayed eligible for best-local selection.
+          // The full route walker has the same `dst_malformed`
+          // guard — keep the two paths consistent so a malformed
+          // default route is suppressed from `best_local_*` for
+          // the same reason it's suppressed from `route_table*`.
+          let mut dst_malformed = false;
+          // RFC 4191 router preference for IPv6 RA-installed
+          // defaults. Kernel default (and the value applied to
+          // every IPv4 route, which never carries the attribute)
+          // is `MEDIUM = 0x0`. See `pref_rank_for`.
+          let mut current_pref: u8 = 0;
+
+          while rtattr_buf.len() >= RtAttr::SIZE {
+            let attr = RtAttr {
+              len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
+              ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
+            };
+
+            let attrlen = attr.len as usize;
+            if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
+              // A malformed attribute must not be silently used to
+              // select `best_ifindex`: if we `break`ed here and then
+              // applied partial `current_metric` / `current_oif`,
+              // corrupted kernel output could steer us to the wrong
+              // interface. Bail out in the same way the interface
+              // and address parsers above do.
+              return Err(rustix::io::Errno::INVAL.into());
             }
-            if rtm_header.rtm_tos != 0 || rtm_header.rtm_src_len != 0 {
-              continue;
-            }
+            let data = &rtattr_buf[RtAttr::SIZE..attrlen];
+            let alen = rta_align_of(attrlen).min(rtattr_buf.len());
 
-            // We're hunting for the *default route*, not any gateway-
-            // bearing entry. A specific route like
-            // `10.0.0.0/8 via 10.0.0.1 dev eth1` would otherwise be
-            // treated as eligible here — combined with the
-            // metric-zero fallback below it could beat the actual
-            // default route on a different interface, so
-            // `best_local_ipv4_addrs()` would hand back addresses
-            // for an interface the kernel doesn't use for ordinary
-            // outbound traffic.
-            //
-            // The default route's defining property in rtnetlink is
-            // `rtm_dst_len == 0`. We do NOT additionally check
-            // `rtm_flags & RTF_UP`: rtnetlink's `rtm_flags` is the
-            // RTM_F_* set (NOTIFY, CLONED, PREFIX, ...) — not the
-            // BSD/legacy SIOCADDRT `RTF_*` set, where `RTF_UP` lives.
-            // Ordinary installed Linux defaults have `rtm_flags == 0`
-            // and would be incorrectly skipped. Reachability filters
-            // (RTN_UNICAST/RTN_LOCAL above, table-id and source
-            // constraints below, multipath / nh_id usability flags
-            // around `RTNH_F_DEAD` etc.) cover the "is it deliverable"
-            // question without mis-applying a BSD flag bit.
-            if rtm_header.rtm_dst_len != 0 {
-              continue;
-            }
-
-            let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
-            let mut current_metric = None;
-            // Output interfaces this route targets — populated from
-            // `RTA_OIF` (one entry), or from the resolved nexthop set
-            // for `RTA_MULTIPATH` / `RTA_NH_ID` routes (multiple).
-            let mut current_oifs: SmallVec<u32> = SmallVec::new();
-            // Track whether we found a top-level `RTA_OIF` so the
-            // post-walk multipath / nh_id resolution doesn't override
-            // an explicit oif.
-            let mut have_top_oif = false;
-            // `RTA_MULTIPATH` (ECMP) and `RTA_NH_ID` (nexthop-object)
-            // routes don't carry a top-level `RTA_OIF`. We capture the
-            // payload / id here and resolve them after the attribute
-            // walk so the best-interface selection covers the same
-            // route encodings `netlink_walk_routes` does — otherwise
-            // `best_local_*` returns empty on hosts whose only default
-            // is ECMP or `ip nexthop`-based.
-            let mut multipath: Option<&[u8]> = None;
-            let mut nh_id: Option<u32> = None;
-            // Effective table id (RTA_TABLE override for > 255) and
-            // source-constraint detection — shared with
-            // `netlink_walk_routes`.
-            let mut table_id: u32 = rtm_header.rtm_table as u32;
-            let mut has_src_constraint = false;
-            // Track whether RTA_DST claimed a non-unspecified address.
-            // The outer guard already required `rtm_dst_len == 0`, so
-            // a sane default route either omits RTA_DST entirely or
-            // emits 0.0.0.0 / ::. A kernel-emitted route with
-            // `dst_len == 0` but `RTA_DST = 192.0.2.1` is malformed —
-            // skip it rather than steer best-local at the wrong oif.
-            let mut dst_specific = false;
-            // Separately track "RTA_DST present but failed to parse"
-            // (truncated payload, wrong-family). Without this, a
-            // malformed RTA_DST returned `None` from
-            // `parse_rta_ipaddr`, which left `dst_specific = false`
-            // and the row stayed eligible for best-local selection.
-            // The full route walker has the same `dst_malformed`
-            // guard — keep the two paths consistent so a malformed
-            // default route is suppressed from `best_local_*` for
-            // the same reason it's suppressed from `route_table*`.
-            let mut dst_malformed = false;
-            // RFC 4191 router preference for IPv6 RA-installed
-            // defaults. Kernel default (and the value applied to
-            // every IPv4 route, which never carries the attribute)
-            // is `MEDIUM = 0x0`. See `pref_rank_for`.
-            let mut current_pref: u8 = 0;
-
-            while rtattr_buf.len() >= RtAttr::SIZE {
-              let attr = RtAttr {
-                len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
-              };
-
-              let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-                // A malformed attribute must not be silently used to
-                // select `best_ifindex`: if we `break`ed here and then
-                // applied partial `current_metric` / `current_oif`,
-                // corrupted kernel output could steer us to the wrong
-                // interface. Bail out in the same way the interface
-                // and address parsers above do.
-                return Err(rustix::io::Errno::INVAL.into());
+            match attr.ty {
+              RTA_PRIORITY if data.len() >= 4 => {
+                current_metric = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
               }
-              let data = &rtattr_buf[RtAttr::SIZE..attrlen];
-              let alen = rta_align_of(attrlen).min(rtattr_buf.len());
-
-              match attr.ty {
-                RTA_PRIORITY if data.len() >= 4 => {
-                  current_metric = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+              RTA_OIF if data.len() >= 4 => {
+                let idx = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                if idx != 0 {
+                  current_oifs.push(idx);
                 }
-                RTA_OIF if data.len() >= 4 => {
-                  let idx = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                  if idx != 0 {
-                    current_oifs.push(idx);
-                  }
-                  have_top_oif = true;
-                }
-                RTA_DST => match parse_rta_ipaddr(rtm_header.rtm_family, data) {
-                  Some(addr) if !addr.is_unspecified() => {
-                    dst_specific = true;
-                  }
-                  Some(_) => {}
-                  None => {
-                    dst_malformed = true;
-                  }
-                },
-                RTA_MULTIPATH => {
-                  multipath = Some(data);
-                }
-                RTA_NH_ID if data.len() >= 4 => {
-                  nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
-                }
-                RTA_TABLE if data.len() >= 4 => {
-                  table_id = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                }
-                RTA_SRC => {
-                  // Source constraint via attribute (rtm_src_len was
-                  // zero but kernel still emitted RTA_SRC) — defence
-                  // in depth.
-                  has_src_constraint = true;
-                }
-                RTA_PREF if !data.is_empty() => {
-                  current_pref = data[0];
-                }
-                _ => {}
+                have_top_oif = true;
               }
-
-              rtattr_buf = &rtattr_buf[alen..];
-            }
-
-            // Drop routes from custom policy tables and any
-            // post-walk-discovered source constraints, plus any
-            // dst_len=0 row that smuggled in a specific destination
-            // or carried a malformed RTA_DST (which the route walker
-            // also drops).
-            if has_src_constraint
-              || dst_specific
-              || dst_malformed
-              || (table_id != RT_TABLE_MAIN as u32
-                && table_id != RT_TABLE_LOCAL
-                && table_id != RT_TABLE_DEFAULT)
-            {
-              continue;
-            }
-
-            // Resolve oifs from RTA_MULTIPATH or RTA_NH_ID when
-            // top-level RTA_OIF is absent. Both encodings can list
-            // multiple usable nexthops on different interfaces — for
-            // a multi-WAN ECMP default we want addresses from *all*
-            // of them, not just the first. The previous "first only"
-            // form silently dropped the rest.
-            //
-            // For RTA_NH_ID:
-            //   - `Some(non-empty)`: collect every resolved oif.
-            //   - `Some(empty)`: id known but kernel-marked unusable
-            //     (blackhole / linkdown / ...) — skip silently, no
-            //     retry.
-            //   - `None`: id absent from snapshot. Defer to a
-            //     post-walk retry pass so a nexthop installed between
-            //     our two dumps doesn't silently misroute.
-            if !have_top_oif {
-              if let Some(mp) = multipath {
-                multipath_oifs_into(mp, &mut current_oifs);
-              } else if let Some(id) = nh_id {
-                // Lazy resolution: defer every `RTA_NH_ID` default
-                // candidate to the post-walk pass. The pass dumps
-                // nexthops once and resolves the entire batch — same
-                // correctness as the previous "try inline, defer to
-                // retry" two-dump pattern, but we skip the dump
-                // entirely when no default route uses nexthop
-                // objects.
-                let metric = current_metric.unwrap_or(0);
-                let rank = table_rank_for(table_id);
-                let pref_rank = pref_rank_for(current_pref);
-                deferred_best.push((rank, metric, pref_rank, id));
-                continue;
+              RTA_DST => match parse_rta_ipaddr(rtm_header.rtm_family, data) {
+                Some(addr) if !addr.is_unspecified() => {
+                  dst_specific = true;
+                }
+                Some(_) => {}
+                None => {
+                  dst_malformed = true;
+                }
+              },
+              RTA_MULTIPATH => {
+                multipath = Some(data);
               }
+              RTA_NH_ID if data.len() >= 4 => {
+                nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+              }
+              RTA_TABLE if data.len() >= 4 => {
+                table_id = u32::from_ne_bytes(data[..4].try_into().unwrap());
+              }
+              RTA_SRC => {
+                // Source constraint via attribute (rtm_src_len was
+                // zero but kernel still emitted RTA_SRC) — defence
+                // in depth.
+                has_src_constraint = true;
+              }
+              RTA_PREF if !data.is_empty() => {
+                current_pref = data[0];
+              }
+              _ => {}
             }
 
-            // Update the candidate set on `(table_rank, metric)` lex
-            // order. A strictly better key resets the set (the new
-            // route supersedes everything collected so far); an
-            // equal key extends it (equal-cost ECMP across separate
-            // route entries, including the same destination listed
-            // in two route messages).
-            //
-            // Comparing on metric alone made a low-metric
-            // `RT_TABLE_DEFAULT` fallback beat a higher-metric
-            // `RT_TABLE_MAIN` default — kernel-incorrect. Lex
-            // comparison matches the kernel's rule-chain semantics:
-            // `local < main < default`, with metric only as a
-            // tie-breaker within the same table.
-            //
-            // A missing `RTA_PRIORITY` is the kernel's convention
-            // for "metric 0"; collapse missing/explicit into one
-            // comparison so a metric-less default can correctly
-            // beat an earlier explicit-metric default in the same
-            // table regardless of dump order.
-            if !current_oifs.is_empty() {
+            rtattr_buf = &rtattr_buf[alen..];
+          }
+
+          // Drop routes from custom policy tables and any
+          // post-walk-discovered source constraints, plus any
+          // dst_len=0 row that smuggled in a specific destination
+          // or carried a malformed RTA_DST (which the route walker
+          // also drops).
+          if has_src_constraint
+            || dst_specific
+            || dst_malformed
+            || (table_id != RT_TABLE_MAIN as u32
+              && table_id != RT_TABLE_LOCAL
+              && table_id != RT_TABLE_DEFAULT)
+          {
+            continue;
+          }
+
+          // Resolve oifs from RTA_MULTIPATH or RTA_NH_ID when
+          // top-level RTA_OIF is absent. Both encodings can list
+          // multiple usable nexthops on different interfaces — for
+          // a multi-WAN ECMP default we want addresses from *all*
+          // of them, not just the first. The previous "first only"
+          // form silently dropped the rest.
+          //
+          // For RTA_NH_ID:
+          //   - `Some(non-empty)`: collect every resolved oif.
+          //   - `Some(empty)`: id known but kernel-marked unusable
+          //     (blackhole / linkdown / ...) — skip silently, no
+          //     retry.
+          //   - `None`: id absent from snapshot. Defer to a
+          //     post-walk retry pass so a nexthop installed between
+          //     our two dumps doesn't silently misroute.
+          if !have_top_oif {
+            if let Some(mp) = multipath {
+              multipath_oifs_into(mp, &mut current_oifs);
+            } else if let Some(id) = nh_id {
+              // Lazy resolution: defer every `RTA_NH_ID` default
+              // candidate to the post-walk pass. The pass dumps
+              // nexthops once and resolves the entire batch — same
+              // correctness as the previous "try inline, defer to
+              // retry" two-dump pattern, but we skip the dump
+              // entirely when no default route uses nexthop
+              // objects.
               let metric = current_metric.unwrap_or(0);
               let rank = table_rank_for(table_id);
               let pref_rank = pref_rank_for(current_pref);
-              let cur_key = (rank, metric, pref_rank);
-              let best_key = (best_rank, best_metric, best_pref_rank);
-              if cur_key < best_key {
-                best_rank = rank;
-                best_metric = metric;
-                best_pref_rank = pref_rank;
-                best_oifs.clear();
-                best_oifs.extend(current_oifs.iter().copied());
-              } else if cur_key == best_key {
-                best_oifs.extend(current_oifs.iter().copied());
-              }
-            }
-          }
-          _ => {}
-        }
-      }
-      if terminal {
-        break;
-      }
-    }
-
-    if family_unavailable {
-      return Ok(());
-    }
-
-    // Resolve any deferred `RTA_NH_ID` default-route references in a
-    // single batch. Skipping this block when nothing was deferred is
-    // the whole point of the lazy-dump optimization — most Linux
-    // hosts have no `ip nexthop`-managed default routes and never
-    // pay the `RTM_GETNEXTHOP` round-trip. `None` from
-    // `resolve_nh_id` means the id wasn't in the dump (kernel state
-    // changed during enumeration); surface as `EINTR` so the caller
-    // can retry rather than silently lose the route. `Some(empty)`
-    // means the nexthop is present but unusable (blackhole / down)
-    // — skip silently. `Some(non-empty)` contributes oifs to the
-    // selection key; same `<` / `==` lex semantics as the first
-    // pass.
-    if !deferred_best.is_empty() {
-      let nh_map = dump_nexthops()?;
-      for (rank, metric, pref_rank, id) in deferred_best {
-        match resolve_nh_id(&nh_map, id) {
-          None => return Err(rustix::io::Errno::INTR.into()),
-          Some(resolved) => {
-            let oifs: SmallVec<u32> = resolved
-              .iter()
-              .filter_map(|(oif, _)| if *oif != 0 { Some(*oif) } else { None })
-              .collect();
-            if oifs.is_empty() {
+              deferred_best.push((rank, metric, pref_rank, id));
               continue;
             }
+          }
+
+          // Update the candidate set on `(table_rank, metric)` lex
+          // order. A strictly better key resets the set (the new
+          // route supersedes everything collected so far); an
+          // equal key extends it (equal-cost ECMP across separate
+          // route entries, including the same destination listed
+          // in two route messages).
+          //
+          // Comparing on metric alone made a low-metric
+          // `RT_TABLE_DEFAULT` fallback beat a higher-metric
+          // `RT_TABLE_MAIN` default — kernel-incorrect. Lex
+          // comparison matches the kernel's rule-chain semantics:
+          // `local < main < default`, with metric only as a
+          // tie-breaker within the same table.
+          //
+          // A missing `RTA_PRIORITY` is the kernel's convention
+          // for "metric 0"; collapse missing/explicit into one
+          // comparison so a metric-less default can correctly
+          // beat an earlier explicit-metric default in the same
+          // table regardless of dump order.
+          if !current_oifs.is_empty() {
+            let metric = current_metric.unwrap_or(0);
+            let rank = table_rank_for(table_id);
+            let pref_rank = pref_rank_for(current_pref);
             let cur_key = (rank, metric, pref_rank);
             let best_key = (best_rank, best_metric, best_pref_rank);
             if cur_key < best_key {
@@ -1098,31 +1043,80 @@ where
               best_metric = metric;
               best_pref_rank = pref_rank;
               best_oifs.clear();
-              best_oifs.extend(oifs);
+              best_oifs.extend(current_oifs.iter().copied());
             } else if cur_key == best_key {
-              best_oifs.extend(oifs);
+              best_oifs.extend(current_oifs.iter().copied());
             }
+          }
+        }
+        _ => {}
+      }
+    }
+    if terminal {
+      break;
+    }
+  }
+
+  if family_unavailable {
+    return Ok(());
+  }
+
+  // Resolve any deferred `RTA_NH_ID` default-route references in a
+  // single batch. Skipping this block when nothing was deferred is
+  // the whole point of the lazy-dump optimization — most Linux
+  // hosts have no `ip nexthop`-managed default routes and never
+  // pay the `RTM_GETNEXTHOP` round-trip. `None` from
+  // `resolve_nh_id` means the id wasn't in the dump (kernel state
+  // changed during enumeration); surface as `EINTR` so the caller
+  // can retry rather than silently lose the route. `Some(empty)`
+  // means the nexthop is present but unusable (blackhole / down)
+  // — skip silently. `Some(non-empty)` contributes oifs to the
+  // selection key; same `<` / `==` lex semantics as the first
+  // pass.
+  if !deferred_best.is_empty() {
+    let nh_map = dump_nexthops()?;
+    for (rank, metric, pref_rank, id) in deferred_best {
+      match resolve_nh_id(&nh_map, id) {
+        None => return Err(rustix::io::Errno::INTR.into()),
+        Some(resolved) => {
+          let oifs: SmallVec<u32> = resolved
+            .iter()
+            .filter_map(|(oif, _)| if *oif != 0 { Some(*oif) } else { None })
+            .collect();
+          if oifs.is_empty() {
+            continue;
+          }
+          let cur_key = (rank, metric, pref_rank);
+          let best_key = (best_rank, best_metric, best_pref_rank);
+          if cur_key < best_key {
+            best_rank = rank;
+            best_metric = metric;
+            best_pref_rank = pref_rank;
+            best_oifs.clear();
+            best_oifs.extend(oifs);
+          } else if cur_key == best_key {
+            best_oifs.extend(oifs);
           }
         }
       }
     }
-
-    // Sort + dedup so a multipath route that lists the same
-    // interface twice (or two separate routes that share an
-    // interface) doesn't make us walk the address dump twice for
-    // the same ifindex.
-    best_oifs.sort_unstable();
-    best_oifs.dedup();
-
-    // Fetch addresses for every selected interface, appending into
-    // the caller-provided buffer. Returns immediately on the first
-    // syscall failure; partial results stay in `out` (consistent with
-    // every other walker that pushes into a sink).
-    for idx in best_oifs {
-      netlink_addr_into(family, idx, local_ip_filter, out)?;
-    }
-    Ok(())
   }
+
+  // Sort + dedup so a multipath route that lists the same
+  // interface twice (or two separate routes that share an
+  // interface) doesn't make us walk the address dump twice for
+  // the same ifindex.
+  best_oifs.sort_unstable();
+  best_oifs.dedup();
+
+  // Fetch addresses for every selected interface, appending into
+  // the caller-provided buffer. Returns immediately on the first
+  // syscall failure; partial results stay in `out` (consistent with
+  // every other walker that pushes into a sink).
+  for idx in best_oifs {
+    netlink_addr_into(family, idx, local_ip_filter, out)?;
+  }
+  Ok(())
 }
 
 /// One nexthop-object entry from a `RTM_GETNEXTHOP` dump. Either a
@@ -1178,172 +1172,170 @@ fn build_nh_dump_request(seq: u32) -> [u8; 24] {
 /// `RTA_NH_ID` reference rather than an inline `RTA_OIF` / `RTA_GATEWAY`.
 fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
   use std::collections::HashMap;
-  unsafe {
-    let handle = Handle::new()?;
+  let handle = Handle::new()?;
 
-    let req = build_nh_dump_request(1);
-    handle.send_bytes(&req)?;
+  let req = build_nh_dump_request(1);
+  handle.send_bytes(&req)?;
 
-    let lsa = handle.sock()?;
-    // Nexthop dumps can carry deep `NHA_GROUP` payloads (8 bytes per
-    // member); see `DUMP_RECV_BUF_SIZE`.
-    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
+  let lsa = handle.sock()?;
+  // Nexthop dumps can carry deep `NHA_GROUP` payloads (8 bytes per
+  // member); see `DUMP_RECV_BUF_SIZE`.
+  let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
 
-    let mut map: HashMap<u32, NexthopInfo> = HashMap::new();
+  let mut map: HashMap<u32, NexthopInfo> = HashMap::new();
 
-    loop {
-      let nr = handle.recv(&mut rb)?;
-      let mut terminal = false;
+  loop {
+    let nr = handle.recv(&mut rb)?;
+    let mut terminal = false;
 
-      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
-        let message = message?;
-        if terminal {
+    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+      let message = message?;
+      if terminal {
+        continue;
+      }
+      let (h, received) = match message {
+        DumpMessage::Done => {
+          terminal = true;
           continue;
         }
-        let (h, received) = match message {
-          DumpMessage::Done => {
-            terminal = true;
-            continue;
-          }
-          DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
-          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
-            terminal = true;
-            continue;
-          }
-          DumpMessage::Message(h, message) => (h, message),
-        };
-        let hlen = received.len();
-
-        match h.nlmsg_type as u32 {
-          val if val == RTM_NEWNEXTHOP => {
-            // nhmsg occupies the first 8 bytes after the netlink
-            // header: family (u8), scope (u8), protocol (u8), resvd
-            // (u8), flags (u32). The flags field uses the same
-            // RTNH_F_* bits as `struct rtnexthop` — we use it to skip
-            // dead / linkdown / unresolved nexthops, matching the
-            // multipath walker's behaviour. Without this filter, a
-            // route pointing at a downed nexthop would be reported as
-            // live by `route_table()`.
-            if hlen < NLMSG_HDRLEN + 8 {
-              continue;
-            }
-            let nh_family = received[NLMSG_HDRLEN];
-            let nh_flags = u32::from_ne_bytes(
-              received[NLMSG_HDRLEN + 4..NLMSG_HDRLEN + 8]
-                .try_into()
-                .unwrap(),
-            );
-            let unusable = (RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_UNRESOLVED) as u32;
-            let nh_unusable = nh_flags & unusable != 0;
-            let mut attr_buf = &received[NLMSG_HDRLEN + 8..hlen];
-
-            let mut id: u32 = 0;
-            let mut oif: u32 = 0;
-            let mut gw: Option<IpAddr> = None;
-            // Track presence + parse outcome of `NHA_GATEWAY`. Without
-            // this, a malformed gateway (truncated payload, wrong
-            // family) leaves `gw = None`, and `resolve_nh_id` then
-            // hands `(oif, None)` to the caller, which builds a
-            // directly-connected on-link route — the very output mode
-            // we use for "no gateway, send straight to oif". Treating
-            // a corrupted nexthop as on-link can route via no gateway
-            // when the kernel actually meant a (broken) indirect
-            // hop. Mirror the route walker's `gw_malformed` guard:
-            // mark such nexthops `filtered` so `resolve_nh_id` skips
-            // them silently rather than emitting a synthetic on-link
-            // entry.
-            let mut gw_malformed = false;
-            let mut group: Option<SmallVec<u32>> = None;
-            let mut blackhole = false;
-            // A malformed attribute length means the rest of this
-            // nexthop's attribute stream is unrecoverable: we may
-            // have already parsed `NHA_ID` and `NHA_OIF`, while a
-            // truncated `NHA_GATEWAY` / `NHA_GROUP` we never got to
-            // would have changed the result. Don't trust the partial
-            // parse: mark the nexthop filtered so `resolve_nh_id`
-            // skips it instead of emitting a synthetic on-link
-            // entry. (We still record the id — the route walker's
-            // "id present but unusable" path is the safe place to
-            // land here, vs. "id absent → potential race → EINTR".)
-            let mut attr_malformed = false;
-
-            while attr_buf.len() >= RtAttr::SIZE {
-              let attr = RtAttr {
-                len: u16::from_ne_bytes(attr_buf[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(attr_buf[2..4].try_into().unwrap()),
-              };
-              let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > attr_buf.len() {
-                attr_malformed = true;
-                break;
-              }
-              let data = &attr_buf[RtAttr::SIZE..attrlen];
-              let alen = rta_align_of(attrlen).min(attr_buf.len());
-
-              match attr.ty {
-                NHA_ID if data.len() >= 4 => {
-                  id = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                }
-                NHA_OIF if data.len() >= 4 => {
-                  oif = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                }
-                NHA_GATEWAY => {
-                  gw = parse_rta_ipaddr(nh_family, data);
-                  if gw.is_none() {
-                    gw_malformed = true;
-                  }
-                }
-                NHA_GROUP => {
-                  // Payload is an array of `struct nexthop_grp`:
-                  // `{ u32 id; u8 weight; u8 weight_high/resvd1;
-                  //    u16 resvd2 }` = 8 bytes per member. We only
-                  // need the `id` field; weights and reserved bytes
-                  // are ignored.
-                  let mut members: SmallVec<u32> = SmallVec::new();
-                  let mut p = data;
-                  while p.len() >= 8 {
-                    members.push(u32::from_ne_bytes(p[..4].try_into().unwrap()));
-                    p = &p[8..];
-                  }
-                  group = Some(members);
-                }
-                NHA_BLACKHOLE => {
-                  blackhole = true;
-                }
-                _ => {}
-              }
-              attr_buf = &attr_buf[alen..];
-            }
-
-            // Always insert known ids — even unusable ones. The route
-            // walker needs to tell `id absent from map` (potential
-            // race, retry / EINTR) apart from `id present but
-            // unusable` (skip the route silently). The `filtered`
-            // flag captures the latter without losing the
-            // "kernel-knows-this-id" signal.
-            if id != 0 {
-              let filtered = blackhole || nh_unusable || gw_malformed || attr_malformed;
-              map.insert(
-                id,
-                NexthopInfo {
-                  oif,
-                  gw,
-                  group,
-                  filtered,
-                },
-              );
-            }
-          }
-          _ => {}
+        DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
+        DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
+          terminal = true;
+          continue;
         }
-      }
-      if terminal {
-        break;
+        DumpMessage::Message(h, message) => (h, message),
+      };
+      let hlen = received.len();
+
+      match h.nlmsg_type as u32 {
+        val if val == RTM_NEWNEXTHOP => {
+          // nhmsg occupies the first 8 bytes after the netlink
+          // header: family (u8), scope (u8), protocol (u8), resvd
+          // (u8), flags (u32). The flags field uses the same
+          // RTNH_F_* bits as `struct rtnexthop` — we use it to skip
+          // dead / linkdown / unresolved nexthops, matching the
+          // multipath walker's behaviour. Without this filter, a
+          // route pointing at a downed nexthop would be reported as
+          // live by `route_table()`.
+          if hlen < NLMSG_HDRLEN + 8 {
+            continue;
+          }
+          let nh_family = received[NLMSG_HDRLEN];
+          let nh_flags = u32::from_ne_bytes(
+            received[NLMSG_HDRLEN + 4..NLMSG_HDRLEN + 8]
+              .try_into()
+              .unwrap(),
+          );
+          let unusable = (RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_UNRESOLVED) as u32;
+          let nh_unusable = nh_flags & unusable != 0;
+          let mut attr_buf = &received[NLMSG_HDRLEN + 8..hlen];
+
+          let mut id: u32 = 0;
+          let mut oif: u32 = 0;
+          let mut gw: Option<IpAddr> = None;
+          // Track presence + parse outcome of `NHA_GATEWAY`. Without
+          // this, a malformed gateway (truncated payload, wrong
+          // family) leaves `gw = None`, and `resolve_nh_id` then
+          // hands `(oif, None)` to the caller, which builds a
+          // directly-connected on-link route — the very output mode
+          // we use for "no gateway, send straight to oif". Treating
+          // a corrupted nexthop as on-link can route via no gateway
+          // when the kernel actually meant a (broken) indirect
+          // hop. Mirror the route walker's `gw_malformed` guard:
+          // mark such nexthops `filtered` so `resolve_nh_id` skips
+          // them silently rather than emitting a synthetic on-link
+          // entry.
+          let mut gw_malformed = false;
+          let mut group: Option<SmallVec<u32>> = None;
+          let mut blackhole = false;
+          // A malformed attribute length means the rest of this
+          // nexthop's attribute stream is unrecoverable: we may
+          // have already parsed `NHA_ID` and `NHA_OIF`, while a
+          // truncated `NHA_GATEWAY` / `NHA_GROUP` we never got to
+          // would have changed the result. Don't trust the partial
+          // parse: mark the nexthop filtered so `resolve_nh_id`
+          // skips it instead of emitting a synthetic on-link
+          // entry. (We still record the id — the route walker's
+          // "id present but unusable" path is the safe place to
+          // land here, vs. "id absent → potential race → EINTR".)
+          let mut attr_malformed = false;
+
+          while attr_buf.len() >= RtAttr::SIZE {
+            let attr = RtAttr {
+              len: u16::from_ne_bytes(attr_buf[..2].try_into().unwrap()),
+              ty: u16::from_ne_bytes(attr_buf[2..4].try_into().unwrap()),
+            };
+            let attrlen = attr.len as usize;
+            if attrlen < RtAttr::SIZE || attrlen > attr_buf.len() {
+              attr_malformed = true;
+              break;
+            }
+            let data = &attr_buf[RtAttr::SIZE..attrlen];
+            let alen = rta_align_of(attrlen).min(attr_buf.len());
+
+            match attr.ty {
+              NHA_ID if data.len() >= 4 => {
+                id = u32::from_ne_bytes(data[..4].try_into().unwrap());
+              }
+              NHA_OIF if data.len() >= 4 => {
+                oif = u32::from_ne_bytes(data[..4].try_into().unwrap());
+              }
+              NHA_GATEWAY => {
+                gw = parse_rta_ipaddr(nh_family, data);
+                if gw.is_none() {
+                  gw_malformed = true;
+                }
+              }
+              NHA_GROUP => {
+                // Payload is an array of `struct nexthop_grp`:
+                // `{ u32 id; u8 weight; u8 weight_high/resvd1;
+                //    u16 resvd2 }` = 8 bytes per member. We only
+                // need the `id` field; weights and reserved bytes
+                // are ignored.
+                let mut members: SmallVec<u32> = SmallVec::new();
+                let mut p = data;
+                while p.len() >= 8 {
+                  members.push(u32::from_ne_bytes(p[..4].try_into().unwrap()));
+                  p = &p[8..];
+                }
+                group = Some(members);
+              }
+              NHA_BLACKHOLE => {
+                blackhole = true;
+              }
+              _ => {}
+            }
+            attr_buf = &attr_buf[alen..];
+          }
+
+          // Always insert known ids — even unusable ones. The route
+          // walker needs to tell `id absent from map` (potential
+          // race, retry / EINTR) apart from `id present but
+          // unusable` (skip the route silently). The `filtered`
+          // flag captures the latter without losing the
+          // "kernel-knows-this-id" signal.
+          if id != 0 {
+            let filtered = blackhole || nh_unusable || gw_malformed || attr_malformed;
+            map.insert(
+              id,
+              NexthopInfo {
+                oif,
+                gw,
+                group,
+                filtered,
+              },
+            );
+          }
+        }
+        _ => {}
       }
     }
-
-    Ok(map)
+    if terminal {
+      break;
+    }
   }
+
+  Ok(map)
 }
 
 /// Resolve an `RTA_NH_ID` reference.
@@ -1438,341 +1430,339 @@ fn netlink_walk_routes_once<F>(family: AddressFamily, mut on_route: F) -> io::Re
 where
   F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
 {
-  unsafe {
-    // Lazy nexthop-dump: we collect every `RTA_NH_ID` route we see
-    // during the route walk and resolve them in a single post-walk
-    // dump. This avoids paying the `RTM_GETNEXTHOP` round-trip when
-    // no route uses nexthop objects (the typical Linux host today,
-    // since `ip nexthop`-managed routes are a 5.3+ opt-in feature).
-    // It also decouples ordinary route enumeration from nexthop-
-    // subsystem availability — a transient `NLM_F_DUMP_INTR` or
-    // unrelated nexthop churn during the upfront dump used to fail
-    // `route_table()` even on hosts whose route table contains no
-    // `RTA_NH_ID` references.
-    //
-    // Same pattern `rt_generic_addrs` (the gateway walker) already
-    // uses; matching it here keeps the two paths consistent.
-    let mut deferred_nh: Vec<(u8, u8, Option<IpAddr>, u32)> = Vec::new();
-    let mut family_unavailable = false;
+  // Lazy nexthop-dump: we collect every `RTA_NH_ID` route we see
+  // during the route walk and resolve them in a single post-walk
+  // dump. This avoids paying the `RTM_GETNEXTHOP` round-trip when
+  // no route uses nexthop objects (the typical Linux host today,
+  // since `ip nexthop`-managed routes are a 5.3+ opt-in feature).
+  // It also decouples ordinary route enumeration from nexthop-
+  // subsystem availability — a transient `NLM_F_DUMP_INTR` or
+  // unrelated nexthop churn during the upfront dump used to fail
+  // `route_table()` even on hosts whose route table contains no
+  // `RTA_NH_ID` references.
+  //
+  // Same pattern `rt_generic_addrs` (the gateway walker) already
+  // uses; matching it here keeps the two paths consistent.
+  let mut deferred_nh: Vec<(u8, u8, Option<IpAddr>, u32)> = Vec::new();
+  let mut family_unavailable = false;
 
-    let handle = Handle::new()?;
+  let handle = Handle::new()?;
 
-    let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
-    handle.send(&req)?;
+  let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
+  handle.send(&req)?;
 
-    let lsa = handle.sock()?;
-    // See `DUMP_RECV_BUF_SIZE`: a page is too small for routes that
-    // carry large `RTA_MULTIPATH` ECMP payloads.
-    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
+  let lsa = handle.sock()?;
+  // See `DUMP_RECV_BUF_SIZE`: a page is too small for routes that
+  // carry large `RTA_MULTIPATH` ECMP payloads.
+  let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
 
-    loop {
-      let nr = handle.recv(&mut rb)?;
-      let mut terminal = false;
+  loop {
+    let nr = handle.recv(&mut rb)?;
+    let mut terminal = false;
 
-      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
-        let message = message?;
-        if terminal {
+    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+      let message = message?;
+      if terminal {
+        continue;
+      }
+      let (h, received) = match message {
+        DumpMessage::Done => {
+          terminal = true;
           continue;
         }
-        let (h, received) = match message {
-          DumpMessage::Done => {
-            terminal = true;
+        DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
+        DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
+          family_unavailable = true;
+          terminal = true;
+          continue;
+        }
+        DumpMessage::Message(h, message) => (h, message),
+      };
+      let hlen = received.len();
+
+      match h.nlmsg_type as u32 {
+        val if val == RTM_NEWROUTE => {
+          // Bound the per-message slice to `hlen` rather than the
+          // rest of the recv buffer. Netlink dumps routinely pack
+          // multiple `RTM_NEWROUTE` messages into one recv(); an
+          // unbounded slice would let the attribute walker below
+          // run into the next message's header, mixing fields
+          // across routes (or returning EINVAL on healthy kernel
+          // output).
+          let rtm = &received[NLMSG_HDRLEN..hlen];
+          let rtm_header = RtmMessageHeader::parse(rtm)?;
+
+          // The `IpRoute` model (destination + single gateway + single
+          // output interface) only meaningfully represents
+          // RTN_UNICAST and RTN_LOCAL routes. Skip everything else
+          // — broadcast, multicast, blackhole, unreachable, prohibit,
+          // nat, etc. don't have a usable single (oif, gw) tuple,
+          // and emitting them as if they did would mislead callers.
+          if rtm_header.rtm_type != RTN_UNICAST && rtm_header.rtm_type != RTN_LOCAL {
             continue;
           }
-          DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
-          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
-            family_unavailable = true;
-            terminal = true;
+
+          // Source-constrained policy routes (`rtm_src_len != 0` or
+          // an `RTA_SRC` attribute present) only apply when the
+          // packet's source matches that prefix. The current
+          // `IpRoute` model has no field for the source constraint,
+          // so emitting these rows would make a constrained route
+          // look generally usable. Skip until the model carries
+          // source prefixes (the `RTA_SRC` check happens during the
+          // attribute walk below — flagged via `has_src_constraint`
+          // and applied before the final on_route call).
+          if rtm_header.rtm_src_len != 0 {
             continue;
           }
-          DumpMessage::Message(h, message) => (h, message),
-        };
-        let hlen = received.len();
 
-        match h.nlmsg_type as u32 {
-          val if val == RTM_NEWROUTE => {
-            // Bound the per-message slice to `hlen` rather than the
-            // rest of the recv buffer. Netlink dumps routinely pack
-            // multiple `RTM_NEWROUTE` messages into one recv(); an
-            // unbounded slice would let the attribute walker below
-            // run into the next message's header, mixing fields
-            // across routes (or returning EINVAL on healthy kernel
-            // output).
-            let rtm = &received[NLMSG_HDRLEN..hlen];
-            let rtm_header = RtmMessageHeader::parse(rtm)?;
-
-            // The `IpRoute` model (destination + single gateway + single
-            // output interface) only meaningfully represents
-            // RTN_UNICAST and RTN_LOCAL routes. Skip everything else
-            // — broadcast, multicast, blackhole, unreachable, prohibit,
-            // nat, etc. don't have a usable single (oif, gw) tuple,
-            // and emitting them as if they did would mislead callers.
-            if rtm_header.rtm_type != RTN_UNICAST && rtm_header.rtm_type != RTN_LOCAL {
-              continue;
-            }
-
-            // Source-constrained policy routes (`rtm_src_len != 0` or
-            // an `RTA_SRC` attribute present) only apply when the
-            // packet's source matches that prefix. The current
-            // `IpRoute` model has no field for the source constraint,
-            // so emitting these rows would make a constrained route
-            // look generally usable. Skip until the model carries
-            // source prefixes (the `RTA_SRC` check happens during the
-            // attribute walk below — flagged via `has_src_constraint`
-            // and applied before the final on_route call).
-            if rtm_header.rtm_src_len != 0 {
-              continue;
-            }
-
-            // TOS-specific routes only apply to packets whose IP ToS
-            // byte matches `rtm_tos`. Emitting them as ordinary routes
-            // would make a TOS-conditional route look usable for any
-            // traffic. `IpRoute` has no TOS field, so skip.
-            if rtm_header.rtm_tos != 0 {
-              continue;
-            }
-
-            let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
-            let mut oif: u32 = 0;
-            let mut dst: Option<IpAddr> = None;
-            let mut gw: Option<IpAddr> = None;
-            let mut has_src_constraint = false;
-            // Track present-but-malformed for RTA_DST / RTA_GATEWAY.
-            // `parse_rta_ipaddr` returns `None` for either "the
-            // attribute had a wrong-family / too-short payload" *or*
-            // "the attribute wasn't there." Keeping a separate
-            // present-flag lets us reject a malformed attribute
-            // outright without conflating it with the legitimate
-            // "default-route" / "on-link" encodings (`dst` absent
-            // with `rtm_dst_len == 0`, `gw` absent for direct
-            // routes). Without this, a kernel emitting a wrong-sized
-            // RTA_DST alongside `rtm_dst_len = 24` would surface as
-            // `0.0.0.0/24`.
-            let mut dst_present = false;
-            let mut dst_malformed = false;
-            let mut gw_malformed = false;
-            // Set true when the route carries a cross-family
-            // `RTA_VIA`. See the constant's doc comment for why we
-            // skip these — the route walker can't represent a
-            // mismatched-family gateway with `IpRoute`.
-            let mut has_via = false;
-            // Linux returns the full table id either inline in
-            // `rtm_table` (values 0..=255) or via an RTA_TABLE
-            // attribute when the id exceeds 255 — the kernel sets
-            // `rtm_table = RT_TABLE_UNSPEC (0)` in that case. Track
-            // the effective id so we can drop custom policy tables.
-            let mut table_id: u32 = rtm_header.rtm_table as u32;
-            // Routes installed via `ip nexthop` carry only an
-            // RTA_NH_ID and no top-level RTA_OIF / RTA_MULTIPATH. We
-            // capture the id and resolve it against the up-front
-            // RTM_GETNEXTHOP dump (`nh_map`) — this lets `route_table`
-            // surface default routes installed through nexthop objects
-            // (Linux 5.3+) that would otherwise be silently dropped by
-            // the `oif == 0` guard.
-            let mut nh_id: Option<u32> = None;
-            // ECMP routes carry their nexthops inside RTA_MULTIPATH
-            // (one or more `struct rtnexthop` each with sub-attrs).
-            // We accumulate them and emit them after walking the
-            // top-level attribute list, so we know `dst` / `dst_len`
-            // before fanning out per-nexthop.
-            let mut multipath: Option<&[u8]> = None;
-
-            while rtattr_buf.len() >= RtAttr::SIZE {
-              let attr = RtAttr {
-                len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
-              };
-              let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-                return Err(rustix::io::Errno::INVAL.into());
-              }
-              let data = &rtattr_buf[RtAttr::SIZE..attrlen];
-              let alen = rta_align_of(attrlen).min(rtattr_buf.len());
-
-              match attr.ty {
-                RTA_OIF if data.len() >= 4 => {
-                  oif = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                }
-                RTA_DST => {
-                  dst_present = true;
-                  dst = parse_rta_ipaddr(rtm_header.rtm_family, data);
-                  if dst.is_none() {
-                    dst_malformed = true;
-                  }
-                }
-                RTA_GATEWAY => {
-                  gw = parse_rta_ipaddr(rtm_header.rtm_family, data);
-                  if gw.is_none() {
-                    gw_malformed = true;
-                  }
-                }
-                RTA_VIA => {
-                  // Cross-family gateway. `IpRoute` can't represent
-                  // an IPv4 route with an IPv6 next-hop or vice
-                  // versa, and treating the route as on-link
-                  // (`gw = None`) would silently misroute. Mark and
-                  // skip after the walk.
-                  has_via = true;
-                }
-                RTA_MULTIPATH => {
-                  multipath = Some(data);
-                }
-                RTA_SRC => {
-                  // Source constraint present even though `rtm_src_len`
-                  // was zero — defence-in-depth flag.
-                  has_src_constraint = true;
-                }
-                RTA_TABLE if data.len() >= 4 => {
-                  table_id = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                }
-                RTA_NH_ID if data.len() >= 4 => {
-                  nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
-                }
-                _ => {}
-              }
-
-              rtattr_buf = &rtattr_buf[alen..];
-            }
-
-            // Reject malformed routes before any further processing:
-            //   - RTA_DST present but unparseable (wrong family / too
-            //     short).
-            //   - RTA_DST absent but `rtm_dst_len != 0`. The "default
-            //     route" encoding is `dst absent + dst_len == 0`;
-            //     anything else means the kernel claimed a non-zero
-            //     prefix length without supplying the address, which
-            //     would synthesize a fake `0.0.0.0/N` / `::/N`.
-            //   - RTA_GATEWAY present but unparseable. Treating a
-            //     malformed gateway as `None` would silently
-            //     downgrade the route to "on-link", which is a
-            //     different routing decision.
-            if dst_malformed
-              || gw_malformed
-              || has_via
-              || (dst.is_none() && rtm_header.rtm_dst_len != 0)
-            {
-              continue;
-            }
-            // Suppress the "unused" warning for the present flag —
-            // `dst_malformed` already encodes the real branch we care
-            // about.
-            let _ = dst_present;
-
-            // Skip if a source constraint snuck in via RTA_SRC.
-            if has_src_constraint {
-              continue;
-            }
-
-            // Drop routes from custom policy tables. The three
-            // standard RPDB tables consulted by the default rule
-            // chain are `local` (255), `main` (254), and `default`
-            // (253); together they describe what the kernel would
-            // actually do for any outbound packet on a host without
-            // custom `ip rule` policy. Anything outside that set is
-            // a custom policy table selected by `ip rule` with
-            // fwmark / iif / uid / etc., whose constraints aren't
-            // representable in `IpRoute`.
-            if table_id != RT_TABLE_MAIN as u32
-              && table_id != RT_TABLE_LOCAL
-              && table_id != RT_TABLE_DEFAULT
-            {
-              continue;
-            }
-
-            // Resolve nexthop-object references. The route had only an
-            // RTA_NH_ID — look up the nexthop in the dump map. Single
-            // leaves emit one route; groups fan out to one route per
-            // member (similar to RTA_MULTIPATH).
-            //
-            // Lazy resolution: defer every `RTA_NH_ID` route to the
-            // post-walk pass. The pass dumps `RTM_GETNEXTHOP` once
-            // and resolves the entire batch — same correctness as
-            // dump-up-front, lower cost when no route uses nexthop
-            // objects.
-            //
-            // `resolve_nh_id` outcomes (handled by the post-walk
-            // block):
-            //   - `None`: id absent from the dump. Surface as
-            //     `EINTR` so the caller can retry — kernel state
-            //     was changing during enumeration.
-            //   - `Some(empty)`: id present but unusable
-            //     (blackhole / dead / linkdown / unresolved, or a
-            //     group whose members are all filtered). Skip the
-            //     route silently.
-            //   - `Some(non-empty)`: emit one route per resolved
-            //     `(oif, gw)`.
-            if let Some(id) = nh_id {
-              deferred_nh.push((rtm_header.rtm_family, rtm_header.rtm_dst_len, dst, id));
-              continue;
-            }
-
-            // For ECMP routes, decode `RTA_MULTIPATH` and emit one
-            // route per nexthop. The wire format of each nexthop is
-            // `struct rtnexthop { u16 rtnh_len; u8 rtnh_flags; u8
-            // rtnh_hops; s32 rtnh_ifindex; }` followed by RTA-encoded
-            // sub-attributes (typically RTA_GATEWAY). On a multi-WAN
-            // host where the kernel installs only `default nexthop
-            // via A dev e0 nexthop via B dev e1`, the previous "skip
-            // ECMP" behaviour caused `route_table_by_filter(|r|
-            // r.is_default())` to return *no* default route.
-            if let Some(mp) = multipath {
-              walk_multipath(
-                rtm_header.rtm_family,
-                rtm_header.rtm_dst_len,
-                dst,
-                mp,
-                &mut on_route,
-              );
-              continue;
-            }
-
-            // Skip routes that arrived without RTA_OIF and weren't
-            // ECMP — emitting `oif=0` would mislead callers into
-            // thinking the route was usable on interface 0.
-            if oif == 0 {
-              continue;
-            }
-
-            on_route(rtm_header.rtm_family, oif, rtm_header.rtm_dst_len, dst, gw);
+          // TOS-specific routes only apply to packets whose IP ToS
+          // byte matches `rtm_tos`. Emitting them as ordinary routes
+          // would make a TOS-conditional route look usable for any
+          // traffic. `IpRoute` has no TOS field, so skip.
+          if rtm_header.rtm_tos != 0 {
+            continue;
           }
-          _ => {}
-        }
-      }
-      if terminal {
-        break;
-      }
-    }
 
-    if family_unavailable {
-      return Ok(());
-    }
+          let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
+          let mut oif: u32 = 0;
+          let mut dst: Option<IpAddr> = None;
+          let mut gw: Option<IpAddr> = None;
+          let mut has_src_constraint = false;
+          // Track present-but-malformed for RTA_DST / RTA_GATEWAY.
+          // `parse_rta_ipaddr` returns `None` for either "the
+          // attribute had a wrong-family / too-short payload" *or*
+          // "the attribute wasn't there." Keeping a separate
+          // present-flag lets us reject a malformed attribute
+          // outright without conflating it with the legitimate
+          // "default-route" / "on-link" encodings (`dst` absent
+          // with `rtm_dst_len == 0`, `gw` absent for direct
+          // routes). Without this, a kernel emitting a wrong-sized
+          // RTA_DST alongside `rtm_dst_len = 24` would surface as
+          // `0.0.0.0/24`.
+          let mut dst_present = false;
+          let mut dst_malformed = false;
+          let mut gw_malformed = false;
+          // Set true when the route carries a cross-family
+          // `RTA_VIA`. See the constant's doc comment for why we
+          // skip these — the route walker can't represent a
+          // mismatched-family gateway with `IpRoute`.
+          let mut has_via = false;
+          // Linux returns the full table id either inline in
+          // `rtm_table` (values 0..=255) or via an RTA_TABLE
+          // attribute when the id exceeds 255 — the kernel sets
+          // `rtm_table = RT_TABLE_UNSPEC (0)` in that case. Track
+          // the effective id so we can drop custom policy tables.
+          let mut table_id: u32 = rtm_header.rtm_table as u32;
+          // Routes installed via `ip nexthop` carry only an
+          // RTA_NH_ID and no top-level RTA_OIF / RTA_MULTIPATH. We
+          // capture the id and resolve it against the up-front
+          // RTM_GETNEXTHOP dump (`nh_map`) — this lets `route_table`
+          // surface default routes installed through nexthop objects
+          // (Linux 5.3+) that would otherwise be silently dropped by
+          // the `oif == 0` guard.
+          let mut nh_id: Option<u32> = None;
+          // ECMP routes carry their nexthops inside RTA_MULTIPATH
+          // (one or more `struct rtnexthop` each with sub-attrs).
+          // We accumulate them and emit them after walking the
+          // top-level attribute list, so we know `dst` / `dst_len`
+          // before fanning out per-nexthop.
+          let mut multipath: Option<&[u8]> = None;
 
-    // Resolve any deferred `RTA_NH_ID` references in a single batch.
-    // Skipping this block when nothing was deferred is the whole
-    // point of the lazy-dump optimization — a host with no
-    // nexthop-object routes never pays the `RTM_GETNEXTHOP`
-    // round-trip. `None` from `resolve_nh_id` means the id wasn't
-    // in the dump (kernel state changed during enumeration); we
-    // surface that as `EINTR` so the caller can retry rather than
-    // silently lose the route. `Some(empty)` means the nexthop is
-    // present but unusable (blackhole / down) — skip silently.
-    // `Some(non-empty)` emits one route per resolved leaf.
-    if !deferred_nh.is_empty() {
-      let nh_map = dump_nexthops()?;
-      for (rfamily, dst_len, dst, id) in deferred_nh {
-        match resolve_nh_id(&nh_map, id) {
-          None => return Err(rustix::io::Errno::INTR.into()),
-          Some(resolved) => {
-            for (nh_oif, nh_gw) in resolved {
-              on_route(rfamily, nh_oif, dst_len, dst, nh_gw);
+          while rtattr_buf.len() >= RtAttr::SIZE {
+            let attr = RtAttr {
+              len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
+              ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
+            };
+            let attrlen = attr.len as usize;
+            if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
+              return Err(rustix::io::Errno::INVAL.into());
             }
+            let data = &rtattr_buf[RtAttr::SIZE..attrlen];
+            let alen = rta_align_of(attrlen).min(rtattr_buf.len());
+
+            match attr.ty {
+              RTA_OIF if data.len() >= 4 => {
+                oif = u32::from_ne_bytes(data[..4].try_into().unwrap());
+              }
+              RTA_DST => {
+                dst_present = true;
+                dst = parse_rta_ipaddr(rtm_header.rtm_family, data);
+                if dst.is_none() {
+                  dst_malformed = true;
+                }
+              }
+              RTA_GATEWAY => {
+                gw = parse_rta_ipaddr(rtm_header.rtm_family, data);
+                if gw.is_none() {
+                  gw_malformed = true;
+                }
+              }
+              RTA_VIA => {
+                // Cross-family gateway. `IpRoute` can't represent
+                // an IPv4 route with an IPv6 next-hop or vice
+                // versa, and treating the route as on-link
+                // (`gw = None`) would silently misroute. Mark and
+                // skip after the walk.
+                has_via = true;
+              }
+              RTA_MULTIPATH => {
+                multipath = Some(data);
+              }
+              RTA_SRC => {
+                // Source constraint present even though `rtm_src_len`
+                // was zero — defence-in-depth flag.
+                has_src_constraint = true;
+              }
+              RTA_TABLE if data.len() >= 4 => {
+                table_id = u32::from_ne_bytes(data[..4].try_into().unwrap());
+              }
+              RTA_NH_ID if data.len() >= 4 => {
+                nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+              }
+              _ => {}
+            }
+
+            rtattr_buf = &rtattr_buf[alen..];
           }
+
+          // Reject malformed routes before any further processing:
+          //   - RTA_DST present but unparseable (wrong family / too
+          //     short).
+          //   - RTA_DST absent but `rtm_dst_len != 0`. The "default
+          //     route" encoding is `dst absent + dst_len == 0`;
+          //     anything else means the kernel claimed a non-zero
+          //     prefix length without supplying the address, which
+          //     would synthesize a fake `0.0.0.0/N` / `::/N`.
+          //   - RTA_GATEWAY present but unparseable. Treating a
+          //     malformed gateway as `None` would silently
+          //     downgrade the route to "on-link", which is a
+          //     different routing decision.
+          if dst_malformed
+            || gw_malformed
+            || has_via
+            || (dst.is_none() && rtm_header.rtm_dst_len != 0)
+          {
+            continue;
+          }
+          // Suppress the "unused" warning for the present flag —
+          // `dst_malformed` already encodes the real branch we care
+          // about.
+          let _ = dst_present;
+
+          // Skip if a source constraint snuck in via RTA_SRC.
+          if has_src_constraint {
+            continue;
+          }
+
+          // Drop routes from custom policy tables. The three
+          // standard RPDB tables consulted by the default rule
+          // chain are `local` (255), `main` (254), and `default`
+          // (253); together they describe what the kernel would
+          // actually do for any outbound packet on a host without
+          // custom `ip rule` policy. Anything outside that set is
+          // a custom policy table selected by `ip rule` with
+          // fwmark / iif / uid / etc., whose constraints aren't
+          // representable in `IpRoute`.
+          if table_id != RT_TABLE_MAIN as u32
+            && table_id != RT_TABLE_LOCAL
+            && table_id != RT_TABLE_DEFAULT
+          {
+            continue;
+          }
+
+          // Resolve nexthop-object references. The route had only an
+          // RTA_NH_ID — look up the nexthop in the dump map. Single
+          // leaves emit one route; groups fan out to one route per
+          // member (similar to RTA_MULTIPATH).
+          //
+          // Lazy resolution: defer every `RTA_NH_ID` route to the
+          // post-walk pass. The pass dumps `RTM_GETNEXTHOP` once
+          // and resolves the entire batch — same correctness as
+          // dump-up-front, lower cost when no route uses nexthop
+          // objects.
+          //
+          // `resolve_nh_id` outcomes (handled by the post-walk
+          // block):
+          //   - `None`: id absent from the dump. Surface as
+          //     `EINTR` so the caller can retry — kernel state
+          //     was changing during enumeration.
+          //   - `Some(empty)`: id present but unusable
+          //     (blackhole / dead / linkdown / unresolved, or a
+          //     group whose members are all filtered). Skip the
+          //     route silently.
+          //   - `Some(non-empty)`: emit one route per resolved
+          //     `(oif, gw)`.
+          if let Some(id) = nh_id {
+            deferred_nh.push((rtm_header.rtm_family, rtm_header.rtm_dst_len, dst, id));
+            continue;
+          }
+
+          // For ECMP routes, decode `RTA_MULTIPATH` and emit one
+          // route per nexthop. The wire format of each nexthop is
+          // `struct rtnexthop { u16 rtnh_len; u8 rtnh_flags; u8
+          // rtnh_hops; s32 rtnh_ifindex; }` followed by RTA-encoded
+          // sub-attributes (typically RTA_GATEWAY). On a multi-WAN
+          // host where the kernel installs only `default nexthop
+          // via A dev e0 nexthop via B dev e1`, the previous "skip
+          // ECMP" behaviour caused `route_table_by_filter(|r|
+          // r.is_default())` to return *no* default route.
+          if let Some(mp) = multipath {
+            walk_multipath(
+              rtm_header.rtm_family,
+              rtm_header.rtm_dst_len,
+              dst,
+              mp,
+              &mut on_route,
+            );
+            continue;
+          }
+
+          // Skip routes that arrived without RTA_OIF and weren't
+          // ECMP — emitting `oif=0` would mislead callers into
+          // thinking the route was usable on interface 0.
+          if oif == 0 {
+            continue;
+          }
+
+          on_route(rtm_header.rtm_family, oif, rtm_header.rtm_dst_len, dst, gw);
         }
+        _ => {}
       }
     }
-
-    Ok(())
+    if terminal {
+      break;
+    }
   }
+
+  if family_unavailable {
+    return Ok(());
+  }
+
+  // Resolve any deferred `RTA_NH_ID` references in a single batch.
+  // Skipping this block when nothing was deferred is the whole
+  // point of the lazy-dump optimization — a host with no
+  // nexthop-object routes never pays the `RTM_GETNEXTHOP`
+  // round-trip. `None` from `resolve_nh_id` means the id wasn't
+  // in the dump (kernel state changed during enumeration); we
+  // surface that as `EINTR` so the caller can retry rather than
+  // silently lose the route. `Some(empty)` means the nexthop is
+  // present but unusable (blackhole / down) — skip silently.
+  // `Some(non-empty)` emits one route per resolved leaf.
+  if !deferred_nh.is_empty() {
+    let nh_map = dump_nexthops()?;
+    for (rfamily, dst_len, dst, id) in deferred_nh {
+      match resolve_nh_id(&nh_map, id) {
+        None => return Err(rustix::io::Errno::INTR.into()),
+        Some(resolved) => {
+          for (nh_oif, nh_gw) in resolved {
+            on_route(rfamily, nh_oif, dst_len, dst, nh_gw);
+          }
+        }
+      }
+    }
+  }
+
+  Ok(())
 }
 
 /// Walk the contents of an `RTA_MULTIPATH` attribute payload and call
@@ -2003,257 +1993,255 @@ where
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
 {
-  unsafe {
-    // Lazy nexthop-dump: don't pay the `RTM_GETNEXTHOP` round-trip
-    // unless the route walk actually encounters an `RTA_NH_ID`
-    // attribute. The vast majority of Linux hosts have no `ip
-    // nexthop`-managed routes, so a typical `gateway_addrs()` call
-    // benchmarked ~12 µs faster after this change vs. always-dump.
-    // Routes that *do* reference a nexthop object collect into
-    // `deferred_nh` here and resolve in a single post-walk pass.
-    let mut deferred_nh: SmallVec<u32> = SmallVec::new();
+  // Lazy nexthop-dump: don't pay the `RTM_GETNEXTHOP` round-trip
+  // unless the route walk actually encounters an `RTA_NH_ID`
+  // attribute. The vast majority of Linux hosts have no `ip
+  // nexthop`-managed routes, so a typical `gateway_addrs()` call
+  // benchmarked ~12 µs faster after this change vs. always-dump.
+  // Routes that *do* reference a nexthop object collect into
+  // `deferred_nh` here and resolve in a single post-walk pass.
+  let mut deferred_nh: SmallVec<u32> = SmallVec::new();
 
-    let handle = Handle::new()?;
+  let handle = Handle::new()?;
 
-    // Create and send netlink request for routes
-    let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
-    handle.send(&req)?;
+  // Create and send netlink request for routes
+  let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
+  handle.send(&req)?;
 
-    // Get socket name
-    let lsa = handle.sock()?;
+  // Get socket name
+  let lsa = handle.sock()?;
 
-    // Receive and process messages. `rt_generic_addrs` walks routes
-    // with `RTA_MULTIPATH` payloads — see `DUMP_RECV_BUF_SIZE`.
-    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
-    let mut gateways = SmallVec::new();
-    // Policy-routing tables and multipath/ECMP entries can surface the
-    // same gateway on multiple route messages. Dedup via a HashSet
-    // keyed by `(index, IpAddr)`, matching the pattern already used in
-    // `src/bsd_like/rt_generic.rs` and `src/windows/gateway.rs`.
-    let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
+  // Receive and process messages. `rt_generic_addrs` walks routes
+  // with `RTA_MULTIPATH` payloads — see `DUMP_RECV_BUF_SIZE`.
+  let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
+  let mut gateways = SmallVec::new();
+  // Policy-routing tables and multipath/ECMP entries can surface the
+  // same gateway on multiple route messages. Dedup via a HashSet
+  // keyed by `(index, IpAddr)`, matching the pattern already used in
+  // `src/bsd_like/rt_generic.rs` and `src/windows/gateway.rs`.
+  let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
 
-    let mut family_unavailable = false;
-    loop {
-      let nr = handle.recv(&mut rb)?;
-      let mut terminal = false;
+  let mut family_unavailable = false;
+  loop {
+    let nr = handle.recv(&mut rb)?;
+    let mut terminal = false;
 
-      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
-        let message = message?;
-        if terminal {
+    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+      let message = message?;
+      if terminal {
+        continue;
+      }
+      let (h, received) = match message {
+        DumpMessage::Done => {
+          terminal = true;
           continue;
         }
-        let (h, received) = match message {
-          DumpMessage::Done => {
-            terminal = true;
-            continue;
-          }
-          DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
-          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
-            family_unavailable = true;
-            terminal = true;
-            continue;
-          }
-          DumpMessage::Message(h, message) => (h, message),
-        };
-        let hlen = received.len();
+        DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
+        DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
+          family_unavailable = true;
+          terminal = true;
+          continue;
+        }
+        DumpMessage::Message(h, message) => (h, message),
+      };
+      let hlen = received.len();
 
-        match h.nlmsg_type as u32 {
-          val if val == RTM_NEWROUTE => {
-            // See `netlink_interface` for why this is bounded to `hlen`.
-            let rtm = &received[NLMSG_HDRLEN..hlen];
-            let rtm_header = RtmMessageHeader::parse(rtm)?;
+      match h.nlmsg_type as u32 {
+        val if val == RTM_NEWROUTE => {
+          // See `netlink_interface` for why this is bounded to `hlen`.
+          let rtm = &received[NLMSG_HDRLEN..hlen];
+          let rtm_header = RtmMessageHeader::parse(rtm)?;
 
-            // Ensure it's a address we want
-            if let Some(rtn) = rtn {
-              if rtm_header.rtm_type != rtn {
-                continue;
-              }
+          // Ensure it's a address we want
+          if let Some(rtn) = rtn {
+            if rtm_header.rtm_type != rtn {
+              continue;
+            }
+          }
+
+          let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
+          // Top-level `rta` matches all share `current_ifi` from
+          // RTA_OIF, so we only need to remember the address — the
+          // ifindex is back-filled at emit time. Stays at the
+          // smaller `IpAddr` element size (17 bytes vs 24 for the
+          // (u32, IpAddr) pair) so the inline buffer doesn't bloat
+          // on the hot path. Per-nexthop entries from RTA_MULTIPATH
+          // and RTA_NH_ID carry their own ifindex and are emitted
+          // straight into `gateways`, bypassing this vec.
+          let mut tmp_addrs: SmallVec<IpAddr> = SmallVec::new();
+          let mut current_ifi = 0;
+          let mut multipath: Option<&[u8]> = None;
+          let mut nh_id: Option<u32> = None;
+          while rtattr_buf.len() >= RtAttr::SIZE {
+            let attr = RtAttr {
+              len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
+              ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
+            };
+
+            let attrlen = attr.len as usize;
+            if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
+              // Same rationale as in `netlink_best_local_addrs`:
+              // a partially-parsed route could emit a bogus address
+              // into `gateways`. Fail the whole call instead.
+              return Err(rustix::io::Errno::INVAL.into());
             }
 
-            let mut rtattr_buf = &rtm[RtmMessageHeader::SIZE..];
-            // Top-level `rta` matches all share `current_ifi` from
-            // RTA_OIF, so we only need to remember the address — the
-            // ifindex is back-filled at emit time. Stays at the
-            // smaller `IpAddr` element size (17 bytes vs 24 for the
-            // (u32, IpAddr) pair) so the inline buffer doesn't bloat
-            // on the hot path. Per-nexthop entries from RTA_MULTIPATH
-            // and RTA_NH_ID carry their own ifindex and are emitted
-            // straight into `gateways`, bypassing this vec.
-            let mut tmp_addrs: SmallVec<IpAddr> = SmallVec::new();
-            let mut current_ifi = 0;
-            let mut multipath: Option<&[u8]> = None;
-            let mut nh_id: Option<u32> = None;
-            while rtattr_buf.len() >= RtAttr::SIZE {
-              let attr = RtAttr {
-                len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(rtattr_buf[2..4].try_into().unwrap()),
-              };
+            let data = &rtattr_buf[RtAttr::SIZE..attrlen];
+            let alen = rta_align_of(attrlen).min(rtattr_buf.len());
 
-              let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-                // Same rationale as in `netlink_best_local_addrs`:
-                // a partially-parsed route could emit a bogus address
-                // into `gateways`. Fail the whole call instead.
-                return Err(rustix::io::Errno::INVAL.into());
-              }
+            match attr.ty {
+              val if val == rta => match (
+                family,
+                AddressFamily::from_raw(rtm_header.rtm_family as u16),
+              ) {
+                (AddressFamily::INET, AddressFamily::INET)
+                | (AddressFamily::UNSPEC, AddressFamily::INET)
+                  if data.len() >= 4 =>
+                {
+                  // Netlink address payloads are already in network
+                  // byte order; `Ipv4Addr::from([u8; 4])` is
+                  // network-order-by-contract and host-endian-
+                  // independent. The previous
+                  // `u32::from_ne_bytes(...).swap_bytes()` decode
+                  // happened to work on little-endian Linux
+                  // (LE-load + swap = BE-load) but produced
+                  // byte-reversed addresses on big-endian Linux —
+                  // matters now that CI explicitly covers
+                  // big-endian targets. Match the canonical
+                  // `parse_rta_ipaddr` shape.
+                  let bytes: [u8; 4] = data[..4].try_into().unwrap();
+                  let addr = IpAddr::V4(bytes.into());
 
-              let data = &rtattr_buf[RtAttr::SIZE..attrlen];
-              let alen = rta_align_of(attrlen).min(rtattr_buf.len());
-
-              match attr.ty {
-                val if val == rta => match (
-                  family,
-                  AddressFamily::from_raw(rtm_header.rtm_family as u16),
-                ) {
-                  (AddressFamily::INET, AddressFamily::INET)
-                  | (AddressFamily::UNSPEC, AddressFamily::INET)
-                    if data.len() >= 4 =>
-                  {
-                    // Netlink address payloads are already in network
-                    // byte order; `Ipv4Addr::from([u8; 4])` is
-                    // network-order-by-contract and host-endian-
-                    // independent. The previous
-                    // `u32::from_ne_bytes(...).swap_bytes()` decode
-                    // happened to work on little-endian Linux
-                    // (LE-load + swap = BE-load) but produced
-                    // byte-reversed addresses on big-endian Linux —
-                    // matters now that CI explicitly covers
-                    // big-endian targets. Match the canonical
-                    // `parse_rta_ipaddr` shape.
-                    let bytes: [u8; 4] = data[..4].try_into().unwrap();
-                    let addr = IpAddr::V4(bytes.into());
-
-                    if f(&addr) {
-                      tmp_addrs.push(addr);
-                    }
-                  }
-                  (AddressFamily::INET6, AddressFamily::INET6)
-                  | (AddressFamily::UNSPEC, AddressFamily::INET6)
-                    if data.len() >= 16 =>
-                  {
-                    // `Ipv6Addr::from([u8; 16])` is also
-                    // network-order-by-contract — same rationale as
-                    // the v4 branch above. The `u128::from_be_bytes`
-                    // chain it replaced was already correct, but
-                    // sticking to the byte-array form keeps both
-                    // arms uniform with `parse_rta_ipaddr`.
-                    let bytes: [u8; 16] = data[..16].try_into().unwrap();
-                    let addr = IpAddr::V6(bytes.into());
-
-                    if f(&addr) {
-                      tmp_addrs.push(addr);
-                    }
-                  }
-                  _ => {}
-                },
-                RTA_OIF => {
-                  if data.len() >= 4 {
-                    let idx = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                    current_ifi = idx;
+                  if f(&addr) {
+                    tmp_addrs.push(addr);
                   }
                 }
-                RTA_MULTIPATH => {
-                  multipath = Some(data);
-                }
-                RTA_NH_ID if data.len() >= 4 => {
-                  nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+                (AddressFamily::INET6, AddressFamily::INET6)
+                | (AddressFamily::UNSPEC, AddressFamily::INET6)
+                  if data.len() >= 16 =>
+                {
+                  // `Ipv6Addr::from([u8; 16])` is also
+                  // network-order-by-contract — same rationale as
+                  // the v4 branch above. The `u128::from_be_bytes`
+                  // chain it replaced was already correct, but
+                  // sticking to the byte-array form keeps both
+                  // arms uniform with `parse_rta_ipaddr`.
+                  let bytes: [u8; 16] = data[..16].try_into().unwrap();
+                  let addr = IpAddr::V6(bytes.into());
+
+                  if f(&addr) {
+                    tmp_addrs.push(addr);
+                  }
                 }
                 _ => {}
+              },
+              RTA_OIF => {
+                if data.len() >= 4 {
+                  let idx = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                  current_ifi = idx;
+                }
               }
-
-              rtattr_buf = &rtattr_buf[alen..];
+              RTA_MULTIPATH => {
+                multipath = Some(data);
+              }
+              RTA_NH_ID if data.len() >= 4 => {
+                nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+              }
+              _ => {}
             }
 
-            // Inline closure for the dedup + try_from + push step.
-            // Avoids three duplicate copies across the top-level /
-            // multipath / nh_id paths and keeps the per-path code
-            // tight.
-            //
-            // It's a normal local closure — no boxing — so the borrow
-            // checker requires we drop the `gateways` / `seen`
-            // borrows before the next path runs. Each emit block is
-            // a separate statement, which is enough.
-            let mut emit = |idx: u32, raw: IpAddr| {
-              if let Some(addr) = A::try_from(idx, raw) {
+            rtattr_buf = &rtattr_buf[alen..];
+          }
+
+          // Inline closure for the dedup + try_from + push step.
+          // Avoids three duplicate copies across the top-level /
+          // multipath / nh_id paths and keeps the per-path code
+          // tight.
+          //
+          // It's a normal local closure — no boxing — so the borrow
+          // checker requires we drop the `gateways` / `seen`
+          // borrows before the next path runs. Each emit block is
+          // a separate statement, which is enough.
+          let mut emit = |idx: u32, raw: IpAddr| {
+            if let Some(addr) = A::try_from(idx, raw) {
+              if seen.insert((addr.index(), addr.addr())) {
+                gateways.push(addr);
+              }
+            }
+          };
+
+          // Top-level matches share `current_ifi`.
+          for raw in tmp_addrs.drain(..) {
+            emit(current_ifi, raw);
+          }
+
+          // ECMP: each `struct rtnexthop` carries its own oif and
+          // sub-attrs. Pull the gateway sub-attr per nexthop —
+          // important on multi-WAN hosts where the only gateway
+          // information lives inside RTA_MULTIPATH and the
+          // top-level lookup picks up nothing. Per-nexthop entries
+          // emit straight into `gateways` via `emit`, bypassing
+          // `tmp_addrs` so we don't pay the size growth of a
+          // (u32, IpAddr) inline buffer for them either.
+          if rta == RTA_GATEWAY {
+            if let Some(mp) = multipath {
+              multipath_gateways_into(rtm_header.rtm_family, mp, &mut |idx, gw| {
+                if f(&gw) {
+                  emit(idx, gw);
+                }
+              });
+            }
+
+            // Nexthop-object: defer to the post-walk resolution
+            // pass. We collect the bare `nh_id`s here and dump the
+            // nexthop map once at the end if any were seen — most
+            // hosts have none, in which case we skip the dump
+            // entirely.
+            if let Some(id) = nh_id {
+              deferred_nh.push(id);
+            }
+          }
+        }
+        _ => {}
+      }
+    }
+    if terminal {
+      break;
+    }
+  }
+
+  if family_unavailable {
+    return Ok(SmallVec::new());
+  }
+
+  // Resolve any deferred `RTA_NH_ID` references in a single batch.
+  // Skipping this block when nothing was deferred is the whole
+  // point of the lazy-dump optimization.
+  if !deferred_nh.is_empty() {
+    let nh_map = dump_nexthops()?;
+    for id in deferred_nh {
+      if let Some(resolved) = resolve_nh_id(&nh_map, id) {
+        for (oif, maybe_gw) in resolved {
+          if let Some(gw) = maybe_gw {
+            if f(&gw) {
+              if let Some(addr) = A::try_from(oif, gw) {
                 if seen.insert((addr.index(), addr.addr())) {
                   gateways.push(addr);
                 }
               }
-            };
-
-            // Top-level matches share `current_ifi`.
-            for raw in tmp_addrs.drain(..) {
-              emit(current_ifi, raw);
-            }
-
-            // ECMP: each `struct rtnexthop` carries its own oif and
-            // sub-attrs. Pull the gateway sub-attr per nexthop —
-            // important on multi-WAN hosts where the only gateway
-            // information lives inside RTA_MULTIPATH and the
-            // top-level lookup picks up nothing. Per-nexthop entries
-            // emit straight into `gateways` via `emit`, bypassing
-            // `tmp_addrs` so we don't pay the size growth of a
-            // (u32, IpAddr) inline buffer for them either.
-            if rta == RTA_GATEWAY {
-              if let Some(mp) = multipath {
-                multipath_gateways_into(rtm_header.rtm_family, mp, &mut |idx, gw| {
-                  if f(&gw) {
-                    emit(idx, gw);
-                  }
-                });
-              }
-
-              // Nexthop-object: defer to the post-walk resolution
-              // pass. We collect the bare `nh_id`s here and dump the
-              // nexthop map once at the end if any were seen — most
-              // hosts have none, in which case we skip the dump
-              // entirely.
-              if let Some(id) = nh_id {
-                deferred_nh.push(id);
-              }
-            }
-          }
-          _ => {}
-        }
-      }
-      if terminal {
-        break;
-      }
-    }
-
-    if family_unavailable {
-      return Ok(SmallVec::new());
-    }
-
-    // Resolve any deferred `RTA_NH_ID` references in a single batch.
-    // Skipping this block when nothing was deferred is the whole
-    // point of the lazy-dump optimization.
-    if !deferred_nh.is_empty() {
-      let nh_map = dump_nexthops()?;
-      for id in deferred_nh {
-        if let Some(resolved) = resolve_nh_id(&nh_map, id) {
-          for (oif, maybe_gw) in resolved {
-            if let Some(gw) = maybe_gw {
-              if f(&gw) {
-                if let Some(addr) = A::try_from(oif, gw) {
-                  if seen.insert((addr.index(), addr.addr())) {
-                    gateways.push(addr);
-                  }
-                }
-              }
             }
           }
         }
-        // `None` (id absent from snapshot) is silently skipped —
-        // gateway enumeration is best-effort by design (matches the
-        // historical contract of returning `Ok([])` rather than
-        // `Err` on transient races) and there's no per-call retry
-        // pass like `netlink_walk_routes` has.
       }
+      // `None` (id absent from snapshot) is silently skipped —
+      // gateway enumeration is best-effort by design (matches the
+      // historical contract of returning `Ok([])` rather than
+      // `Err` on transient races) and there's no per-call retry
+      // pass like `netlink_walk_routes` has.
     }
-
-    Ok(gateways)
   }
+
+  Ok(gateways)
 }
 
 /// Walk an `RTA_MULTIPATH` payload and call `sink(oif, gateway)` for
@@ -2935,27 +2923,25 @@ mod netlink_tests {
   // (the socket would already be bound before the send).
   #[test]
   fn autobind_assigns_portid_on_send() {
-    unsafe {
-      let handle = Handle::new().expect("create netlink handle");
+    let handle = Handle::new().expect("create netlink handle");
 
-      let before = handle.sock().expect("getsockname before send");
-      assert_eq!(before.pid(), 0, "socket must be unbound before first send");
+    let before = handle.sock().expect("getsockname before send");
+    assert_eq!(before.pid(), 0, "socket must be unbound before first send");
 
-      let req = NetlinkRouteRequest::new(
-        RTM_GETLINK as u16,
-        1,
-        AddressFamily::UNSPEC.as_raw() as u8,
-        0,
-      );
-      handle.send(&req).expect("send RTM_GETLINK");
+    let req = NetlinkRouteRequest::new(
+      RTM_GETLINK as u16,
+      1,
+      AddressFamily::UNSPEC.as_raw() as u8,
+      0,
+    );
+    handle.send(&req).expect("send RTM_GETLINK");
 
-      let after = handle.sock().expect("getsockname after send");
-      assert_ne!(
-        after.pid(),
-        0,
-        "kernel must autobind a portid on first send"
-      );
-    }
+    let after = handle.sock().expect("getsockname after send");
+    assert_ne!(
+      after.pid(),
+      0,
+      "kernel must autobind a portid on first send"
+    );
   }
 
   // Codex round 3: an in-band RTM_GETLINK denial arrives as
