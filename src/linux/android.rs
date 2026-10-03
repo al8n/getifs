@@ -133,10 +133,8 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> io::Result<Option<Interf
     Err(e) if vanished(e) => return Ok(None),
     // rustix returns ILSEQ for a non-UTF8 interface name. Linux names are
     // arbitrary bytes, so rather than abort the whole enumeration for one
-    // exotic/vendor name, skip just this interface. (The netlink path keeps
-    // such names via lossy conversion; re-implementing SIOCGIFNAME to
-    // preserve raw bytes isn't worth the unverifiable complexity for this
-    // rare case.)
+    // exotic/vendor name, skip just this interface, as the netlink path
+    // does: getifs exposes only UTF-8 interface names.
     Err(e) if e == rustix::io::Errno::ILSEQ => return Ok(None),
     Err(e) => return Err(e.into()),
   };

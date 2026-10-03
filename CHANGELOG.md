@@ -5,10 +5,11 @@
 ### API contract changes
 
 - Add exact local-MTU queries: `get_interface_mtu(index)` and
-  `get_ifaddr_mtu(addr)`. IP-only MTU lookups now return `NotFound` when no
-  local interface owns the address, `InvalidInput` when distinct interfaces
-  own it, and propagate address-enumeration errors instead of retrying with a
-  partial fallback.
+  `get_ifaddr_mtu(addr)`, which read the interface through the same per-index
+  lookup as `interface_by_index`. IP-only MTU lookups now return `NotFound`
+  when no local interface owns the address, `InvalidInput` when distinct
+  interfaces own it, and propagate address-enumeration errors instead of
+  retrying with a partial fallback.
 - `interface_by_index` and `interface_by_name` return `Ok(None)` when the
   index or name is absent from the interface enumeration (including an
   interface skipped for an unrepresentable name) or the OS reports a known
@@ -28,11 +29,21 @@
   `SmolStr` remain supported public re-exports.
 - Preserve unknown native interface-flag bits on Linux and BSD, and align
   `Flags` ordering traits on Windows without remapping target-specific bits.
+- Linux and Windows report `mac_addr` only for a 6-byte (EUI-48) link-layer
+  address and return `None` for any other length. Previously both copied up to
+  6 bytes, truncating longer addresses (such as 20-byte InfiniBand or 8-byte
+  EUI-64) and zero-padding shorter ones.
 
 ### Backend hardening
 
 - Linux netlink validates multipart framing, terminal messages, and attributes
   before decoding interface, address, route, and MAC data.
+- Linux netlink checks every dump message for `NLM_F_DUMP_INTR`: the
+  rtnetlink dumpers flag the first message of the batch emitted after a
+  table-generation change, so `NLMSG_DONE` almost never carries the flag. A
+  flagged dump is attempted up to three times before `ErrorKind::Interrupted`
+  is returned, and a receive interrupted by a signal is re-issued. Address and
+  gateway filters may be invoked again across attempts.
 - Linux netlink link and address dumps receive into a 32 KiB buffer, as the
   kernel expects for dumps, so a large `RTM_NEWLINK` message (for example one
   carrying many alternative names) no longer fails the dump.

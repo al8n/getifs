@@ -330,10 +330,9 @@ pub(super) use libc::NET_RT_IFMALIST;
 // =====================================================================
 //
 // Apple / FreeBSD: `libc` exports the struct directly.
-// DragonFly: the kernel's `struct ifa_msghdr` matches FreeBSD's (the
-//   two share most of the route socket ABI since DragonFly forked
-//   from FreeBSD 4.x), but the libc crate's DragonFly bindings don't
-//   expose the type — define it locally with the FreeBSD layout.
+// DragonFly: the libc crate's DragonFly bindings don't expose the type,
+//   and the kernel's RTM_VERSION 7 layout differs from FreeBSD's — define
+//   it locally below.
 // NetBSD / OpenBSD: absent from libc, define locally further down.
 
 #[cfg(any(apple, target_os = "freebsd"))]

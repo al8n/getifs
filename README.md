@@ -118,6 +118,10 @@ Windows | `GetAdaptersAddresses`
 - Kernel reads are weak snapshots, not transactions. An interface, address,
   name, or index can change between calls (or during a multi-query operation),
   so callers must handle ordinary TOCTOU races.
+- On Linux and Android, a netlink dump that the kernel reports as interrupted
+  is attempted up to three times, and persistent interruption returns
+  `ErrorKind::Interrupted`. Address and gateway filters may be invoked again
+  across attempts; route filters run only on the attempt that completes.
 - Result ordering is unspecified. There is no general deduplication guarantee;
   deduplication is promised only where a specific API documents it.
 - `IfAddr` and `IfNet` preserve the local interface index. Their derived
@@ -187,10 +191,13 @@ Caveats on Android 11+ (API level 30+):
 - The hardware (MAC) address is reported as `None` (Android restricts it for
   apps).
 - Interfaces with a non-UTF-8 name are skipped.
-- Multicast group enumeration returns `io::ErrorKind::Unsupported` —
-  `/proc/net` is not readable by apps on Android 10+.
 - The ioctl socket requires the `android.permission.INTERNET` permission
   (which any networking app already holds).
+
+On every Android version, multicast group enumeration returns
+`io::ErrorKind::Unsupported`. The Linux backend reads group memberships from
+`/proc/net/igmp*`, which apps cannot read on Android 10+, so the Android build
+does not attempt it.
 
 ## Why `getifs`?
 

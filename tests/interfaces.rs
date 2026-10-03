@@ -42,10 +42,12 @@ fn validate_interface_unicast_addrs(addrs: &[IfNet]) -> io::Result<()> {
       ));
     }
 
-    if addr.prefix_len() > addr.max_prefix_len() {
+    // RFC 1122 reserves 127.0.0.0/8 for loopback and ::1 is a /128, so a
+    // shorter loopback prefix means a /0 netmask or a misdecoded record.
+    if addr.addr().is_loopback() && addr.prefix_len() < 8 {
       return Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("unexpected prefix length: {addr:?}"),
+        format!("loopback address has a prefix shorter than /8: {addr:?}"),
       ));
     }
   }

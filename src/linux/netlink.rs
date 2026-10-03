@@ -233,7 +233,15 @@ impl Handle {
   }
 
   unsafe fn recv(&self, dst: &mut [u8]) -> io::Result<usize> {
-    let (copied, actual, sender) = recvfrom(&self.fd, &mut *dst, RecvFlags::TRUNC)?;
+    // A signal interrupts the receive before it consumes any data, and the
+    // dump's progress lives on the socket, so re-issuing only the receive is
+    // correct and keeps a signal from costing a whole-dump attempt.
+    let (copied, actual, sender) = loop {
+      match recvfrom(&self.fd, &mut *dst, RecvFlags::TRUNC) {
+        Err(error) if error == rustix::io::Errno::INTR => {}
+        result => break result?,
+      }
+    };
     if actual > dst.len() {
       return Err(rustix::io::Errno::NOBUFS.into());
     }
@@ -378,6 +386,35 @@ fn decode_nlmsg_done(body: &[u8]) -> io::Result<()> {
 /// `iproute2` uses 32 KiB for the same dumps.
 const DUMP_RECV_BUF_SIZE: usize = 32 * 1024;
 
+/// Total attempts for a netlink dump that the kernel reports as interrupted.
+///
+/// The rtnetlink dumpers call `nl_dump_check_consistent(cb, nlmsg_hdr(skb))`
+/// once per batch, and `nlmsg_hdr` is the batch's first message. That call
+/// sets `NLM_F_DUMP_INTR` on the message when the table generation changed
+/// since the previous batch, and it updates `prev_seq` on every call, so
+/// `NLMSG_DONE` almost never carries the flag. `DumpMessages` therefore
+/// checks every message, and a flagged dump is retried from the start.
+const MAX_DUMP_ATTEMPTS: usize = 3;
+
+#[inline]
+fn is_interrupted(error: &io::Error) -> bool {
+  error.raw_os_error() == Some(rustix::io::Errno::INTR.raw_os_error())
+}
+
+/// Runs `dump` until it returns anything other than `EINTR`, making at most
+/// `MAX_DUMP_ATTEMPTS` attempts, and returns the last `EINTR` once they are
+/// exhausted. Every attempt must issue a fresh dump and must not leave an
+/// interrupted attempt's output visible to the caller.
+fn retry_interrupted<T>(mut dump: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+  let mut attempt = 1;
+  loop {
+    match dump() {
+      Err(error) if is_interrupted(&error) && attempt < MAX_DUMP_ATTEMPTS => attempt += 1,
+      result => return result,
+    }
+  }
+}
+
 #[inline]
 fn mac_addr_from_attr(data: &[u8]) -> Option<MacAddr> {
   let bytes: [u8; MAC_ADDRESS_SIZE] = data.try_into().ok()?;
@@ -397,6 +434,10 @@ fn interface_name_from_attr(data: &[u8]) -> Option<&str> {
 }
 
 pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<TinyVec<Interface>> {
+  retry_interrupted(|| netlink_interface_once(family, ifi))
+}
+
+fn netlink_interface_once(family: AddressFamily, ifi: u32) -> io::Result<TinyVec<Interface>> {
   unsafe {
     let handle = Handle::new()?;
 
@@ -513,6 +554,25 @@ where
 /// instead of allocating a fresh one. Used by `best_local_addrs()` to
 /// merge per-family walks without three intermediate `SmallVec`s.
 pub(super) fn netlink_addr_into<N, F>(
+  family: AddressFamily,
+  ifi: u32,
+  mut f: F,
+  addrs: &mut SmallVec<N>,
+) -> io::Result<()>
+where
+  N: Net,
+  F: FnMut(&IpAddr) -> bool,
+{
+  // A retried dump starts over, so drop what an interrupted attempt appended.
+  // `f` can therefore see the same address more than once.
+  let start = addrs.len();
+  retry_interrupted(|| {
+    addrs.truncate(start);
+    netlink_addr_into_once(family, ifi, &mut f, &mut *addrs)
+  })
+}
+
+fn netlink_addr_into_once<N, F>(
   family: AddressFamily,
   ifi: u32,
   mut f: F,
@@ -645,6 +705,21 @@ where
 /// caller's buffer. Lets the union `best_local_addrs()` walk both
 /// families without allocating intermediate per-family `SmallVec`s.
 pub fn netlink_best_local_addrs_into<N>(
+  family: AddressFamily,
+  out: &mut SmallVec<N>,
+) -> io::Result<()>
+where
+  N: Net,
+{
+  // A retried dump starts over, so drop what an interrupted attempt appended.
+  let start = out.len();
+  retry_interrupted(|| {
+    out.truncate(start);
+    netlink_best_local_addrs_into_once(family, &mut *out)
+  })
+}
+
+fn netlink_best_local_addrs_into_once<N>(
   family: AddressFamily,
   out: &mut SmallVec<N>,
 ) -> io::Result<()>
@@ -1344,6 +1419,25 @@ pub(super) fn netlink_walk_routes<F>(family: AddressFamily, mut on_route: F) -> 
 where
   F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
 {
+  // `on_route` must see each route once, so every attempt buffers its routes
+  // and only the attempt that completes is replayed.
+  let routes = retry_interrupted(|| {
+    let mut routes = Vec::new();
+    netlink_walk_routes_once(family, |fam, oif, dst_len, dst, gw| {
+      routes.push((fam, oif, dst_len, dst, gw));
+    })?;
+    Ok(routes)
+  })?;
+  for (fam, oif, dst_len, dst, gw) in routes {
+    on_route(fam, oif, dst_len, dst, gw);
+  }
+  Ok(())
+}
+
+fn netlink_walk_routes_once<F>(family: AddressFamily, mut on_route: F) -> io::Result<()>
+where
+  F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
+{
   unsafe {
     // Lazy nexthop-dump: we collect every `RTA_NH_ID` route we see
     // during the route walk and resolve them in a single post-walk
@@ -1886,6 +1980,20 @@ fn parse_rta_ipaddr(rtm_family: u8, data: &[u8]) -> Option<IpAddr> {
 }
 
 pub(super) fn rt_generic_addrs<A, F>(
+  family: AddressFamily,
+  rta: u16,
+  rtn: Option<u8>,
+  mut f: F,
+) -> io::Result<SmallVec<A>>
+where
+  A: Address + Eq,
+  F: FnMut(&IpAddr) -> bool,
+{
+  // Every attempt builds a fresh result; `f` can see the same gateway again.
+  retry_interrupted(|| rt_generic_addrs_once(family, rta, rtn, &mut f))
+}
+
+fn rt_generic_addrs_once<A, F>(
   family: AddressFamily,
   rta: u16,
   rtn: Option<u8>,
@@ -2707,6 +2815,48 @@ mod netlink_tests {
       err.raw_os_error(),
       Some(rustix::io::Errno::NOBUFS.raw_os_error())
     );
+  }
+
+  #[test]
+  fn retry_interrupted_reruns_an_interrupted_dump() {
+    let mut calls = 0;
+    let result = retry_interrupted(|| {
+      calls += 1;
+      if calls == 1 {
+        Err(rustix::io::Errno::INTR.into())
+      } else {
+        Ok(calls)
+      }
+    });
+    assert_eq!(result.unwrap(), 2);
+    assert_eq!(calls, 2);
+  }
+
+  #[test]
+  fn retry_interrupted_returns_eintr_after_the_last_attempt() {
+    let mut calls = 0;
+    let err = retry_interrupted(|| {
+      calls += 1;
+      Err::<(), _>(rustix::io::Errno::INTR.into())
+    })
+    .unwrap_err();
+    assert!(is_interrupted(&err));
+    assert_eq!(calls, MAX_DUMP_ATTEMPTS);
+  }
+
+  #[test]
+  fn retry_interrupted_returns_other_errors_immediately() {
+    let mut calls = 0;
+    let err = retry_interrupted(|| {
+      calls += 1;
+      Err::<(), _>(rustix::io::Errno::ACCESS.into())
+    })
+    .unwrap_err();
+    assert_eq!(
+      err.raw_os_error(),
+      Some(rustix::io::Errno::ACCESS.raw_os_error())
+    );
+    assert_eq!(calls, 1);
   }
 
   #[test]

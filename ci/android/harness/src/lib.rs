@@ -92,6 +92,10 @@ pub extern "system" fn Java_dev_getifs_androidharness_NativeBridge_runChecks<'lo
     Ok(ifaces) => {
       if ifaces.is_empty() {
         errors.push("interfaces() returned none (expected at least loopback)".to_string());
+      } else if !ifaces.iter().any(|interface| interface.mtu() > 0) {
+        // Loopback reports 65536 on Android, so all-zero MTUs mean the
+        // snapshot (netlink or ioctl fallback) carries zeroed data.
+        errors.push("no interface reported a non-zero MTU".to_string());
       }
 
       for interface in &ifaces {

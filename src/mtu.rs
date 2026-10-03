@@ -119,9 +119,11 @@ where
 /// Gets the local link MTU for an interface index.
 ///
 /// This is the interface's configured local MTU, not a remote path MTU.
-/// It is read from a fresh interface snapshot; use [`crate::Interface::mtu`]
-/// when you already hold a [`crate::Interface`] snapshot. Returns
-/// [`io::ErrorKind::NotFound`] when that index is not present in the snapshot.
+/// It is read through the same per-index lookup as
+/// [`crate::interface_by_index`]; use [`crate::Interface::mtu`] when you
+/// already hold a [`crate::Interface`] snapshot. Returns
+/// [`io::ErrorKind::NotFound`] when no interface has that index, and
+/// propagates other lookup errors.
 ///
 /// ## Example
 ///
@@ -136,7 +138,9 @@ where
 /// # }
 /// ```
 pub fn get_interface_mtu(index: u32) -> io::Result<u32> {
-  mtu_from_interface_snapshot(index, interface_mtu_snapshot()?)
+  crate::interface_by_index(index)?
+    .map(|interface| interface.mtu())
+    .ok_or_else(interface_not_found)
 }
 
 /// Gets the local link MTU for the interface named by an [`IfAddr`].
