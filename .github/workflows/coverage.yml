@@ -46,7 +46,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Run Coverage and Generate Report
         run: |
-          mkdir -p coverage
+          mkdir -p "coverage/${{ matrix.os }}"
           cargo llvm-cov --all-features --doctests --cobertura --output-path "coverage/${{ matrix.os }}/cobertura.xml" -j 1
       - name: Upload Coverage Report as Artifact
         # Artifact uploads can hit transient GitHub artifact-service errors
