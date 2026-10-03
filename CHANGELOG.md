@@ -1,5 +1,20 @@
 # RELEASED
 
+## 0.6.2 (October 3rd, 2026)
+
+Patch release; the public API is unchanged.
+
+### Fixes
+
+- Explicitly enable rustix's `time` feature to fix the non-Windows
+  build regression from rustix 1.1.5's `timespec` feature gate.
+
+### CI / chore
+
+- Replace cargo-tarpaulin with cargo-llvm-cov while retaining Cobertura
+  reports for the nightly host matrix, Linux musl, and FreeBSD coverage
+  jobs.
+
 ## 0.6.1 (May 26th, 2026)
 
 Adds Android as a supported platform. The autobind change in the
