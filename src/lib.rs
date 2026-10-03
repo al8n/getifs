@@ -11,17 +11,6 @@ compile_error!(
   "getifs supports Linux, Android, Apple platforms, FreeBSD, NetBSD, OpenBSD, DragonFly, and Windows"
 );
 
-#[allow(unused_macros)]
-macro_rules! cfg_supported {
-  ($($item:item)*) => {
-    $(
-      #[cfg(any(linux_like, bsd_like, windows))]
-      $item
-    )*
-  };
-}
-
-cfg_supported! {
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub use gateway::*;
@@ -485,5 +474,4 @@ mod address_trait_tests {
     not_unspec[15] = 1;
     assert!(!is_ipv6_unspecified(not_unspec));
   }
-}
 }
