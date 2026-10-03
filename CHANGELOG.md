@@ -92,6 +92,10 @@
   interfaces, addresses, multicast groups, gateways, routes, and best-local
   route selection, which now parse a buffer separately from fetching it. Miri
   runs fixtures for each of them under strict provenance.
+- The netlink fuzz target drives the production dump walkers over replayed
+  multi-datagram kernel replies, including interrupted-dump retries, nexthop
+  resolution, and best-local address lookups, instead of a fuzz-only
+  attribute walker. Unit tests cover the same walkers through the replay.
 
 ## 0.6.2 (October 3rd, 2026)
 

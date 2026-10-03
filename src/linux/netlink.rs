@@ -8,6 +8,8 @@ use rustix::net::{
 };
 
 use smallvec_wrapper::{SmallVec, TinyVec};
+#[cfg(any(test, fuzzing))]
+use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use std::{collections::HashSet, io, mem, net::IpAddr, os::fd::OwnedFd};
 
 use crate::local_ip_filter;
@@ -188,6 +190,39 @@ struct MessageHeader {
   nlmsg_pid: u32,
 }
 
+/// One netlink socket that carries a single dump: the request goes out with
+/// `send`, and each `recv` returns one reply datagram.
+trait DumpSocket {
+  fn send(&self, bytes: &[u8]) -> io::Result<()>;
+
+  /// The port id the replies are addressed to; every reply message must
+  /// carry it in `nlmsg_pid`.
+  fn pid(&self) -> io::Result<u32>;
+
+  /// Receives one whole datagram into `dst` and returns its length.
+  fn recv(&self, dst: &mut [u8]) -> io::Result<usize>;
+}
+
+/// Opens the socket for each dump. A walker opens one per attempt, and its
+/// nexthop and per-interface address lookups open their own.
+trait Transport {
+  type Socket: DumpSocket;
+
+  fn open(&mut self) -> io::Result<Self::Socket>;
+}
+
+/// The kernel's rtnetlink. Every dump gets a new socket, so the unread
+/// replies of an abandoned dump go away with its socket.
+struct Kernel;
+
+impl Transport for Kernel {
+  type Socket = Handle;
+
+  fn open(&mut self) -> io::Result<Handle> {
+    Handle::new()
+  }
+}
+
 struct Handle {
   fd: OwnedFd,
   sa: SocketAddrNetlink,
@@ -218,18 +253,21 @@ impl Handle {
     Ok(Self { fd: sock, sa })
   }
 
-  fn send(&self, req: &NetlinkRouteRequest) -> io::Result<usize> {
-    self.send_bytes(req.as_bytes())
-  }
-
-  fn send_bytes(&self, bytes: &[u8]) -> io::Result<usize> {
-    sendto(&self.fd, bytes, SendFlags::empty(), &self.sa).map_err(Into::into)
-  }
-
   fn sock(&self) -> io::Result<SocketAddrNetlink> {
     getsockname(&self.fd)
       .and_then(|addr| addr.try_into())
       .map_err(Into::into)
+  }
+}
+
+impl DumpSocket for Handle {
+  fn send(&self, bytes: &[u8]) -> io::Result<()> {
+    sendto(&self.fd, bytes, SendFlags::empty(), &self.sa)?;
+    Ok(())
+  }
+
+  fn pid(&self) -> io::Result<u32> {
+    Ok(self.sock()?.pid())
   }
 
   fn recv(&self, dst: &mut [u8]) -> io::Result<usize> {
@@ -271,6 +309,91 @@ fn validate_recv(
     return Err(rustix::io::Errno::INVAL.into());
   }
   Ok(copied)
+}
+
+/// Replays recorded kernel datagrams in place of [`Kernel`].
+///
+/// Every socket it opens reads from one shared queue, so a dump that opens
+/// another socket (the nexthop and per-interface address lookups) or a
+/// retried dump continues with the next unread datagram. Requests are
+/// discarded, and the replies are addressed to the `nlmsg_pid` of the first
+/// message of the first datagram.
+#[cfg(any(test, fuzzing))]
+struct Replay {
+  datagrams: Rc<RefCell<VecDeque<Vec<u8>>>>,
+  pid: u32,
+}
+
+#[cfg(any(test, fuzzing))]
+impl Replay {
+  fn new(datagrams: Vec<Vec<u8>>) -> Self {
+    let pid = datagrams
+      .first()
+      .filter(|datagram| datagram.len() >= NLMSG_HDRLEN)
+      .map_or(0, |datagram| decode_nlmsghdr(datagram).nlmsg_pid);
+    Self {
+      datagrams: Rc::new(RefCell::new(datagrams.into())),
+      pid,
+    }
+  }
+
+  /// Splits fuzz input into datagrams, each prefixed by its length as a
+  /// little-endian `u32`. A truncated final datagram ends the list.
+  fn from_fuzz_input(mut input: &[u8]) -> Self {
+    let mut datagrams = Vec::new();
+    while let Some((len, rest)) = input.split_first_chunk::<4>() {
+      let Some(datagram) = rest.get(..u32::from_le_bytes(*len) as usize) else {
+        break;
+      };
+      datagrams.push(datagram.to_vec());
+      input = &rest[datagram.len()..];
+    }
+    Self::new(datagrams)
+  }
+}
+
+#[cfg(any(test, fuzzing))]
+impl Transport for Replay {
+  type Socket = ReplaySocket;
+
+  fn open(&mut self) -> io::Result<ReplaySocket> {
+    Ok(ReplaySocket {
+      datagrams: Rc::clone(&self.datagrams),
+      pid: self.pid,
+    })
+  }
+}
+
+#[cfg(any(test, fuzzing))]
+struct ReplaySocket {
+  datagrams: Rc<RefCell<VecDeque<Vec<u8>>>>,
+  pid: u32,
+}
+
+#[cfg(any(test, fuzzing))]
+impl DumpSocket for ReplaySocket {
+  fn send(&self, _bytes: &[u8]) -> io::Result<()> {
+    Ok(())
+  }
+
+  fn pid(&self) -> io::Result<u32> {
+    Ok(self.pid)
+  }
+
+  fn recv(&self, dst: &mut [u8]) -> io::Result<usize> {
+    let datagram = self
+      .datagrams
+      .borrow_mut()
+      .pop_front()
+      .ok_or(io::ErrorKind::UnexpectedEof)?;
+    // As with `Handle`, a datagram larger than the buffer is consumed and
+    // reported as `ENOBUFS`.
+    dst
+      .get_mut(..datagram.len())
+      .ok_or(rustix::io::Errno::NOBUFS)?
+      .copy_from_slice(&datagram);
+    Ok(datagram.len())
+  }
 }
 
 enum DumpMessage<'a> {
@@ -434,18 +557,30 @@ fn interface_name_from_attr(data: &[u8]) -> Option<&str> {
 }
 
 pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<TinyVec<Interface>> {
-  retry_interrupted(|| netlink_interface_once(family, ifi))
+  netlink_interface_with(&mut Kernel, family, ifi)
 }
 
-fn netlink_interface_once(family: AddressFamily, ifi: u32) -> io::Result<TinyVec<Interface>> {
-  let handle = Handle::new()?;
+fn netlink_interface_with<T: Transport>(
+  transport: &mut T,
+  family: AddressFamily,
+  ifi: u32,
+) -> io::Result<TinyVec<Interface>> {
+  retry_interrupted(|| netlink_interface_once(transport, family, ifi))
+}
+
+fn netlink_interface_once<T: Transport>(
+  transport: &mut T,
+  family: AddressFamily,
+  ifi: u32,
+) -> io::Result<TinyVec<Interface>> {
+  let handle = transport.open()?;
 
   // Create and send netlink request
   let req = NetlinkRouteRequest::new(RTM_GETLINK as u16, 1, family.as_raw() as u8, ifi);
-  handle.send(&req)?;
+  handle.send(req.as_bytes())?;
 
   // Get socket name
-  let lsa = handle.sock()?;
+  let pid = handle.pid()?;
 
   // Receive and process messages
   let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
@@ -456,7 +591,7 @@ fn netlink_interface_once(family: AddressFamily, ifi: u32) -> io::Result<TinyVec
     let nr = handle.recv(&mut rb)?;
     let mut terminal = false;
 
-    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+    for message in DumpMessages::new(&rb[..nr], 1, pid) {
       let message = message?;
       if terminal {
         continue;
@@ -554,10 +689,25 @@ where
 pub(super) fn netlink_addr_into<N, F>(
   family: AddressFamily,
   ifi: u32,
+  f: F,
+  addrs: &mut SmallVec<N>,
+) -> io::Result<()>
+where
+  N: Net,
+  F: FnMut(&IpAddr) -> bool,
+{
+  netlink_addr_into_with(&mut Kernel, family, ifi, f, addrs)
+}
+
+fn netlink_addr_into_with<T, N, F>(
+  transport: &mut T,
+  family: AddressFamily,
+  ifi: u32,
   mut f: F,
   addrs: &mut SmallVec<N>,
 ) -> io::Result<()>
 where
+  T: Transport,
   N: Net,
   F: FnMut(&IpAddr) -> bool,
 {
@@ -566,28 +716,30 @@ where
   let start = addrs.len();
   retry_interrupted(|| {
     addrs.truncate(start);
-    netlink_addr_into_once(family, ifi, &mut f, &mut *addrs)
+    netlink_addr_into_once(transport, family, ifi, &mut f, &mut *addrs)
   })
 }
 
-fn netlink_addr_into_once<N, F>(
+fn netlink_addr_into_once<T, N, F>(
+  transport: &mut T,
   family: AddressFamily,
   ifi: u32,
   mut f: F,
   addrs: &mut SmallVec<N>,
 ) -> io::Result<()>
 where
+  T: Transport,
   N: Net,
   F: FnMut(&IpAddr) -> bool,
 {
-  let handle = Handle::new()?;
+  let handle = transport.open()?;
 
   // Create and send netlink request
   let req = NetlinkRouteRequest::new(RTM_GETADDR as u16, 1, family.as_raw() as u8, ifi);
-  handle.send(&req)?;
+  handle.send(req.as_bytes())?;
 
   // Get socket name
-  let lsa = handle.sock()?;
+  let pid = handle.pid()?;
 
   // Receive and process messages
   let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
@@ -596,7 +748,7 @@ where
     let nr = handle.recv(&mut rb)?;
     let mut terminal = false;
 
-    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+    for message in DumpMessages::new(&rb[..nr], 1, pid) {
       let message = message?;
       if terminal {
         continue;
@@ -707,19 +859,33 @@ pub fn netlink_best_local_addrs_into<N>(
 where
   N: Net,
 {
-  // A retried dump starts over, so drop what an interrupted attempt appended.
-  let start = out.len();
-  retry_interrupted(|| {
-    out.truncate(start);
-    netlink_best_local_addrs_into_once(family, &mut *out)
-  })
+  netlink_best_local_addrs_into_with(&mut Kernel, family, out)
 }
 
-fn netlink_best_local_addrs_into_once<N>(
+fn netlink_best_local_addrs_into_with<T, N>(
+  transport: &mut T,
   family: AddressFamily,
   out: &mut SmallVec<N>,
 ) -> io::Result<()>
 where
+  T: Transport,
+  N: Net,
+{
+  // A retried dump starts over, so drop what an interrupted attempt appended.
+  let start = out.len();
+  retry_interrupted(|| {
+    out.truncate(start);
+    netlink_best_local_addrs_into_once(transport, family, &mut *out)
+  })
+}
+
+fn netlink_best_local_addrs_into_once<T, N>(
+  transport: &mut T,
+  family: AddressFamily,
+  out: &mut SmallVec<N>,
+) -> io::Result<()>
+where
+  T: Transport,
   N: Net,
 {
   // Lazy nexthop-dump: don't pay the `RTM_GETNEXTHOP` round-trip
@@ -740,15 +906,15 @@ where
   // `table_rank_for` and `pref_rank_for` below.
   let mut deferred_best: Vec<(u8, u32, u8, u32)> = Vec::new();
 
-  let handle = Handle::new()?;
+  let handle = transport.open()?;
 
   let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
-  handle.send(&req)?;
+  handle.send(req.as_bytes())?;
 
   // Snapshot the kernel-assigned address so we can reject any reply
   // that doesn't belong to this socket — same defence the other
   // netlink walkers use.
-  let lsa = handle.sock()?;
+  let pid = handle.pid()?;
 
   // Route walks must accept any single message the kernel emits —
   // see `DUMP_RECV_BUF_SIZE` for why a page is too small here.
@@ -782,7 +948,7 @@ where
     let nr = handle.recv(&mut rb)?;
 
     let mut terminal = false;
-    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+    for message in DumpMessages::new(&rb[..nr], 1, pid) {
       let message = message?;
       if terminal {
         continue;
@@ -1074,7 +1240,7 @@ where
   // selection key; same `<` / `==` lex semantics as the first
   // pass.
   if !deferred_best.is_empty() {
-    let nh_map = dump_nexthops()?;
+    let nh_map = dump_nexthops(transport)?;
     for (rank, metric, pref_rank, id) in deferred_best {
       match resolve_nh_id(&nh_map, id) {
         None => return Err(rustix::io::Errno::INTR.into()),
@@ -1114,7 +1280,7 @@ where
   // syscall failure; partial results stay in `out` (consistent with
   // every other walker that pushes into a sink).
   for idx in best_oifs {
-    netlink_addr_into(family, idx, local_ip_filter, out)?;
+    netlink_addr_into_with(transport, family, idx, local_ip_filter, out)?;
   }
   Ok(())
 }
@@ -1170,14 +1336,16 @@ fn build_nh_dump_request(seq: u32) -> [u8; 24] {
 /// per-family dumps are unsafe (they drop group objects). Used by
 /// `netlink_walk_routes` to resolve routes that arrive with an
 /// `RTA_NH_ID` reference rather than an inline `RTA_OIF` / `RTA_GATEWAY`.
-fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
+fn dump_nexthops<T: Transport>(
+  transport: &mut T,
+) -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
   use std::collections::HashMap;
-  let handle = Handle::new()?;
+  let handle = transport.open()?;
 
   let req = build_nh_dump_request(1);
-  handle.send_bytes(&req)?;
+  handle.send(&req)?;
 
-  let lsa = handle.sock()?;
+  let pid = handle.pid()?;
   // Nexthop dumps can carry deep `NHA_GROUP` payloads (8 bytes per
   // member); see `DUMP_RECV_BUF_SIZE`.
   let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
@@ -1188,7 +1356,7 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
     let nr = handle.recv(&mut rb)?;
     let mut terminal = false;
 
-    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+    for message in DumpMessages::new(&rb[..nr], 1, pid) {
       let message = message?;
       if terminal {
         continue;
@@ -1407,15 +1575,27 @@ fn resolve_nh_id(
 /// attached / link-scope route). All other parsing is the caller's
 /// responsibility — this lets `route_table` / `route_ipv4_table` /
 /// `route_ipv6_table` build different concrete types from the same walk.
-pub(super) fn netlink_walk_routes<F>(family: AddressFamily, mut on_route: F) -> io::Result<()>
+pub(super) fn netlink_walk_routes<F>(family: AddressFamily, on_route: F) -> io::Result<()>
 where
+  F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
+{
+  netlink_walk_routes_with(&mut Kernel, family, on_route)
+}
+
+fn netlink_walk_routes_with<T, F>(
+  transport: &mut T,
+  family: AddressFamily,
+  mut on_route: F,
+) -> io::Result<()>
+where
+  T: Transport,
   F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
 {
   // `on_route` must see each route once, so every attempt buffers its routes
   // and only the attempt that completes is replayed.
   let routes = retry_interrupted(|| {
     let mut routes = Vec::new();
-    netlink_walk_routes_once(family, |fam, oif, dst_len, dst, gw| {
+    netlink_walk_routes_once(transport, family, |fam, oif, dst_len, dst, gw| {
       routes.push((fam, oif, dst_len, dst, gw));
     })?;
     Ok(routes)
@@ -1426,8 +1606,13 @@ where
   Ok(())
 }
 
-fn netlink_walk_routes_once<F>(family: AddressFamily, mut on_route: F) -> io::Result<()>
+fn netlink_walk_routes_once<T, F>(
+  transport: &mut T,
+  family: AddressFamily,
+  mut on_route: F,
+) -> io::Result<()>
 where
+  T: Transport,
   F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
 {
   // Lazy nexthop-dump: we collect every `RTA_NH_ID` route we see
@@ -1446,12 +1631,12 @@ where
   let mut deferred_nh: Vec<(u8, u8, Option<IpAddr>, u32)> = Vec::new();
   let mut family_unavailable = false;
 
-  let handle = Handle::new()?;
+  let handle = transport.open()?;
 
   let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
-  handle.send(&req)?;
+  handle.send(req.as_bytes())?;
 
-  let lsa = handle.sock()?;
+  let pid = handle.pid()?;
   // See `DUMP_RECV_BUF_SIZE`: a page is too small for routes that
   // carry large `RTA_MULTIPATH` ECMP payloads.
   let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
@@ -1460,7 +1645,7 @@ where
     let nr = handle.recv(&mut rb)?;
     let mut terminal = false;
 
-    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+    for message in DumpMessages::new(&rb[..nr], 1, pid) {
       let message = message?;
       if terminal {
         continue;
@@ -1749,7 +1934,7 @@ where
   // present but unusable (blackhole / down) — skip silently.
   // `Some(non-empty)` emits one route per resolved leaf.
   if !deferred_nh.is_empty() {
-    let nh_map = dump_nexthops()?;
+    let nh_map = dump_nexthops(transport)?;
     for (rfamily, dst_len, dst, id) in deferred_nh {
       match resolve_nh_id(&nh_map, id) {
         None => return Err(rustix::io::Errno::INTR.into()),
@@ -1973,23 +2158,40 @@ pub(super) fn rt_generic_addrs<A, F>(
   family: AddressFamily,
   rta: u16,
   rtn: Option<u8>,
-  mut f: F,
+  f: F,
 ) -> io::Result<SmallVec<A>>
 where
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
 {
-  // Every attempt builds a fresh result; `f` can see the same gateway again.
-  retry_interrupted(|| rt_generic_addrs_once(family, rta, rtn, &mut f))
+  rt_generic_addrs_with(&mut Kernel, family, rta, rtn, f)
 }
 
-fn rt_generic_addrs_once<A, F>(
+fn rt_generic_addrs_with<T, A, F>(
+  transport: &mut T,
   family: AddressFamily,
   rta: u16,
   rtn: Option<u8>,
   mut f: F,
 ) -> io::Result<SmallVec<A>>
 where
+  T: Transport,
+  A: Address + Eq,
+  F: FnMut(&IpAddr) -> bool,
+{
+  // Every attempt builds a fresh result; `f` can see the same gateway again.
+  retry_interrupted(|| rt_generic_addrs_once(transport, family, rta, rtn, &mut f))
+}
+
+fn rt_generic_addrs_once<T, A, F>(
+  transport: &mut T,
+  family: AddressFamily,
+  rta: u16,
+  rtn: Option<u8>,
+  mut f: F,
+) -> io::Result<SmallVec<A>>
+where
+  T: Transport,
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
 {
@@ -2002,14 +2204,14 @@ where
   // `deferred_nh` here and resolve in a single post-walk pass.
   let mut deferred_nh: SmallVec<u32> = SmallVec::new();
 
-  let handle = Handle::new()?;
+  let handle = transport.open()?;
 
   // Create and send netlink request for routes
   let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
-  handle.send(&req)?;
+  handle.send(req.as_bytes())?;
 
   // Get socket name
-  let lsa = handle.sock()?;
+  let pid = handle.pid()?;
 
   // Receive and process messages. `rt_generic_addrs` walks routes
   // with `RTA_MULTIPATH` payloads — see `DUMP_RECV_BUF_SIZE`.
@@ -2026,7 +2228,7 @@ where
     let nr = handle.recv(&mut rb)?;
     let mut terminal = false;
 
-    for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+    for message in DumpMessages::new(&rb[..nr], 1, pid) {
       let message = message?;
       if terminal {
         continue;
@@ -2218,7 +2420,7 @@ where
   // Skipping this block when nothing was deferred is the whole
   // point of the lazy-dump optimization.
   if !deferred_nh.is_empty() {
-    let nh_map = dump_nexthops()?;
+    let nh_map = dump_nexthops(transport)?;
     for id in deferred_nh {
       if let Some(resolved) = resolve_nh_id(&nh_map, id) {
         for (oif, maybe_gw) in resolved {
@@ -2482,24 +2684,6 @@ impl IfNetMessageHeader {
   }
 }
 
-#[cfg(any(test, fuzzing))]
-struct NexthopMessageHeader {
-  family: u8,
-}
-
-#[cfg(any(test, fuzzing))]
-impl NexthopMessageHeader {
-  const SIZE: usize = 8;
-
-  #[inline]
-  fn parse(src: &[u8]) -> io::Result<Self> {
-    if src.len() < Self::SIZE {
-      return Err(rustix::io::Errno::INVAL.into());
-    }
-    Ok(Self { family: src[0] })
-  }
-}
-
 #[inline]
 fn decode_nlmsghdr(src: &[u8]) -> MessageHeader {
   let hlen = u32::from_ne_bytes(src[..4].try_into().unwrap());
@@ -2516,109 +2700,27 @@ fn decode_nlmsghdr(src: &[u8]) -> MessageHeader {
   }
 }
 
+/// Runs every netlink dump walker over the datagrams in `data`, each walker
+/// with a replay of its own; see [`Replay::from_fuzz_input`] for the framing.
+///
+/// This hook exists only in cargo-fuzz builds and is not part of the normal
+/// crate API. Walker errors are expected for arbitrary input; the invariant
+/// is that no input may panic or hang.
 #[cfg(fuzzing)]
 #[doc(hidden)]
 pub fn fuzz_netlink_dump(data: &[u8]) {
-  let (seq, pid) = if data.len() >= NLMSG_HDRLEN {
-    let header = decode_nlmsghdr(data);
-    (header.nlmsg_seq, header.nlmsg_pid)
-  } else {
-    (0, 0)
-  };
+  let replay = || Replay::from_fuzz_input(data);
+  let family = AddressFamily::UNSPEC;
 
-  for message in DumpMessages::new(data, seq, pid) {
-    if let Ok(DumpMessage::Message(header, message)) = message {
-      let body = &message[NLMSG_HDRLEN..];
-      let _ = fuzz_message_attributes(header, body, fuzz_rtattrs);
-    }
-  }
-}
-
-#[cfg(any(test, fuzzing))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FuzzMessageKind {
-  Link,
-  Addr(u8),
-  Route(u8),
-  Nexthop(u8),
-}
-
-#[cfg(any(test, fuzzing))]
-fn fuzz_message_attributes<F>(header: MessageHeader, body: &[u8], mut f: F) -> io::Result<()>
-where
-  F: FnMut(FuzzMessageKind, &[u8]),
-{
-  match header.nlmsg_type as u32 {
-    RTM_NEWLINK => {
-      let _ = IfInfoMessageHeader::parse(body)?;
-      f(FuzzMessageKind::Link, &body[IfInfoMessageHeader::SIZE..]);
-    }
-    RTM_NEWADDR => {
-      let ifa = IfNetMessageHeader::parse(body)?;
-      f(
-        FuzzMessageKind::Addr(ifa.family),
-        &body[IfNetMessageHeader::SIZE..],
-      );
-    }
-    RTM_NEWROUTE => {
-      let rtm = RtmMessageHeader::parse(body)?;
-      f(
-        FuzzMessageKind::Route(rtm.rtm_family),
-        &body[RtmMessageHeader::SIZE..],
-      );
-    }
-    RTM_NEWNEXTHOP => {
-      let nh = NexthopMessageHeader::parse(body)?;
-      f(
-        FuzzMessageKind::Nexthop(nh.family),
-        &body[NexthopMessageHeader::SIZE..],
-      );
-    }
-    _ => {}
-  }
-  Ok(())
-}
-
-#[cfg(fuzzing)]
-fn fuzz_rtattrs(kind: FuzzMessageKind, mut data: &[u8]) {
-  while data.len() >= RtAttr::SIZE {
-    let len = u16::from_ne_bytes(data[..2].try_into().unwrap()) as usize;
-    let ty = u16::from_ne_bytes(data[2..4].try_into().unwrap());
-    if len < RtAttr::SIZE || len > data.len() {
-      break;
-    }
-    let payload = &data[RtAttr::SIZE..len];
-    match kind {
-      FuzzMessageKind::Link => match ty as u32 {
-        IFLA_MTU if payload.len() >= 4 => {
-          let _ = u32::from_ne_bytes(payload[..4].try_into().unwrap());
-        }
-        IFLA_IFNAME => {
-          let _ = interface_name_from_attr(payload);
-        }
-        IFLA_ADDRESS => {
-          let _ = mac_addr_from_attr(payload);
-        }
-        _ => {}
-      },
-      FuzzMessageKind::Addr(family) if ty as u32 == IFA_ADDRESS || ty as u32 == IFA_LOCAL => {
-        let _ = parse_rta_ipaddr(family, payload);
-      }
-      FuzzMessageKind::Route(family) if ty == RTA_DST || ty == RTA_GATEWAY => {
-        let _ = parse_rta_ipaddr(family, payload);
-      }
-      FuzzMessageKind::Nexthop(family) if ty == NHA_GATEWAY => {
-        let _ = parse_rta_ipaddr(family, payload);
-      }
-      _ => {}
-    }
-
-    let aligned = rta_align_of(len);
-    if aligned > data.len() {
-      break;
-    }
-    data = &data[aligned..];
-  }
+  let _ = netlink_interface_with(&mut replay(), family, 0);
+  let mut addrs = SmallVec::<crate::IfNet>::new();
+  let _ = netlink_addr_into_with(&mut replay(), family, 0, |_| true, &mut addrs);
+  let mut best = SmallVec::<crate::IfNet>::new();
+  let _ = netlink_best_local_addrs_into_with(&mut replay(), family, &mut best);
+  let _ = dump_nexthops(&mut replay());
+  let _ = netlink_walk_routes_with(&mut replay(), family, |_, _, _, _, _| {});
+  let _: io::Result<SmallVec<crate::IfAddr>> =
+    rt_generic_addrs_with(&mut replay(), family, RTA_GATEWAY, None, |_| true);
 }
 
 #[cfg(test)]
@@ -2661,95 +2763,6 @@ mod netlink_tests {
     attr[2..4].copy_from_slice(&ty.to_ne_bytes());
     attr[RtAttr::SIZE..len].copy_from_slice(payload);
     attr
-  }
-
-  fn assert_fuzz_harness_attributes(
-    ty: u16,
-    header_size: usize,
-    family: Option<u8>,
-    expected_kind: FuzzMessageKind,
-    attr_ty: u16,
-    payload: &[u8],
-  ) {
-    let attrs = rtattr(attr_ty, payload);
-    let mut body = vec![0; header_size];
-    if let Some(family) = family {
-      body[0] = family;
-    }
-    body.extend(&attrs);
-    let header = MessageHeader {
-      nlmsg_len: (NLMSG_HDRLEN + body.len()) as u32,
-      nlmsg_type: ty,
-      nlmsg_flags: 0,
-      nlmsg_seq: TEST_SEQ,
-      nlmsg_pid: TEST_PID,
-    };
-    let mut seen = None;
-    fuzz_message_attributes(header, &body, |kind, attr_data| {
-      seen = Some((kind, attr_data.to_vec()));
-    })
-    .unwrap();
-    assert_eq!(seen, Some((expected_kind, attrs)));
-  }
-
-  #[test]
-  fn fuzz_harness_validates_headers_and_passes_only_attributes() {
-    let inet = AddressFamily::INET.as_raw() as u8;
-    assert_fuzz_harness_attributes(
-      RTM_NEWLINK as u16,
-      IfInfoMessageHeader::SIZE,
-      None,
-      FuzzMessageKind::Link,
-      IFLA_IFNAME as u16,
-      b"x\0",
-    );
-    assert_fuzz_harness_attributes(
-      RTM_NEWADDR as u16,
-      IfNetMessageHeader::SIZE,
-      Some(inet),
-      FuzzMessageKind::Addr(inet),
-      IFA_LOCAL as u16,
-      &[192, 0, 2, 1],
-    );
-    assert_fuzz_harness_attributes(
-      RTM_NEWROUTE as u16,
-      RtmMessageHeader::SIZE,
-      Some(inet),
-      FuzzMessageKind::Route(inet),
-      RTA_GATEWAY,
-      &[192, 0, 2, 1],
-    );
-    assert_fuzz_harness_attributes(
-      RTM_NEWNEXTHOP as u16,
-      NexthopMessageHeader::SIZE,
-      Some(inet),
-      FuzzMessageKind::Nexthop(inet),
-      NHA_GATEWAY,
-      &[192, 0, 2, 1],
-    );
-
-    for (ty, header_size) in [
-      (RTM_NEWLINK as u16, IfInfoMessageHeader::SIZE),
-      (RTM_NEWADDR as u16, IfNetMessageHeader::SIZE),
-      (RTM_NEWROUTE as u16, RtmMessageHeader::SIZE),
-      (RTM_NEWNEXTHOP as u16, NexthopMessageHeader::SIZE),
-    ] {
-      let header = MessageHeader {
-        nlmsg_len: (NLMSG_HDRLEN + header_size - 1) as u32,
-        nlmsg_type: ty,
-        nlmsg_flags: 0,
-        nlmsg_seq: TEST_SEQ,
-        nlmsg_pid: TEST_PID,
-      };
-      let mut called = false;
-      assert!(
-        fuzz_message_attributes(header, &vec![0; header_size - 1], |_, _| {
-          called = true;
-        })
-        .is_err()
-      );
-      assert!(!called);
-    }
   }
 
   #[test]
@@ -2847,6 +2860,150 @@ mod netlink_tests {
     assert_eq!(calls, 1);
   }
 
+  /// An `RTM_NEWLINK` body: an `ifinfomsg` for interface `index` and an
+  /// `IFLA_IFNAME` attribute holding the raw `name` payload.
+  fn link(index: i32, name: &[u8]) -> Vec<u8> {
+    let mut body = vec![0; IfInfoMessageHeader::SIZE];
+    body[4..8].copy_from_slice(&index.to_ne_bytes());
+    body.extend(rtattr(IFLA_IFNAME as u16, name));
+    body
+  }
+
+  /// A one-link dump in a single datagram, with `flags` on the link message.
+  fn link_dump(flags: u16, index: i32, name: &[u8]) -> Vec<u8> {
+    let mut datagram = frame(RTM_NEWLINK as u16, flags, &link(index, name));
+    datagram.extend(frame(NLMSG_DONE as u16, 0, &[]));
+    datagram
+  }
+
+  /// A replay that counts the dumps a walker opens.
+  struct CountingReplay {
+    replay: Replay,
+    opens: usize,
+  }
+
+  impl CountingReplay {
+    fn new(datagrams: Vec<Vec<u8>>) -> Self {
+      Self {
+        replay: Replay::new(datagrams),
+        opens: 0,
+      }
+    }
+  }
+
+  impl Transport for CountingReplay {
+    type Socket = ReplaySocket;
+
+    fn open(&mut self) -> io::Result<ReplaySocket> {
+      self.opens += 1;
+      self.replay.open()
+    }
+  }
+
+  #[test]
+  fn replay_splits_length_prefixed_fuzz_input() {
+    let done = frame(NLMSG_DONE as u16, 0, &[]);
+    let mut input = (done.len() as u32).to_le_bytes().to_vec();
+    input.extend(&done);
+    input.extend(0u32.to_le_bytes());
+    // A truncated final datagram is dropped.
+    input.extend(8u32.to_le_bytes());
+    input.extend([0; 3]);
+
+    let socket = Replay::from_fuzz_input(&input).open().unwrap();
+    assert_eq!(socket.pid().unwrap(), TEST_PID);
+    let mut buf = [0; 64];
+    assert_eq!(socket.recv(&mut buf).unwrap(), done.len());
+    assert_eq!(&buf[..done.len()], done.as_slice());
+    assert_eq!(socket.recv(&mut buf).unwrap(), 0);
+    let err = socket.recv(&mut buf).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+
+    let socket = Replay::new(vec![done]).open().unwrap();
+    let err = socket.recv(&mut [0; NLMSG_HDRLEN - 1]).unwrap_err();
+    assert_eq!(
+      err.raw_os_error(),
+      Some(rustix::io::Errno::NOBUFS.raw_os_error())
+    );
+  }
+
+  // The walker abandons a dump at its flagged message, and the sockets of a
+  // replay share one queue, so the interrupted dump is a single datagram and
+  // the retry starts at the clean dump.
+  #[test]
+  fn interrupted_link_dump_is_retried_on_a_fresh_dump() {
+    let mut transport = CountingReplay::new(vec![
+      link_dump(NLM_F_DUMP_INTR as u16, 1, b"stale0\0"),
+      link_dump(0, 2, b"eth0\0"),
+    ]);
+
+    let interfaces = netlink_interface_with(&mut transport, AddressFamily::UNSPEC, 0).unwrap();
+    let mut expected = Interface::new(2, Flags::empty());
+    expected.name = "eth0".into();
+    assert_eq!(interfaces.as_slice(), &[expected]);
+    assert_eq!(transport.opens, 2);
+  }
+
+  #[test]
+  fn persistently_interrupted_dump_fails_after_three_opens() {
+    let interrupted = || link_dump(NLM_F_DUMP_INTR as u16, 1, b"eth0\0");
+    // A clean dump that only a fourth attempt would reach.
+    let mut transport = CountingReplay::new(vec![
+      interrupted(),
+      interrupted(),
+      interrupted(),
+      link_dump(0, 1, b"eth0\0"),
+    ]);
+
+    let err = netlink_interface_with(&mut transport, AddressFamily::UNSPEC, 0).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+    assert_eq!(transport.opens, MAX_DUMP_ATTEMPTS);
+  }
+
+  #[test]
+  fn link_dump_skips_only_the_link_with_a_non_utf8_name() {
+    let mut dump = frame(RTM_NEWLINK as u16, 0, &link(1, b"\xff\xfe\0"));
+    dump.extend(frame(RTM_NEWLINK as u16, 0, &link(2, b"eth0\0")));
+    dump.extend(frame(NLMSG_DONE as u16, 0, &[]));
+
+    let mut replay = Replay::new(vec![dump]);
+    let interfaces = netlink_interface_with(&mut replay, AddressFamily::UNSPEC, 0).unwrap();
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].index(), 2);
+    assert_eq!(interfaces[0].name(), "eth0");
+  }
+
+  #[test]
+  fn route_dump_reports_a_plain_route_once() {
+    let inet = AddressFamily::INET.as_raw() as u8;
+    // rtmsg: family, dst_len, src_len, tos, table, protocol, scope, type, flags
+    let mut route = vec![inet, 24, 0, 0, RT_TABLE_MAIN as u8, 0, 0, RTN_UNICAST];
+    route.extend(0u32.to_ne_bytes());
+    route.extend(rtattr(RTA_DST, &[198, 51, 100, 0]));
+    route.extend(rtattr(RTA_GATEWAY, &[192, 0, 2, 1]));
+    route.extend(rtattr(RTA_OIF, &3u32.to_ne_bytes()));
+    let mut dump = frame(RTM_NEWROUTE as u16, 0, &route);
+    dump.extend(frame(NLMSG_DONE as u16, 0, &[]));
+
+    let mut routes = Vec::new();
+    netlink_walk_routes_with(
+      &mut Replay::new(vec![dump]),
+      AddressFamily::INET,
+      |family, oif, dst_len, dst, gw| routes.push((family, oif, dst_len, dst, gw)),
+    )
+    .unwrap();
+    assert_eq!(
+      routes,
+      [(
+        inet,
+        3,
+        24,
+        Some(IpAddr::from([198, 51, 100, 0])),
+        Some(IpAddr::from([192, 0, 2, 1])),
+      )]
+    );
+  }
+
   #[test]
   fn done_errno_is_decoded_without_partial_success() {
     assert!(parse_dump(&frame(NLMSG_DONE as u16, 0, &0i32.to_ne_bytes())).is_ok());
@@ -2934,7 +3091,7 @@ mod netlink_tests {
       AddressFamily::UNSPEC.as_raw() as u8,
       0,
     );
-    handle.send(&req).expect("send RTM_GETLINK");
+    handle.send(req.as_bytes()).expect("send RTM_GETLINK");
 
     let after = handle.sock().expect("getsockname after send");
     assert_ne!(
