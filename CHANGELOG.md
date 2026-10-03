@@ -88,6 +88,10 @@
 - Document snapshot, ordering, deduplication, UTF-8-name, flags, value-order,
   and platform-capability contracts in the README. Add deterministic
   Linux/BSD parser fuzz targets and PR, scheduled, and manual CI gates.
+- The BSD fuzz target also drives the production sysctl message walkers for
+  interfaces, addresses, multicast groups, gateways, routes, and best-local
+  route selection, which now parse a buffer separately from fetching it. Miri
+  runs fixtures for each of them under strict provenance.
 
 ## 0.6.2 (October 3rd, 2026)
 

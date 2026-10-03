@@ -747,7 +747,9 @@ pub(super) fn parse_addrs(
   Ok(as_)
 }
 
-/// Exercises the pure BSD wire decoders without performing any syscalls.
+/// Exercises the pure BSD wire decoders and the sysctl message walkers
+/// without performing any syscalls: `data` stands in for both a single
+/// sockaddr and a complete sysctl buffer.
 ///
 /// This hook exists only in cargo-fuzz builds and is not part of the normal
 /// crate API. Decoder errors are expected for arbitrary input; the invariant
@@ -771,6 +773,23 @@ pub(crate) fn fuzz_bsd_parsers(data: &[u8]) {
   let _ = decode_full_inet_addr(AF_INET, data);
   let _ = decode_full_inet_addr(AF_INET6, data);
   rt_generic::fuzz_sockaddr_frame(data);
+
+  // Each walker runs with its most permissive arguments: all interfaces,
+  // all addresses, `AF_UNSPEC` for the gateway walk, and a family-specific
+  // best-local walk, which also accepts a default route without `RTAX_DST`.
+  let _ = parse_interface_table(data);
+  let _ = parse_interface_addr_table_into::<IfNet, _>(data, 0, |_| true, &mut SmallVec::new());
+  #[cfg(any(apple, target_os = "freebsd"))]
+  let _ = parse_multiaddr_table::<super::IfAddr, _>(data, |_| true);
+  let _ = rt_generic::parse_rt_generic_addrs::<super::IfAddr, _>(
+    data,
+    AF_UNSPEC,
+    libc::RTF_GATEWAY,
+    libc::RTA_GATEWAY,
+    |_| true,
+  );
+  let _ = route::parse_route_table(data, |_, _, _, _, _| {});
+  let _ = local_addr::best_route_interfaces(data, AF_INET);
 }
 
 fn fetch(family: i32, rt: i32, flag: i32) -> io::Result<Vec<u8>> {
@@ -832,11 +851,14 @@ fn fetch(family: i32, rt: i32, flag: i32) -> io::Result<Vec<u8>> {
 }
 
 pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
+  parse_interface_table(&fetch(AF_UNSPEC, NET_RT_IFLIST, idx as i32)?)
+}
+
+fn parse_interface_table(buf: &[u8]) -> io::Result<TinyVec<Interface>> {
   unsafe {
-    let buf = fetch(AF_UNSPEC, NET_RT_IFLIST, idx as i32)?;
     let mut results = TinyVec::new();
 
-    let mut src = buf.as_slice();
+    let mut src = buf;
     while src.len() > 4 {
       let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
       if l == 0 {
@@ -927,6 +949,19 @@ where
 pub(super) fn interface_addr_table_into<T, F>(
   family: i32,
   idx: u32,
+  f: F,
+  results: &mut SmallVec<T>,
+) -> io::Result<()>
+where
+  T: Net,
+  F: FnMut(&IpAddr) -> bool,
+{
+  parse_interface_addr_table_into(&fetch(family, NET_RT_IFLIST, idx as i32)?, idx, f, results)
+}
+
+fn parse_interface_addr_table_into<T, F>(
+  buf: &[u8],
+  idx: u32,
   mut f: F,
   results: &mut SmallVec<T>,
 ) -> io::Result<()>
@@ -937,8 +972,7 @@ where
   const HEADER_SIZE: usize = mem::size_of::<ifa_msghdr>();
 
   unsafe {
-    let buf = fetch(family, NET_RT_IFLIST, idx as i32)?;
-    let mut b = buf.as_slice();
+    let mut b = buf;
 
     while b.len() > HEADER_SIZE {
       // SAFETY: u8-aligned sysctl buffer; copy header out before reading fields.
@@ -1033,8 +1067,16 @@ cfg_apple!(
   pub(super) fn interface_multiaddr_table<T, F>(
     family: i32,
     idx: u32,
-    mut f: F,
+    f: F,
   ) -> io::Result<SmallVec<T>>
+  where
+    T: Address,
+    F: FnMut(&IpAddr) -> bool,
+  {
+    parse_multiaddr_table(&fetch(family, NET_RT_IFLIST2, idx as i32)?, f)
+  }
+
+  fn parse_multiaddr_table<T, F>(buf: &[u8], mut f: F) -> io::Result<SmallVec<T>>
   where
     T: Address,
     F: FnMut(&IpAddr) -> bool,
@@ -1042,10 +1084,8 @@ cfg_apple!(
     const HEADER_SIZE: usize = mem::size_of::<libc::ifma_msghdr2>();
 
     unsafe {
-      let buf = fetch(family, NET_RT_IFLIST2, idx as i32)?;
-
       let mut results = SmallVec::new();
-      let mut b = buf.as_slice();
+      let mut b = buf;
 
       while b.len() > HEADER_SIZE {
         // SAFETY: u8-aligned sysctl buffer; copy header out before reading fields.
@@ -1090,20 +1130,30 @@ cfg_apple!(
 pub(super) fn interface_multiaddr_table<T, F>(
   family: i32,
   idx: u32,
-  mut f: F,
+  f: F,
 ) -> io::Result<SmallVec<T>>
 where
   T: Address,
   F: FnMut(&IpAddr) -> bool,
 {
-  use compat::{IfmaMsghdr, NET_RT_IFMALIST};
+  use compat::NET_RT_IFMALIST;
+
+  parse_multiaddr_table(&fetch(family, NET_RT_IFMALIST, idx as i32)?, f)
+}
+
+#[cfg(target_os = "freebsd")]
+fn parse_multiaddr_table<T, F>(buf: &[u8], mut f: F) -> io::Result<SmallVec<T>>
+where
+  T: Address,
+  F: FnMut(&IpAddr) -> bool,
+{
+  use compat::IfmaMsghdr;
 
   const HEADER_SIZE: usize = mem::size_of::<IfmaMsghdr>();
 
   unsafe {
-    let buf = fetch(family, NET_RT_IFMALIST, idx as i32)?;
     let mut results = SmallVec::new();
-    let mut b = buf.as_slice();
+    let mut b = buf;
 
     while b.len() > HEADER_SIZE {
       // SAFETY: u8-aligned sysctl buffer; copy header out before reading fields.
@@ -1284,23 +1334,209 @@ mod tests {
   }
 
   /// The `rtm_addrs`-style bitmask that marks each `RTAX_*` slot present.
-  fn addrs_mask(slots: &[libc::c_int]) -> u32 {
+  pub(super) fn addrs_mask(slots: &[libc::c_int]) -> u32 {
     slots.iter().fold(0, |mask, &slot| mask | 1 << slot)
   }
 
   /// `sa` followed by the alignment padding its `sa_len` (first byte) implies.
-  fn padded_sockaddr(sa: &[u8]) -> Vec<u8> {
+  pub(super) fn padded_sockaddr(sa: &[u8]) -> Vec<u8> {
     let mut padded = sa.to_vec();
     padded.resize(roundup(sa[0] as usize), 0);
     padded
   }
 
-  fn sockaddr_in(ip: Ipv4Addr) -> Vec<u8> {
+  pub(super) fn sockaddr_in(ip: Ipv4Addr) -> Vec<u8> {
     let mut sa = vec![0u8; SOCK4];
     sa[0] = SOCK4 as u8;
     sa[1] = AF_INET as u8;
     sa[4..8].copy_from_slice(&ip.octets());
     padded_sockaddr(&sa)
+  }
+
+  pub(super) fn sockaddr_in6(ip: Ipv6Addr) -> Vec<u8> {
+    let mut sa = vec![0u8; SOCK6];
+    sa[0] = SOCK6 as u8;
+    sa[1] = AF_INET6 as u8;
+    sa[8..24].copy_from_slice(&ip.octets());
+    padded_sockaddr(&sa)
+  }
+
+  /// A routing message: a zeroed `H` header that carries the length,
+  /// version, and type every BSD routing message starts with, then `body`.
+  /// The header layout differs per BSD, so callers set any other field
+  /// through the target's own struct definition.
+  fn routing_message<H>(ty: libc::c_int, body: &[u8]) -> Vec<u8> {
+    let header_size = mem::size_of::<H>();
+    let mut message = vec![0u8; header_size + body.len()];
+    let len = u16::try_from(message.len()).unwrap();
+    message[..2].copy_from_slice(&len.to_ne_bytes());
+    message[2] = RTM_VERSION as u8;
+    message[3] = ty as u8;
+    message[header_size..].copy_from_slice(body);
+    message
+  }
+
+  /// An `RTM_GET` route message whose sockaddrs are `body`.
+  pub(super) fn rt_message(index: u16, flags: libc::c_int, addrs: u32, body: &[u8]) -> Vec<u8> {
+    let mut message = routing_message::<compat::RtMsghdr>(libc::RTM_GET, body);
+    let header = message.as_mut_ptr().cast::<compat::RtMsghdr>();
+    // SAFETY: `message` starts with a whole header, so every field place is
+    // in bounds, and unaligned writes need no alignment from the buffer.
+    unsafe {
+      core::ptr::addr_of_mut!((*header).rtm_index).write_unaligned(index);
+      core::ptr::addr_of_mut!((*header).rtm_flags).write_unaligned(flags);
+      core::ptr::addr_of_mut!((*header).rtm_addrs).write_unaligned(addrs as libc::c_int);
+    }
+    message
+  }
+
+  /// An `RTM_IFINFO` message followed by the interface's link-layer sockaddr.
+  fn ifinfo_message(index: u16, flags: Flags, mtu: u16, name: &str, mac: [u8; 6]) -> Vec<u8> {
+    // sockaddr_dl: sdl_len, sdl_family, sdl_index (2), sdl_type (IFT_ETHER),
+    // sdl_nlen, sdl_alen, sdl_slen, then the name and address in sdl_data.
+    let mut sdl = vec![0, AF_LINK as u8];
+    sdl.extend(index.to_ne_bytes());
+    sdl.extend([6, name.len() as u8, mac.len() as u8, 0]);
+    sdl.extend(name.as_bytes());
+    sdl.extend(mac);
+    sdl[0] = sdl.len() as u8;
+
+    let mut message = routing_message::<if_msghdr>(RTM_IFINFO, &padded_sockaddr(&sdl));
+    let header = message.as_mut_ptr().cast::<if_msghdr>();
+    // SAFETY: as in `rt_message`.
+    unsafe {
+      core::ptr::addr_of_mut!((*header).ifm_flags).write_unaligned(flags.bits() as libc::c_int);
+      core::ptr::addr_of_mut!((*header).ifm_index).write_unaligned(index);
+      core::ptr::addr_of_mut!((*header).ifm_data.ifi_mtu).write_unaligned(mtu.into());
+    }
+    message
+  }
+
+  /// An `RTM_NEWADDR` message whose sockaddrs are `body`.
+  fn newaddr_message(index: u16, addrs: u32, body: &[u8]) -> Vec<u8> {
+    let mut message = routing_message::<ifa_msghdr>(RTM_NEWADDR, body);
+    let header = message.as_mut_ptr().cast::<ifa_msghdr>();
+    // SAFETY: as in `rt_message`.
+    unsafe {
+      core::ptr::addr_of_mut!((*header).ifam_addrs).write_unaligned(addrs as libc::c_int);
+      core::ptr::addr_of_mut!((*header).ifam_index).write_unaligned(index);
+    }
+    message
+  }
+
+  #[test]
+  fn parse_interface_table_decodes_ifinfo_fixture() {
+    let mac = [0x02, 0, 0, 0, 0, 0x01];
+    let mut buf = ifinfo_message(7, Flags::UP | Flags::RUNNING, 1500, "en7", mac);
+    // A message from another routing-socket version is skipped whole.
+    let mut other_version = ifinfo_message(8, Flags::UP, 1500, "en8", mac);
+    other_version[2] = RTM_VERSION as u8 + 1;
+    buf.extend(other_version);
+
+    let interfaces = parse_interface_table(&buf).unwrap();
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].index(), 7);
+    assert_eq!(interfaces[0].name(), "en7");
+    assert_eq!(interfaces[0].mtu(), 1500);
+    assert_eq!(interfaces[0].mac_addr(), Some(MacAddr::from_raw(mac)));
+    assert_eq!(interfaces[0].flags(), Flags::UP | Flags::RUNNING);
+  }
+
+  #[test]
+  fn parse_interface_table_rejects_truncated_fixture() {
+    let message = ifinfo_message(7, Flags::UP, 1500, "en7", [0x02, 0, 0, 0, 0, 0x01]);
+    // The message declares more bytes than the buffer holds.
+    let err = parse_interface_table(&message[..message.len() - 1]).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    // The declared length ends inside the header.
+    let mut short = message.clone();
+    short[..2].copy_from_slice(&8u16.to_ne_bytes());
+    let err = parse_interface_table(&short).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+  }
+
+  #[test]
+  fn parse_interface_addr_table_decodes_newaddr_fixture() {
+    let mut body = padded_sockaddr(&[7, AF_INET as u8, 0, 0, 255, 255, 255]);
+    body.extend(sockaddr_in(Ipv4Addr::new(192, 0, 2, 10)));
+    let buf = newaddr_message(2, addrs_mask(&[RTAX_NETMASK, RTAX_IFA]), &body);
+
+    let mut nets = SmallVec::<IfNet>::new();
+    parse_interface_addr_table_into(&buf, 0, |_| true, &mut nets).unwrap();
+    assert_eq!(nets.len(), 1);
+    assert_eq!(nets[0].index(), 2);
+    assert_eq!(nets[0].addr(), IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+    assert_eq!(nets[0].prefix_len(), 24);
+
+    // Another interface's address and a rejecting filter are both skipped.
+    let mut skipped = SmallVec::<IfNet>::new();
+    parse_interface_addr_table_into(&buf, 3, |_| true, &mut skipped).unwrap();
+    parse_interface_addr_table_into(&buf, 2, |_| false, &mut skipped).unwrap();
+    assert!(skipped.is_empty());
+  }
+
+  #[test]
+  fn parse_interface_addr_table_rejects_truncated_fixture() {
+    let addrs = addrs_mask(&[RTAX_IFA]);
+    let address = sockaddr_in(Ipv4Addr::new(192, 0, 2, 10));
+    let mut nets = SmallVec::<IfNet>::new();
+
+    // The message declares more bytes than the buffer holds.
+    let message = newaddr_message(2, addrs, &address);
+    let truncated = &message[..message.len() - 1];
+    let err = parse_interface_addr_table_into(truncated, 0, |_| true, &mut nets).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    // The address sockaddr runs past the end of its message.
+    let message = newaddr_message(2, addrs, &address[..4]);
+    let err = parse_interface_addr_table_into(&message, 0, |_| true, &mut nets).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    assert!(nets.is_empty());
+  }
+
+  #[cfg(apple)]
+  type MultiaddrHeader = libc::ifma_msghdr2;
+  #[cfg(apple)]
+  const RTM_NEWMULTIADDR: libc::c_int = libc::RTM_NEWMADDR2;
+  #[cfg(target_os = "freebsd")]
+  type MultiaddrHeader = compat::IfmaMsghdr;
+  #[cfg(target_os = "freebsd")]
+  const RTM_NEWMULTIADDR: libc::c_int = libc::RTM_NEWMADDR;
+
+  /// A multicast-membership message whose sockaddrs are `body`.
+  #[cfg(any(apple, target_os = "freebsd"))]
+  fn newmaddr_message(index: u16, addrs: u32, body: &[u8]) -> Vec<u8> {
+    let mut message = routing_message::<MultiaddrHeader>(RTM_NEWMULTIADDR, body);
+    let header = message.as_mut_ptr().cast::<MultiaddrHeader>();
+    // SAFETY: as in `rt_message`.
+    unsafe {
+      core::ptr::addr_of_mut!((*header).ifmam_addrs).write_unaligned(addrs as libc::c_int);
+      core::ptr::addr_of_mut!((*header).ifmam_index).write_unaligned(index);
+    }
+    message
+  }
+
+  #[cfg(any(apple, target_os = "freebsd"))]
+  #[test]
+  fn parse_multiaddr_table_decodes_group_fixture() {
+    let group = Ipv4Addr::new(224, 0, 0, 251);
+    let buf = newmaddr_message(4, addrs_mask(&[RTAX_IFA]), &sockaddr_in(group));
+
+    let groups = parse_multiaddr_table::<IfAddr, _>(&buf, |_| true).unwrap();
+    assert_eq!(groups.as_slice(), &[IfAddr::new(4, IpAddr::V4(group))]);
+    let rejected = parse_multiaddr_table::<IfAddr, _>(&buf, |_| false).unwrap();
+    assert!(rejected.is_empty());
+  }
+
+  #[cfg(any(apple, target_os = "freebsd"))]
+  #[test]
+  fn parse_multiaddr_table_rejects_truncated_fixture() {
+    let group = sockaddr_in(Ipv4Addr::new(224, 0, 0, 251));
+    let message = newmaddr_message(4, addrs_mask(&[RTAX_IFA]), &group);
+    let truncated = &message[..message.len() - 1];
+    let err = parse_multiaddr_table::<IfAddr, _>(truncated, |_| true).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
   }
 
   #[test]

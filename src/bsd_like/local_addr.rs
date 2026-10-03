@@ -86,7 +86,21 @@ fn route_priority(_rtm: &RtMsghdr) -> u8 {
 }
 
 fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result<()> {
-  let routes = fetch(family, NET_RT_DUMP, 0)?;
+  let best_oifs = best_route_interfaces(&fetch(family, NET_RT_DUMP, 0)?, family)?;
+
+  // Fetch addresses for every selected interface, appending into the
+  // caller-provided buffer. Returns immediately on the first syscall
+  // failure; partial results stay in `out` (consistent with Linux's
+  // `netlink_best_local_addrs_into`).
+  for idx in best_oifs {
+    interface_addr_table_into(family, idx as u32, local_ip_filter, out)?;
+  }
+  Ok(())
+}
+
+/// The interfaces of the best usable default routes for `family` in a
+/// `NET_RT_DUMP` buffer, sorted and deduplicated.
+pub(super) fn best_route_interfaces(routes: &[u8], family: i32) -> io::Result<SmallVec<u16>> {
   // Selection key: route priority (lower wins on OpenBSD, all-zero
   // elsewhere). `best_oifs` holds every interface that ties at the
   // current best priority. The previous code keyed on
@@ -101,7 +115,7 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
   let mut best_priority: u8 = u8::MAX;
 
   unsafe {
-    let mut src = routes.as_slice();
+    let mut src = routes;
     while src.len() > 4 {
       let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
       // `l == 0` is the kernel's normal end-of-stream sentinel for
@@ -217,14 +231,7 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
   best_oifs.sort_unstable();
   best_oifs.dedup();
 
-  // Fetch addresses for every selected interface, appending into the
-  // caller-provided buffer. Returns immediately on the first syscall
-  // failure; partial results stay in `out` (consistent with Linux's
-  // `netlink_best_local_addrs_into`).
-  for idx in best_oifs {
-    interface_addr_table_into(family, idx as u32, local_ip_filter, out)?;
-  }
-  Ok(())
+  Ok(best_oifs)
 }
 
 pub(crate) fn local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
@@ -260,4 +267,60 @@ where
   F: FnMut(&IpAddr) -> bool,
 {
   interface_addresses(0, |addr| f(addr) && local_ip_filter(addr))
+}
+
+#[cfg(test)]
+mod tests {
+  use libc::{AF_UNSPEC, RTAX_GATEWAY, RTF_GATEWAY};
+
+  use super::{
+    super::tests::{addrs_mask, rt_message, sockaddr_in},
+    *,
+  };
+
+  /// A route via `index` to `dst`, with no `RTAX_DST` slot when `dst` is
+  /// `None`.
+  fn route(index: u16, flags: libc::c_int, dst: Option<Ipv4Addr>) -> Vec<u8> {
+    let gateway = sockaddr_in(Ipv4Addr::new(192, 0, 2, 1));
+    match dst {
+      Some(dst) => {
+        let mut body = sockaddr_in(dst);
+        body.extend(gateway);
+        rt_message(index, flags, addrs_mask(&[RTAX_DST, RTAX_GATEWAY]), &body)
+      }
+      None => rt_message(index, flags, addrs_mask(&[RTAX_GATEWAY]), &gateway),
+    }
+  }
+
+  #[test]
+  fn selects_every_usable_default_route_interface() {
+    let up = RTF_UP | RTF_GATEWAY;
+    let mut buf = route(3, up, Some(Ipv4Addr::UNSPECIFIED));
+    buf.extend(route(9, up, Some(Ipv4Addr::new(10, 0, 0, 0))));
+    buf.extend(route(2, up, Some(Ipv4Addr::UNSPECIFIED)));
+    buf.extend(route(3, up, Some(Ipv4Addr::UNSPECIFIED)));
+    buf.extend(route(8, up | RTF_BLACKHOLE, Some(Ipv4Addr::UNSPECIFIED)));
+    // A family-specific dump encodes a default route by omitting `RTAX_DST`.
+    buf.extend(route(7, up, None));
+
+    let oifs = best_route_interfaces(&buf, AF_INET).unwrap();
+    assert_eq!(oifs.as_slice(), &[2, 3, 7]);
+    // Without a family, a route with no destination is not a default route.
+    let oifs = best_route_interfaces(&buf, AF_UNSPEC).unwrap();
+    assert_eq!(oifs.as_slice(), &[2, 3]);
+  }
+
+  #[test]
+  fn rejects_truncated_messages() {
+    let message = route(3, RTF_UP, Some(Ipv4Addr::UNSPECIFIED));
+    // The message declares more bytes than the buffer holds.
+    let err = best_route_interfaces(&message[..message.len() - 1], AF_INET).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    // The declared length ends inside the header.
+    let mut short = message.clone();
+    short[..2].copy_from_slice(&8u16.to_ne_bytes());
+    let err = best_route_interfaces(&short, AF_INET).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+  }
 }

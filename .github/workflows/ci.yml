@@ -428,14 +428,12 @@ jobs:
           components: miri
       - name: Prepare Miri
         run: cargo +nightly miri setup
-      - name: Run strict-provenance BSD parser fixtures
+      # Libtest runs the union of these filters. Keep them to tests of pure
+      # parse functions: Miri has no sysctl shim.
+      - name: Run strict-provenance BSD parser and walker fixtures
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
-        run: cargo +nightly miri test --lib os::tests::parse_
-      - name: Run strict-provenance BSD route-sockaddr fixtures
-        env:
-          MIRIFLAGS: -Zmiri-strict-provenance
-        run: cargo +nightly miri test --lib os::rt_generic::tests
+        run: cargo +nightly miri test --lib -- os::tests::parse_ os::rt_generic::tests os::route::tests os::local_addr::tests
 
   release-verification:
     name: Release package verification

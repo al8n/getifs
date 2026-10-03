@@ -60,13 +60,26 @@ pub(super) fn rt_generic_addrs_in<A, F>(
   family: i32,
   rtf: i32,
   rta: i32,
+  f: F,
+) -> io::Result<SmallVec<A>>
+where
+  A: Address + Eq,
+  F: FnMut(&IpAddr) -> bool,
+{
+  parse_rt_generic_addrs(&fetch(family, NET_RT_FLAGS, rtf)?, family, rtf, rta, f)
+}
+
+pub(super) fn parse_rt_generic_addrs<A, F>(
+  buf: &[u8],
+  family: i32,
+  rtf: i32,
+  rta: i32,
   mut f: F,
 ) -> io::Result<SmallVec<A>>
 where
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
 {
-  let buf = fetch(family, NET_RT_FLAGS, rtf)?;
   let mut results = SmallVec::new();
   // The routing table can contain many duplicates (same address
   // reached via different routes). Previously the code used
@@ -74,7 +87,7 @@ where
   // HashSet keyed by `(index, IpAddr)` for O(1) check per candidate.
   let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
   unsafe {
-    let mut src = buf.as_slice();
+    let mut src = buf;
 
     while src.len() > 4 {
       let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
@@ -197,8 +210,76 @@ pub(super) fn fuzz_sockaddr_frame(data: &[u8]) {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use libc::{AF_INET, AF_INET6};
-  use std::net::Ipv6Addr;
+  use libc::{AF_INET, AF_INET6, RTAX_DST, RTAX_GATEWAY, RTA_GATEWAY, RTF_GATEWAY};
+  use std::net::{Ipv4Addr, Ipv6Addr};
+
+  use super::super::tests::{addrs_mask, padded_sockaddr, rt_message, sockaddr_in, sockaddr_in6};
+  use crate::IfAddr;
+
+  fn gateway_route(index: u16, flags: i32, dst: Vec<u8>, gateway: Vec<u8>) -> Vec<u8> {
+    let mut body = dst;
+    body.extend(gateway);
+    rt_message(index, flags, addrs_mask(&[RTAX_DST, RTAX_GATEWAY]), &body)
+  }
+
+  fn gateways(buf: &[u8]) -> io::Result<SmallVec<IfAddr>> {
+    parse_rt_generic_addrs(buf, AF_UNSPEC, RTF_GATEWAY, RTA_GATEWAY, |_| true)
+  }
+
+  #[test]
+  fn gateway_walk_reports_each_up_gateway_once() {
+    let up = RTF_UP | RTF_GATEWAY;
+    let v4_default = || sockaddr_in(Ipv4Addr::UNSPECIFIED);
+    let compact = padded_sockaddr(&[8, AF_INET as u8, 0, 0, 192, 0, 2, 1]);
+    let kame = "fe80:e::1".parse().unwrap();
+
+    let mut buf = gateway_route(4, up, v4_default(), compact);
+    // A gateway route that is not up is not used for forwarding.
+    buf.extend(gateway_route(
+      5,
+      RTF_GATEWAY,
+      v4_default(),
+      sockaddr_in(Ipv4Addr::new(192, 0, 2, 2)),
+    ));
+    // The full-size form of the first gateway on the same interface.
+    buf.extend(gateway_route(
+      4,
+      up,
+      v4_default(),
+      sockaddr_in(Ipv4Addr::new(192, 0, 2, 1)),
+    ));
+    buf.extend(gateway_route(
+      6,
+      up,
+      sockaddr_in6(Ipv6Addr::UNSPECIFIED),
+      sockaddr_in6(kame),
+    ));
+
+    assert_eq!(
+      gateways(&buf).unwrap().as_slice(),
+      &[
+        IfAddr::new(4, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+        IfAddr::new(6, IpAddr::V6("fe80::1".parse().unwrap())),
+      ]
+    );
+  }
+
+  #[test]
+  fn gateway_walk_rejects_truncated_messages() {
+    let up = RTF_UP | RTF_GATEWAY;
+    let dst = sockaddr_in(Ipv4Addr::UNSPECIFIED);
+    let gateway = sockaddr_in(Ipv4Addr::new(192, 0, 2, 1));
+
+    // The message declares more bytes than the buffer holds.
+    let message = gateway_route(4, up, dst.clone(), gateway.clone());
+    let err = gateways(&message[..message.len() - 1]).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    // The gateway sockaddr runs past the end of its message.
+    let message = gateway_route(4, up, dst, gateway[..8].to_vec());
+    let err = gateways(&message).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+  }
 
   #[test]
   fn sockaddr_decode_cannot_borrow_bytes_from_next_frame() {
