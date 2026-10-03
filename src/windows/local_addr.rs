@@ -7,8 +7,9 @@ use smallvec_wrapper::SmallVec;
 
 use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
-  interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses, IfNet, Ifv4Net, Ifv6Net,
-  NO_ERROR,
+  interface_addresses, interface_ipv4_addresses, interface_ipv6_addresses,
+  mib::OwnedMibTable,
+  IfNet, Ifv4Net, Ifv6Net,
 };
 
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
@@ -51,127 +52,93 @@ use windows_sys::Win32::Networking::WinSock::*;
 /// `/0`?" — and applies the same effective-metric tie-break the
 /// kernel uses.
 fn best_default_route_interface(family: u16) -> io::Result<SmallVec<u32>> {
-  // SAFETY: All three calls below allocate kernel-side tables that we
-  // free via `FreeMibTable` in `Drop`. We treat each row through a
-  // `&MIB_IPFORWARD_ROW2` / `&MIB_IPINTERFACE_ROW` reference into the
-  // table's storage; the table lives until the guard drops at end of
-  // scope, so no row reference outlives its backing memory.
-  unsafe {
-    let mut forward_ptr: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
-    let r = GetIpForwardTable2(family, &mut forward_ptr);
-    if r != NO_ERROR {
-      return classify_table_error(r);
-    }
-    struct ForwardGuard(*mut MIB_IPFORWARD_TABLE2);
-    impl Drop for ForwardGuard {
-      fn drop(&mut self) {
-        if !self.0.is_null() {
-          unsafe { FreeMibTable(self.0 as *mut _) };
-        }
-      }
-    }
-    let _g1 = ForwardGuard(forward_ptr);
+  // SAFETY: `GetIpForwardTable2` is an IP Helper table getter.
+  let forward = match unsafe {
+    OwnedMibTable::fetch(|table| GetIpForwardTable2(family, table))
+  } {
+    Ok(table) => table,
+    Err(status) => return classify_table_error(status),
+  };
 
-    // Build (InterfaceIndex -> Metric) for `family` so we can fold
-    // the per-interface metric into each candidate row's effective
-    // metric. Missing rows fall back to 0 — that matches what the
-    // kernel does on interfaces without an explicit metric.
-    let mut iface_ptr: *mut MIB_IPINTERFACE_TABLE = std::ptr::null_mut();
-    let r2 = GetIpInterfaceTable(family, &mut iface_ptr);
-    if r2 != NO_ERROR {
-      return classify_table_error(r2);
-    }
-    struct IfaceGuard(*mut MIB_IPINTERFACE_TABLE);
-    impl Drop for IfaceGuard {
-      fn drop(&mut self) {
-        if !self.0.is_null() {
-          unsafe { FreeMibTable(self.0 as *mut _) };
-        }
-      }
-    }
-    let _g2 = IfaceGuard(iface_ptr);
+  // Build (InterfaceIndex -> Metric) for `family` so we can fold
+  // the per-interface metric into each candidate row's effective
+  // metric. Missing rows fall back to 0 — that matches what the
+  // kernel does on interfaces without an explicit metric.
+  // SAFETY: `GetIpInterfaceTable` is an IP Helper table getter.
+  let interfaces = match unsafe {
+    OwnedMibTable::fetch(|table| GetIpInterfaceTable(family, table))
+  } {
+    Ok(table) => table,
+    Err(status) => return classify_table_error(status),
+  };
 
-    // Per-interface state: `(metric, connected)`. We need both —
-    // metric for effective-route ranking, `Connected` to drop routes
-    // pinned to admin-down / unplugged adapters that the Windows
-    // forwarding table can still hold (a static default for a VPN
-    // interface that's currently disconnected, for example). Without
-    // this filter, such a stale route can win the metric race and
-    // make `best_local_*` return addresses on an interface the
-    // kernel won't use for outbound traffic.
-    let mut iface_state: std::collections::HashMap<u32, (u32, bool)> =
-      std::collections::HashMap::new();
-    if !iface_ptr.is_null() {
-      let it = &*iface_ptr;
-      let rows = core::slice::from_raw_parts(
-        &it.Table as *const _ as *const MIB_IPINTERFACE_ROW,
-        it.NumEntries as usize,
-      );
-      for r in rows {
-        iface_state.insert(r.InterfaceIndex, (r.Metric, r.Connected));
-      }
-    }
-
-    let mut best_eff: u64 = u64::MAX;
-    let mut best_oifs: SmallVec<u32> = SmallVec::new();
-    if !forward_ptr.is_null() {
-      let ft = &*forward_ptr;
-      let rows = core::slice::from_raw_parts(
-        &ft.Table as *const _ as *const MIB_IPFORWARD_ROW2,
-        ft.NumEntries as usize,
-      );
-      for row in rows {
-        if row.DestinationPrefix.PrefixLength != 0 {
-          continue;
-        }
-        if row.ValidLifetime == 0 || row.Loopback {
-          continue;
-        }
-        // Drop candidates whose interface is either absent from the
-        // IP-interface table (kernel state divergence) or marked
-        // `Connected = FALSE` (link down / admin disabled). The
-        // kernel won't use such a route for outbound traffic, so
-        // selecting it here would hand back addresses on an
-        // unusable adapter.
-        let if_m = match iface_state.get(&row.InterfaceIndex) {
-          Some(&(metric, connected)) if connected => metric as u64,
-          _ => continue,
-        };
-        // Effective metric per Microsoft's documented routing model:
-        // the kernel sums route metric + interface metric and picks
-        // the row with the smallest sum. Promote to u64 so the
-        // addition can't wrap on a pathological u32+u32.
-        let eff = row.Metric as u64 + if_m;
-        // Strict-less wins resets the candidate set; an equal eff
-        // extends it (multi-homed Windows hosts can install
-        // equal-cost defaults across two adapters). Same `<` / `==`
-        // shape as the Linux / BSD walkers.
-        if eff < best_eff {
-          best_eff = eff;
-          best_oifs.clear();
-          best_oifs.push(row.InterfaceIndex);
-        } else if eff == best_eff {
-          best_oifs.push(row.InterfaceIndex);
-        }
-      }
-    }
-
-    // Sort + dedup so two route rows that share an interface index
-    // (e.g. one v4 and one v6 default both pinned to the same
-    // adapter, or duplicate kernel rows during a churn window) don't
-    // make us walk the address table twice for the same ifindex.
-    best_oifs.sort_unstable();
-    best_oifs.dedup();
-
-    Ok(best_oifs)
+  // Per-interface state: `(metric, connected)`. We need both —
+  // metric for effective-route ranking, `Connected` to drop routes
+  // pinned to admin-down / unplugged adapters that the Windows
+  // forwarding table can still hold (a static default for a VPN
+  // interface that's currently disconnected, for example). Without
+  // this filter, such a stale route can win the metric race and
+  // make `best_local_*` return addresses on an interface the
+  // kernel won't use for outbound traffic.
+  let mut iface_state: std::collections::HashMap<u32, (u32, bool)> =
+    std::collections::HashMap::new();
+  for r in interfaces.rows() {
+    iface_state.insert(r.InterfaceIndex, (r.Metric, r.Connected));
   }
+
+  let mut best_eff: u64 = u64::MAX;
+  let mut best_oifs: SmallVec<u32> = SmallVec::new();
+  for row in forward.rows() {
+    if row.DestinationPrefix.PrefixLength != 0 {
+      continue;
+    }
+    if row.ValidLifetime == 0 || row.Loopback {
+      continue;
+    }
+    // Drop candidates whose interface is either absent from the
+    // IP-interface table (kernel state divergence) or marked
+    // `Connected = FALSE` (link down / admin disabled). The
+    // kernel won't use such a route for outbound traffic, so
+    // selecting it here would hand back addresses on an
+    // unusable adapter.
+    let if_m = match iface_state.get(&row.InterfaceIndex) {
+      Some(&(metric, connected)) if connected => metric as u64,
+      _ => continue,
+    };
+    // Effective metric per Microsoft's documented routing model:
+    // the kernel sums route metric + interface metric and picks
+    // the row with the smallest sum. Promote to u64 so the
+    // addition can't wrap on a pathological u32+u32.
+    let eff = row.Metric as u64 + if_m;
+    // Strict-less wins resets the candidate set; an equal eff
+    // extends it (multi-homed Windows hosts can install
+    // equal-cost defaults across two adapters). Same `<` / `==`
+    // shape as the Linux / BSD walkers.
+    if eff < best_eff {
+      best_eff = eff;
+      best_oifs.clear();
+      best_oifs.push(row.InterfaceIndex);
+    } else if eff == best_eff {
+      best_oifs.push(row.InterfaceIndex);
+    }
+  }
+
+  // Sort + dedup so two route rows that share an interface index
+  // (e.g. one v4 and one v6 default both pinned to the same
+  // adapter, or duplicate kernel rows during a churn window) don't
+  // make us walk the address table twice for the same ifindex.
+  best_oifs.sort_unstable();
+  best_oifs.dedup();
+
+  Ok(best_oifs)
 }
 
 /// Map a `MIB`-table fetch failure: known "no stack / no entries"
 /// codes collapse to `Ok(empty)`, anything else propagates as the
-/// concrete syscall error. Same whitelist `windows/route.rs` and
-/// `windows/gateway.rs` use so single-stack hosts surface their
-/// populated family instead of `Err`.
+/// concrete syscall error, so single-stack hosts surface their
+/// populated family instead of `Err`. This is a superset of
+/// `mib::forward_table`'s empty-family statuses: it also treats
+/// `ERROR_NETWORK_UNREACHABLE` as empty.
 #[inline]
 fn classify_table_error(code: u32) -> io::Result<SmallVec<u32>> {
   // ERROR_NOT_SUPPORTED (50): IP stack for this family not installed.

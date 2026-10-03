@@ -7,66 +7,10 @@ use smallvec_wrapper::SmallVec;
 use windows_sys::Win32::NetworkManagement::IpHelper::*;
 use windows_sys::Win32::Networking::WinSock::*;
 
-use super::{sockaddr_to_ipaddr, IpRoute, Ipv4Route, Ipv6Route, NO_ERROR};
-
-/// `GetIpForwardTable2` returns this when the requested family has no
-/// route entries (e.g. IPv6 stack present but no IPv6 routes
-/// installed, or a single-stack v4 host). It's the only error code we
-/// treat as "this family is just empty" in the union API; everything
-/// else propagates so allocation/parameter failures aren't masked.
-const ERROR_NOT_FOUND: i32 = 1168;
-// `GetIpForwardTable2` returns `ERROR_NOT_SUPPORTED` (50) when the
-// requested IPv4 / IPv6 stack isn't installed on the host — a v4-only
-// box configured without an IPv6 stack, for example. Per Microsoft
-// docs that's the same "no entries for this family" state we already
-// surface for `ERROR_NOT_FOUND`, just signalled differently. Without
-// this whitelist, `route_ipv6_table()` would return a hard error and
-// the union `route_table()` would lose the populated v4 routes.
-const ERROR_NOT_SUPPORTED: i32 = 50;
-
-/// Owned wrapper around `MIB_IPFORWARD_TABLE2` that frees the table on
-/// drop. `GetIpForwardTable2` allocates the buffer; the caller must
-/// release it with `FreeMibTable`.
-struct ForwardTable {
-  ptr: *const MIB_IPFORWARD_TABLE2,
-}
-
-impl ForwardTable {
-  fn fetch(family: u16) -> io::Result<Self> {
-    let mut ptr = std::ptr::null_mut();
-    let result = unsafe { GetIpForwardTable2(family, &mut ptr) };
-    if result != NO_ERROR {
-      // The `NETIO_STATUS` returned by `GetIpForwardTable2` *is* the
-      // Win32 error code for this call — relying on `last_os_error()`
-      // would read a thread-local that this API doesn't reliably set.
-      // Preserve the actual code so callers can match on
-      // `ERROR_NOT_FOUND` etc.
-      return Err(io::Error::from_raw_os_error(result as i32));
-    }
-    Ok(Self { ptr })
-  }
-
-  fn rows(&self) -> &[MIB_IPFORWARD_ROW2] {
-    if self.ptr.is_null() {
-      return &[];
-    }
-    unsafe {
-      let table = &*self.ptr;
-      core::slice::from_raw_parts(
-        &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
-        table.NumEntries as usize,
-      )
-    }
-  }
-}
-
-impl Drop for ForwardTable {
-  fn drop(&mut self) {
-    if !self.ptr.is_null() {
-      unsafe { FreeMibTable(self.ptr as *mut _) };
-    }
-  }
-}
+use super::{
+  mib::{forward_table, OwnedMibTable},
+  sockaddr_to_ipaddr, IpRoute, Ipv4Route, Ipv6Route,
+};
 
 /// Compute the set of directed-broadcast IPv4 addresses for every
 /// locally-configured unicast prefix on this host, keyed by
@@ -104,22 +48,19 @@ impl Drop for ForwardTable {
 /// than propagating — the cost is at worst a handful of extra
 /// directed-broadcast rows leaking through, vs. the alternative of
 /// turning a real syscall hiccup into an empty `route_table`.
-unsafe fn directed_broadcast_set() -> HashSet<(u32, Ipv4Addr)> {
+fn directed_broadcast_set() -> HashSet<(u32, Ipv4Addr)> {
   let mut out: HashSet<(u32, Ipv4Addr)> = HashSet::new();
-  let mut ptr: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
-  if GetUnicastIpAddressTable(AF_INET, &mut ptr) != NO_ERROR {
-    return out;
-  }
-  if ptr.is_null() {
-    return out;
-  }
-  let table = &*ptr;
-  let rows = core::slice::from_raw_parts(
-    &table.Table as *const _ as *const MIB_UNICASTIPADDRESS_ROW,
-    table.NumEntries as usize,
-  );
-  for r in rows {
-    if r.Address.si_family != AF_INET {
+  // SAFETY: `GetUnicastIpAddressTable` is an IP Helper table getter.
+  let table = match unsafe {
+    OwnedMibTable::fetch(|table| GetUnicastIpAddressTable(AF_INET, table))
+  } {
+    Ok(table) => table,
+    Err(_) => return out,
+  };
+  for r in table.rows() {
+    // SAFETY: `Address` is a `SOCKADDR_INET` union, and `si_family`
+    // overlays the family field that every member starts with.
+    if unsafe { r.Address.si_family } != AF_INET {
       continue;
     }
     let prefix = r.OnLinkPrefixLength;
@@ -131,10 +72,11 @@ unsafe fn directed_broadcast_set() -> HashSet<(u32, Ipv4Addr)> {
     if prefix == 0 || prefix >= 31 {
       continue;
     }
-    let v4 = r.Address.Ipv4;
     // `sin_addr.S_un.S_addr` is in network byte order; libc/windows
     // exposes it as a u32 — convert via `to_ne_bytes` then `from`.
-    let raw = v4.sin_addr.S_un.S_addr;
+    // SAFETY: `si_family` is AF_INET, so `Ipv4` is the active member, and
+    // every member of the `S_un` union is a view of the same four bytes.
+    let raw = unsafe { r.Address.Ipv4.sin_addr.S_un.S_addr };
     let bytes = raw.to_ne_bytes();
     let addr = Ipv4Addr::from(bytes);
     let host_mask: u32 = !((!0u32) << (32 - prefix));
@@ -142,7 +84,6 @@ unsafe fn directed_broadcast_set() -> HashSet<(u32, Ipv4Addr)> {
     let broadcast = Ipv4Addr::from(addr_u32 | host_mask);
     out.insert((r.InterfaceIndex, broadcast));
   }
-  FreeMibTable(ptr as *mut _);
   out
 }
 
@@ -240,47 +181,18 @@ fn build_routev6(row: &MIB_IPFORWARD_ROW2) -> Option<Ipv6Route> {
   Some(Ipv6Route::new(row.InterfaceIndex, net, gw))
 }
 
-/// `Ok(Some(table))` for a populated family, `Ok(None)` for "no
-/// entries for this family" (kernel returned `ERROR_NOT_FOUND` —
-/// stack present but empty — or `ERROR_NOT_SUPPORTED` — stack absent
-/// entirely, e.g. an IPv6-disabled host). `Err(_)` for any other
-/// failure (allocation, invalid parameter, etc.) — those propagate so
-/// the union API can't silently turn genuine syscall failures into
-/// empty results.
-fn fetch_family(family: u16) -> io::Result<Option<ForwardTable>> {
-  match ForwardTable::fetch(family) {
-    Ok(table) => Ok(Some(table)),
-    Err(e)
-      if matches!(
-        e.raw_os_error(),
-        Some(ERROR_NOT_FOUND) | Some(ERROR_NOT_SUPPORTED)
-      ) =>
-    {
-      Ok(None)
-    }
-    Err(e) => Err(e),
-  }
-}
-
 pub(crate) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<IpRoute>>
 where
   F: FnMut(&IpRoute) -> bool,
 {
   let mut out: SmallVec<IpRoute> = SmallVec::new();
 
-  // Fetch each family independently. Suppress *only* `ERROR_NOT_FOUND`
-  // (interpreted as "this family has no routes installed", e.g. on a
-  // single-stack host) so the union API can return whichever family
-  // is populated. Any other Win32 error — allocation failure, invalid
-  // parameter, network-stack issue — propagates with its actual code,
-  // so callers reasoning about connectivity can distinguish "no
-  // routes" from "the table syscall failed."
-  if let Some(table_v4) = fetch_family(AF_INET)? {
-    // SAFETY: `directed_broadcast_set` is unsafe because it calls the
-    // raw Windows table API; we contain that here so each
-    // `build_routev4` call can do an O(1) hashset lookup against the
-    // resulting set. v6 doesn't need this (no broadcast concept).
-    let broadcasts = unsafe { directed_broadcast_set() };
+  // Fetch each family independently so the union API returns whichever
+  // family is populated; see `forward_table` for which statuses count as
+  // an empty family. The directed-broadcast set lets each `build_routev4`
+  // call do an O(1) lookup; v6 has no broadcast concept.
+  if let Some(table_v4) = forward_table(AF_INET)? {
+    let broadcasts = directed_broadcast_set();
     for row in table_v4.rows() {
       if let Some(r) = build_routev4(row, &broadcasts) {
         let r = IpRoute::V4(r);
@@ -290,7 +202,7 @@ where
       }
     }
   }
-  if let Some(table_v6) = fetch_family(AF_INET6)? {
+  if let Some(table_v6) = forward_table(AF_INET6)? {
     for row in table_v6.rows() {
       if let Some(r) = build_routev6(row) {
         let r = IpRoute::V6(r);
@@ -307,14 +219,12 @@ pub(crate) fn route_ipv4_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ipv
 where
   F: FnMut(&Ipv4Route) -> bool,
 {
-  // Use `fetch_family` rather than `ForwardTable::fetch` directly so
-  // `ERROR_NOT_FOUND` (the kernel's "this family has no route entries"
-  // signal — common on a single-stack host) maps to an empty
-  // `SmallVec` rather than `Err`. Real syscall failures still
-  // propagate.
+  // `forward_table` maps an empty or absent IPv4 stack (common on a
+  // single-stack host) to an empty result rather than `Err`. Real
+  // syscall failures still propagate.
   let mut out: SmallVec<Ipv4Route> = SmallVec::new();
-  if let Some(table) = fetch_family(AF_INET)? {
-    let broadcasts = unsafe { directed_broadcast_set() };
+  if let Some(table) = forward_table(AF_INET)? {
+    let broadcasts = directed_broadcast_set();
     for row in table.rows() {
       if let Some(r) = build_routev4(row, &broadcasts) {
         if f(&r) {
@@ -333,7 +243,7 @@ where
   // Same rationale as `route_ipv4_table_by_filter`: empty IPv6 route
   // table on a v4-only host is `Ok([])`, not `Err(ERROR_NOT_FOUND)`.
   let mut out: SmallVec<Ipv6Route> = SmallVec::new();
-  if let Some(table) = fetch_family(AF_INET6)? {
+  if let Some(table) = forward_table(AF_INET6)? {
     for row in table.rows() {
       if let Some(r) = build_routev6(row) {
         if f(&r) {

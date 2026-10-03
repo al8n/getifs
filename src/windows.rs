@@ -30,6 +30,9 @@ mod gateway;
 #[path = "windows/route.rs"]
 mod route;
 
+#[path = "windows/mib.rs"]
+mod mib;
+
 bitflags::bitflags! {
   /// Flags represents the interface flags.
   #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
