@@ -11,8 +11,13 @@ use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
 use super::{os, IfNet, Ifv4Net, Ifv6Net};
 
 /// Returns all IPv4 addresses that are part of [RFC
-/// 6890] (regardless of whether or not there is a default route, unlike
+/// 6890] and not in its forwarding blacklist (regardless of whether or not
+/// there is a default route, unlike
 /// [`public_ipv4_addrs`](super::public_ipv4_addrs)).
+///
+/// This historic private classification is not limited to RFC 1918: it also
+/// includes forwardable special-purpose ranges such as CGNAT and IPv6 ULA,
+/// while excluding documentation, loopback, and link-local ranges.
 ///
 /// See also [`private_ipv4_addrs_by_filter`].
 ///
@@ -39,7 +44,8 @@ pub fn private_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 }
 
 /// Returns all IPv6 addresses that are part of [RFC
-/// 6890] (regardless of whether or not there is a default route, unlike
+/// 6890] and not in its forwarding blacklist (regardless of whether or not
+/// there is a default route, unlike
 /// [`public_ipv6_addrs`](super::public_ipv6_addrs)).
 ///
 /// See also [`private_ipv6_addrs_by_filter`].
@@ -67,8 +73,12 @@ pub fn private_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 }
 
 /// Returns all IP addresses that are part of [RFC
-/// 6890] (regardless of whether or not there is a default route, unlike
+/// 6890] and not in its forwarding blacklist (regardless of whether or not
+/// there is a default route, unlike
 /// [`public_addrs`](super::public_addrs)).
+///
+/// Returned [`IfNet`] values retain their local interface index through
+/// [`IfNet::index`].
 ///
 /// See also [`private_addrs_by_filter`].
 ///
@@ -95,7 +105,8 @@ pub fn private_addrs() -> io::Result<SmallVec<IfNet>> {
 }
 
 /// Returns all IPv4 addresses that are part of [RFC
-/// 6890] (regardless of whether or not there is a default route, unlike
+/// 6890] and not in its forwarding blacklist (regardless of whether or not
+/// there is a default route, unlike
 /// [`public_ipv4_addrs_by_filter`](super::public_ipv4_addrs_by_filter)).
 ///
 /// Use the provided filter to further refine the results.
@@ -130,7 +141,8 @@ where
 }
 
 /// Returns all IPv6 addresses that are part of [RFC
-/// 6890] (regardless of whether or not there is a default route, unlike
+/// 6890] and not in its forwarding blacklist (regardless of whether or not
+/// there is a default route, unlike
 /// [`public_ipv6_addrs_by_filter`](super::public_ipv6_addrs_by_filter)).
 ///
 /// Use the provided filter to further refine the results.
@@ -165,7 +177,8 @@ where
 }
 
 /// Returns all IP addresses that are part of [RFC
-/// 6890] (regardless of whether or not there is a default route, unlike
+/// 6890] and not in its forwarding blacklist (regardless of whether or not
+/// there is a default route, unlike
 /// [`public_addrs_by_filter`](super::public_addrs_by_filter)).
 ///
 /// Use the provided filter to further refine the results.
@@ -199,4 +212,32 @@ where
 #[inline]
 fn private_ip_filter(ip: &IpAddr) -> bool {
   RFC6890.contains(ip) && !FORWARDING_BLACKLIST.contains(ip)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn private_filter_preserves_rfc6890_special_purpose_contract() {
+    for (addr, expected) in [
+      ("2001:4860:4860::8888", false),
+      ("192.0.2.1", false),
+      ("2001:db8::1", false),
+      ("10.0.0.1", true),
+      ("100.64.0.1", true),
+      ("fd00::1", true),
+      ("127.0.0.1", false),
+      ("::1", false),
+      ("169.254.1.1", false),
+      ("fe80::1", false),
+    ] {
+      let ip = addr.parse::<IpAddr>().unwrap();
+      assert_eq!(
+        private_ip_filter(&ip),
+        expected,
+        "unexpected private classification for {addr}"
+      );
+    }
+  }
 }

@@ -363,6 +363,18 @@ pub(super) struct IfaMsghdr {
   pub ifam_metric: libc::c_int,
 }
 
+#[cfg(target_os = "dragonfly")]
+const _: () = assert!(core::mem::size_of::<IfaMsghdr>() == 20);
+#[cfg(target_os = "dragonfly")]
+const _: () = {
+  use core::mem::offset_of;
+  assert!(offset_of!(IfaMsghdr, ifam_msglen) == 0);
+  assert!(offset_of!(IfaMsghdr, ifam_addrs) == 4);
+  assert!(offset_of!(IfaMsghdr, ifam_flags) == 8);
+  assert!(offset_of!(IfaMsghdr, ifam_index) == 12);
+  assert!(offset_of!(IfaMsghdr, ifam_metric) == 16);
+};
+
 // NetBSD `<net/if.h>` (modern — NetBSD 8+):
 //
 //     struct ifa_msghdr {
@@ -380,7 +392,7 @@ pub(super) struct IfaMsghdr {
 // The 2-byte gap after `ifam_index` is implicit C alignment for the
 // following `int`.
 #[cfg(target_os = "netbsd")]
-#[repr(C)]
+#[repr(C, align(8))]
 pub(super) struct IfaMsghdr {
   pub ifam_msglen: u16,
   pub ifam_version: u8,
@@ -393,6 +405,26 @@ pub(super) struct IfaMsghdr {
   pub ifam_addrflags: libc::c_int,
   pub ifam_metric: libc::c_int,
 }
+
+// NetBSD applies `__aligned(sizeof(uint64_t))` to `ifam_msglen` in
+// `<net/if.h>`. Because that field starts at offset zero, the observable
+// effect is an 8-byte-aligned, 32-byte structure (the fields themselves end
+// at byte 28). The trailing four bytes are part of the header, not the first
+// sockaddr. Getting this size wrong shifts every RTM_NEWADDR sockaddr and can
+// also make the caller read a header across a message boundary.
+#[cfg(target_os = "netbsd")]
+const _: () = assert!(core::mem::size_of::<IfaMsghdr>() == 32);
+#[cfg(target_os = "netbsd")]
+const _: () = {
+  use core::mem::offset_of;
+  assert!(offset_of!(IfaMsghdr, ifam_msglen) == 0);
+  assert!(offset_of!(IfaMsghdr, ifam_index) == 4);
+  assert!(offset_of!(IfaMsghdr, ifam_flags) == 8);
+  assert!(offset_of!(IfaMsghdr, ifam_addrs) == 12);
+  assert!(offset_of!(IfaMsghdr, ifam_pid) == 16);
+  assert!(offset_of!(IfaMsghdr, ifam_addrflags) == 20);
+  assert!(offset_of!(IfaMsghdr, ifam_metric) == 24);
+};
 
 // OpenBSD `<net/if.h>`:
 //
@@ -424,3 +456,16 @@ pub(super) struct IfaMsghdr {
   pub ifam_flags: libc::c_int,
   pub ifam_metric: libc::c_int,
 }
+
+#[cfg(target_os = "openbsd")]
+const _: () = assert!(core::mem::size_of::<IfaMsghdr>() == 24);
+#[cfg(target_os = "openbsd")]
+const _: () = {
+  use core::mem::offset_of;
+  assert!(offset_of!(IfaMsghdr, ifam_msglen) == 0);
+  assert!(offset_of!(IfaMsghdr, ifam_hdrlen) == 4);
+  assert!(offset_of!(IfaMsghdr, ifam_index) == 6);
+  assert!(offset_of!(IfaMsghdr, ifam_addrs) == 12);
+  assert!(offset_of!(IfaMsghdr, ifam_flags) == 16);
+  assert!(offset_of!(IfaMsghdr, ifam_metric) == 20);
+};

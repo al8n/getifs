@@ -53,51 +53,70 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
     .map_err(Into::into)
 }
 
+#[cfg(windows)]
+fn raw_interface_name(idx: u32) -> Option<SmolStr> {
+  use windows_sys::Win32::NetworkManagement::{IpHelper::if_indextoname, Ndis::IF_MAX_STRING_SIZE};
+
+  let mut name_buf = [0u8; IF_MAX_STRING_SIZE as usize + 1];
+  // SAFETY: the output buffer is larger than the documented maximum
+  // interface name and remains alive while its contents are parsed.
+  let result = unsafe { if_indextoname(idx, name_buf.as_mut_ptr()) };
+  if result.is_null() {
+    return None;
+  }
+
+  std::ffi::CStr::from_bytes_until_nul(&name_buf)
+    .ok()?
+    .to_str()
+    .ok()
+    .filter(|name| !name.is_empty())
+    .map(SmolStr::new)
+}
+
+#[cfg(windows)]
+#[inline]
+fn win32_status_error(status: u32) -> io::Error {
+  io::Error::from_raw_os_error(status as i32)
+}
+
 /// Returns the name of the interface by the given index.
 #[cfg(windows)]
 fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
-  use std::ffi::CStr;
+  use windows_sys::Win32::Foundation::NO_ERROR;
   use windows_sys::Win32::NetworkManagement::{
     IpHelper::{ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias},
-    Ndis::NET_LUID_LH,
+    Ndis::{IF_MAX_STRING_SIZE, NET_LUID_LH},
   };
 
   let mut luid = NET_LUID_LH { Value: 0 };
 
-  // Convert index to LUID
+  // Convert index to LUID. ConvertInterface* returns the error code
+  // directly and does not promise to update the thread's last error.
   let result = unsafe { ConvertInterfaceIndexToLuid(idx, &mut luid) };
-  if result != 0 {
-    return Err(io::Error::last_os_error());
+  if result != NO_ERROR {
+    return Err(win32_status_error(result));
   }
 
-  // Get alias (friendly name)
-  let mut name_buf = [0u16; 256]; // IF_MAX_STRING_SIZE + 1
+  // The documented maximum excludes the terminating NUL.
+  let mut name_buf = [0u16; IF_MAX_STRING_SIZE as usize + 1];
   let result = unsafe { ConvertInterfaceLuidToAlias(&luid, name_buf.as_mut_ptr(), name_buf.len()) };
-  if result != 0 {
-    return Err(io::Error::last_os_error());
+  if result == NO_ERROR {
+    if let Some(name) = crate::utils::friendly_name(&name_buf) {
+      return Ok(name);
+    }
+
+    return raw_interface_name(idx).ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Windows returned an invalid interface alias and no raw name",
+      )
+    });
   }
 
-  // Convert to string
-  match crate::utils::friendly_name(name_buf.as_mut_ptr()) {
-    Some(name) => Ok(name),
-    None => {
-      // Last-ditch fallback via `if_indextoname`. Guard against a null
-      // return — feeding that straight into `CStr::from_ptr` is UB.
-      let mut name_buf = [0u8; 256];
-      // SAFETY: `if_indextoname` writes into `name_buf` (≥ IF_NAMESIZE)
-      // and returns either a pointer into that buffer or null.
-      let hname = unsafe {
-        windows_sys::Win32::NetworkManagement::IpHelper::if_indextoname(idx, name_buf.as_mut_ptr())
-      };
-      if hname.is_null() {
-        return Err(io::Error::last_os_error());
-      }
-      // SAFETY: non-null `hname` points into `name_buf`, which is
-      // alive for the duration of this call and holds a NUL-terminated
-      // C string produced by `if_indextoname`.
-      unsafe { Ok(CStr::from_ptr(hname as _).to_string_lossy().into()) }
-    }
-  }
+  // `if_indextoname` deliberately exposes no error code. If that fallback
+  // also fails, preserve the actionable ConvertInterface status rather than
+  // reading unrelated last-error state.
+  raw_interface_name(idx).ok_or_else(|| win32_status_error(result))
 }
 
 #[cfg(test)]
@@ -125,5 +144,11 @@ mod tests {
     let first = ift.iter().next().unwrap();
     let name = ifindex_to_name(first.index()).unwrap();
     assert_eq!(first.name(), &name);
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn win32_status_error_preserves_the_returned_code() {
+    assert_eq!(win32_status_error(87).raw_os_error(), Some(87));
   }
 }

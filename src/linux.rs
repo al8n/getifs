@@ -22,6 +22,9 @@ pub(super) use local_addr::*;
 #[path = "linux/netlink.rs"]
 mod netlink;
 
+#[cfg(fuzzing)]
+pub(crate) use netlink::fuzz_netlink_dump;
+
 #[path = "linux/local_addr.rs"]
 mod local_addr;
 
@@ -237,7 +240,7 @@ impl Interface {
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.
-  #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+  #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub struct Flags: u32 {
     /// Interface is administratively up
     const UP = 0x1;
@@ -263,13 +266,13 @@ bitflags::bitflags! {
     const MASTER = 0x400;
     /// Can't hear own transmissions
     const SLAVE = 0x800;
-    /// Per link layer defined bit
+    /// Supports multicast access capability
     const MULTICAST = 0x1000;
     /// Per link layer defined bit
     const PORTSEL = 0x2000;
     /// Per link layer defined bit
     const AUTOMEDIA = 0x4000;
-    /// Supports multicast access capability
+    /// Dialup device with changing addresses
     const DYNAMIC = 0x8000;
   }
 }
@@ -518,6 +521,12 @@ mod tests {
   // Live tarpaulin runs only exercise the success arm; these unit
   // tests fill in the wrong-family / out-of-range / absent-dst
   // branches.
+
+  #[test]
+  fn flags_retain_unknown_bits() {
+    let unknown = 1 << 31;
+    assert_eq!(Flags::from_bits_retain(unknown).bits(), unknown);
+  }
 
   #[test]
   fn route_v4_from_raw_rejects_oversize_prefix() {

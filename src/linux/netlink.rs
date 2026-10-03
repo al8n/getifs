@@ -1,10 +1,10 @@
 use linux_raw_sys::{
-  if_arp::{self, ARPHRD_IPGRE, ARPHRD_TUNNEL, ARPHRD_TUNNEL6},
+  if_arp,
   netlink::{self, NLM_F_DUMP, NLM_F_DUMP_INTR, NLM_F_REQUEST},
 };
 use rustix::net::{
-  getsockname, netlink::SocketAddrNetlink, recvfrom, sendto, socket, AddressFamily, RecvFlags,
-  SendFlags, SocketType,
+  getsockname, netlink::SocketAddrNetlink, recvfrom, sendto, socket_with, AddressFamily, RecvFlags,
+  SendFlags, SocketFlags, SocketType,
 };
 
 use smallvec_wrapper::{SmallVec, TinyVec};
@@ -18,6 +18,7 @@ const NLMSG_HDRLEN: usize = mem::size_of::<MessageHeader>();
 const NLMSG_ALIGNTO: u32 = netlink::NLMSG_ALIGNTO;
 const NLMSG_DONE: u32 = netlink::NLMSG_DONE;
 const NLMSG_ERROR: u32 = netlink::NLMSG_ERROR;
+const NLMSG_OVERRUN: u32 = netlink::NLMSG_OVERRUN;
 
 const RTM_GETLINK: u32 = netlink::RTM_GETLINK as u32;
 const RTM_GETADDR: u32 = netlink::RTM_GETADDR as u32;
@@ -207,7 +208,12 @@ impl Handle {
     // portid either way, and every entry point sends before calling
     // getsockname(), so the portid is set before the nlmsg_pid filter reads
     // it.
-    let sock = socket(AddressFamily::NETLINK, SocketType::RAW, None)?;
+    let sock = socket_with(
+      AddressFamily::NETLINK,
+      SocketType::RAW,
+      SocketFlags::CLOEXEC,
+      None,
+    )?;
     let sa = SocketAddrNetlink::new(0, 0);
     Ok(Self { fd: sock, sa })
   }
@@ -227,14 +233,135 @@ impl Handle {
   }
 
   unsafe fn recv(&self, dst: &mut [u8]) -> io::Result<usize> {
-    let (nr, _, _) = recvfrom(&self.fd, dst, RecvFlags::empty())?;
+    let (copied, actual, sender) = recvfrom(&self.fd, &mut *dst, RecvFlags::TRUNC)?;
+    if actual > dst.len() {
+      return Err(rustix::io::Errno::NOBUFS.into());
+    }
+    let sender = sender
+      .ok_or(rustix::io::Errno::INVAL)?
+      .try_into()
+      .map_err(|_| rustix::io::Errno::INVAL)?;
 
-    if nr < NLMSG_HDRLEN {
-      return Err(rustix::io::Errno::INVAL.into());
+    validate_recv(copied, actual, dst.len(), sender)
+  }
+}
+
+#[inline]
+fn validate_recv(
+  copied: usize,
+  actual: usize,
+  capacity: usize,
+  sender: SocketAddrNetlink,
+) -> io::Result<usize> {
+  if actual > capacity {
+    return Err(rustix::io::Errno::NOBUFS.into());
+  }
+  if copied != actual || copied < NLMSG_HDRLEN {
+    return Err(rustix::io::Errno::INVAL.into());
+  }
+  if sender.pid() != 0 || sender.groups() != 0 {
+    return Err(rustix::io::Errno::INVAL.into());
+  }
+  Ok(copied)
+}
+
+enum DumpMessage<'a> {
+  Message(MessageHeader, &'a [u8]),
+  Error(NlmsgErrOutcome),
+  Done,
+}
+
+/// Iterates one complete netlink datagram after validating the framing and
+/// dump-wide control messages common to every dump walker.
+struct DumpMessages<'a> {
+  received: &'a [u8],
+  seq: u32,
+  pid: u32,
+}
+
+impl<'a> DumpMessages<'a> {
+  #[inline]
+  fn new(received: &'a [u8], seq: u32, pid: u32) -> Self {
+    Self { received, seq, pid }
+  }
+}
+
+impl<'a> Iterator for DumpMessages<'a> {
+  type Item = io::Result<DumpMessage<'a>>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    if self.received.is_empty() {
+      return None;
+    }
+    if self.received.len() < NLMSG_HDRLEN {
+      self.received = &[];
+      return Some(Err(rustix::io::Errno::INVAL.into()));
     }
 
-    Ok(nr)
+    let header = decode_nlmsghdr(self.received);
+    let len = header.nlmsg_len as usize;
+    let aligned_len = match nlm_align_of(len) {
+      Some(len) => len,
+      None => {
+        self.received = &[];
+        return Some(Err(rustix::io::Errno::INVAL.into()));
+      }
+    };
+    if len < NLMSG_HDRLEN
+      || aligned_len < len
+      || aligned_len > self.received.len()
+      || header.nlmsg_seq != self.seq
+      || header.nlmsg_pid != self.pid
+    {
+      self.received = &[];
+      return Some(Err(rustix::io::Errno::INVAL.into()));
+    }
+
+    let message = &self.received[..len];
+    self.received = &self.received[aligned_len..];
+
+    if header.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
+      return Some(Err(rustix::io::Errno::INTR.into()));
+    }
+    if header.nlmsg_type as u32 == NLMSG_OVERRUN {
+      return Some(Err(rustix::io::Errno::NOBUFS.into()));
+    }
+    if header.nlmsg_type as u32 == NLMSG_ERROR {
+      return Some(decode_nlmsgerr(message, len).map(DumpMessage::Error));
+    }
+    if header.nlmsg_type as u32 == NLMSG_DONE {
+      return Some(decode_nlmsg_done(&message[NLMSG_HDRLEN..]).map(|()| DumpMessage::Done));
+    }
+
+    Some(Ok(DumpMessage::Message(header, message)))
   }
+}
+
+fn decode_nlmsg_done(body: &[u8]) -> io::Result<()> {
+  if body.is_empty() {
+    return Ok(());
+  }
+  if body.len() < mem::size_of::<i32>() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "truncated NLMSG_DONE error",
+    ));
+  }
+
+  let error = i32::from_ne_bytes(body[..mem::size_of::<i32>()].try_into().unwrap());
+  if error == 0 {
+    return Ok(());
+  }
+  let raw = error
+    .checked_neg()
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid NLMSG_DONE error"))?;
+  if raw <= 0 {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "invalid NLMSG_DONE error",
+    ));
+  }
+  Err(io::Error::from_raw_os_error(raw))
 }
 
 /// Receive-buffer size for route / nexthop dumps.
@@ -243,16 +370,34 @@ impl Handle {
 /// hosts with large ECMP `RTA_MULTIPATH` lists or `RTM_NEWNEXTHOP`
 /// dumps with deep `NHA_GROUP` payloads (8 bytes per member). The
 /// per-interface and per-address walks stay on a page (their messages
-/// are small and bounded), but route walks must accept any single
-/// message the kernel produces — the OS truncates oversize messages
-/// silently, surfacing later as `nlmsg_len > nr` → spurious
-/// `EINVAL` aborting the whole walk.
+/// are small and bounded), but route walks must handle any single
+/// message the kernel produces. `Handle::recv` uses `MSG_TRUNC` and
+/// returns `ENOBUFS` when this buffer is too small rather than parsing
+/// a partial message.
 ///
 /// `iproute2` uses 32 KiB for the same dumps; matching that gives
 /// plenty of headroom for ECMP across dozens of nexthops without
 /// resorting to the more invasive `recvmsg` + `MSG_TRUNC` retry
 /// pattern.
 const ROUTE_RECV_BUF_SIZE: usize = 32 * 1024;
+
+#[inline]
+fn mac_addr_from_attr(data: &[u8]) -> Option<MacAddr> {
+  let bytes: [u8; MAC_ADDRESS_SIZE] = data.try_into().ok()?;
+  bytes
+    .iter()
+    .any(|&byte| byte != 0)
+    .then(|| MacAddr::from_raw(bytes))
+}
+
+#[inline]
+fn interface_name_from_attr(data: &[u8]) -> Option<&str> {
+  let nul = data
+    .iter()
+    .position(|&byte| byte == 0)
+    .unwrap_or(data.len());
+  std::str::from_utf8(&data[..nul]).ok()
+}
 
 pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<TinyVec<Interface>> {
   unsafe {
@@ -271,148 +416,86 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
 
     let mut interfaces = TinyVec::new();
 
-    'outer: loop {
+    loop {
       let nr = handle.recv(&mut rb)?;
+      let mut terminal = false;
 
-      let mut received = &rb[..nr];
-
-      while received.len() >= NLMSG_HDRLEN {
-        let h = decode_nlmsghdr(received);
-        let hlen = h.nlmsg_len as usize;
-        let l = nlm_align_of(hlen);
-        if hlen < NLMSG_HDRLEN || l > received.len() {
-          return Err(rustix::io::Errno::INVAL.into());
+      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+        let message = message?;
+        if terminal {
+          continue;
         }
-
-        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.pid() {
-          return Err(rustix::io::Errno::INVAL.into());
-        }
-
-        // Bound the per-message slice to `hlen` rather than the rest
-        // of the recv buffer. Netlink dumps routinely pack multiple
-        // messages into one recv() and an unbounded slice would let
-        // the attribute walker run past the current message into the
-        // next message's header — corrupting fields or returning
-        // EINVAL on healthy kernel output.
-        let msg_buf = &received[NLMSG_HDRLEN..hlen];
-
-        match h.nlmsg_type as u32 {
-          NLMSG_DONE => {
-            // A dump the kernel marked interrupted (NLM_F_DUMP_INTR) may be
-            // missing entries because the link table changed mid-walk;
-            // returning a partial snapshot as success would be a silent
-            // wrong answer. Surface EINTR so the caller can retry, matching
-            // the route walkers.
-            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
-              return Err(rustix::io::Errno::INTR.into());
-            }
-            break 'outer;
+        match message {
+          DumpMessage::Done => {
+            terminal = true;
           }
-          // Decode the errno instead of flattening every NLMSG_ERROR to
-          // EINVAL: a denial delivered in-band (e.g. RTM_GETLINK ->
-          // -EACCES/-EPERM for Android's untrusted_app) must surface as
-          // PermissionDenied so the ioctl fallback in
-          // `super::interface_table` can engage. Mirrors the route walkers.
-          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
-            NlmsgErrOutcome::Ack => {
-              received = &received[l..];
-              continue;
+          DumpMessage::Error(NlmsgErrOutcome::Ack) => {}
+          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => terminal = true,
+          DumpMessage::Message(h, message) => match h.nlmsg_type as u32 {
+            val if val == RTM_NEWLINK => {
+              // Bound the per-message slice to the netlink message rather than
+              // the rest of the datagram. Netlink dumps routinely pack multiple
+              // messages into one receive.
+              let msg_buf = &message[NLMSG_HDRLEN..];
+              let info_hdr = IfInfoMessageHeader::parse(msg_buf)?;
+              let mut info_data = &msg_buf[IfInfoMessageHeader::SIZE..];
+              if ifi != 0 && ifi != info_hdr.index as u32 {
+                continue;
+              }
+
+              let mut interface = Interface::new(
+                info_hdr.index as u32,
+                Flags::from_bits_retain(info_hdr.flags),
+              );
+              let mut invalid_name = false;
+              while info_data.len() >= RtAttr::SIZE {
+                let attr = RtAttr {
+                  len: u16::from_ne_bytes(info_data[..2].try_into().unwrap()),
+                  ty: u16::from_ne_bytes(info_data[2..4].try_into().unwrap()),
+                };
+                let attrlen = attr.len as usize;
+                if attrlen < RtAttr::SIZE || attrlen > info_data.len() {
+                  return Err(rustix::io::Errno::INVAL.into());
+                }
+
+                // Payload excludes the header and excludes any trailing
+                // padding (the padding is counted by `alen` for iterator
+                // advance but is not part of the attribute value).
+                let data = &info_data[RtAttr::SIZE..attrlen];
+                // Aligned length is used to walk to the next attribute,
+                // but must not be allowed to exceed the buffer — a
+                // malformed last attribute could otherwise make the
+                // slice below panic.
+                let alen = rta_align_of(attrlen).min(info_data.len());
+
+                match attr.ty as u32 {
+                  IFLA_MTU if data.len() >= 4 => {
+                    interface.mtu = u32::from_ne_bytes(data[..4].try_into().unwrap());
+                  }
+                  IFLA_IFNAME => {
+                    // Kernel-emitted IFLA_IFNAME is null-terminated, but bound
+                    // the read to this attribute in case of malformed input.
+                    match interface_name_from_attr(data) {
+                      Some(name) => interface.name = name.into(),
+                      None => invalid_name = true,
+                    }
+                  }
+                  IFLA_ADDRESS => interface.mac_addr = mac_addr_from_attr(data),
+                  _ => {}
+                }
+
+                info_data = &info_data[alen..];
+              }
+              if !invalid_name {
+                interfaces.push(interface);
+              }
             }
-            NlmsgErrOutcome::FamilyUnavailable => break 'outer,
+            _ => {}
           },
-          val if val == RTM_NEWLINK => {
-            let info_hdr = IfInfoMessageHeader::parse(msg_buf)?;
-            let mut info_data = &msg_buf[IfInfoMessageHeader::SIZE..];
-            if ifi != 0 && ifi != info_hdr.index as u32 {
-              // move forward
-              received = &received[l..];
-              continue;
-            }
-
-            let mut interface = Interface::new(
-              info_hdr.index as u32,
-              Flags::from_bits_truncate(info_hdr.flags),
-            );
-            while info_data.len() >= RtAttr::SIZE {
-              let attr = RtAttr {
-                len: u16::from_ne_bytes(info_data[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(info_data[2..4].try_into().unwrap()),
-              };
-              let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > info_data.len() {
-                return Err(rustix::io::Errno::INVAL.into());
-              }
-
-              // Payload excludes the header and excludes any trailing
-              // padding (the padding is counted by `alen` for iterator
-              // advance but is not part of the attribute value).
-              let data = &info_data[RtAttr::SIZE..attrlen];
-              // Aligned length is used to walk to the next attribute,
-              // but must not be allowed to exceed the buffer — a
-              // malformed last attribute could otherwise make the
-              // slice below panic.
-              let alen = rta_align_of(attrlen).min(info_data.len());
-
-              match attr.ty as u32 {
-                IFLA_MTU if data.len() >= 4 => {
-                  interface.mtu = u32::from_ne_bytes(data[..4].try_into().unwrap());
-                }
-                IFLA_IFNAME => {
-                  // Kernel-emitted IFLA_IFNAME is null-terminated, but
-                  // we still bound the read to `data` in case of a
-                  // malformed message (avoids UB from `CStr::from_ptr`
-                  // scanning past the attribute). Use the lossy UTF-8
-                  // conversion — matching the pre-refactor
-                  // `CStr::to_string_lossy` behaviour — so an interface
-                  // with non-UTF8 bytes surfaces as a replacement-char
-                  // string rather than silently becoming empty and
-                  // colliding with other nameless interfaces.
-                  let nul = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-                  interface.name = String::from_utf8_lossy(&data[..nul]).as_ref().into();
-                }
-                IFLA_ADDRESS => match data.len() {
-                  // We never return any /32 or /128 IP address
-                  // prefix on any IP tunnel interface as the
-                  // hardware address.
-                  // ipv4
-                  4 if info_hdr.ty == ARPHRD_IPGRE as u16
-                    || info_hdr.ty == ARPHRD_TUNNEL as u16 =>
-                  {
-                    info_data = &info_data[alen..];
-                    continue;
-                  }
-                  // ipv6
-                  16 if info_hdr.ty == ARPHRD_TUNNEL6 as u16 || info_hdr.ty == 823 => {
-                    info_data = &info_data[alen..];
-                    continue;
-                  } // 823 is any over GRE over IPv6 tunneling
-                  _ => {
-                    let mut nonzero = false;
-                    for b in data {
-                      if *b != 0 {
-                        nonzero = true;
-                        break;
-                      }
-                    }
-                    if nonzero {
-                      let mut buf = [0; MAC_ADDRESS_SIZE];
-                      let len = data.len().min(MAC_ADDRESS_SIZE);
-                      buf[..len].copy_from_slice(&data[..len]);
-                      interface.mac_addr = Some(MacAddr::from_raw(buf));
-                    }
-                  }
-                },
-                _ => {}
-              }
-
-              info_data = &info_data[alen..];
-            }
-            interfaces.push(interface);
-          }
-          _ => {}
         }
-
-        received = &received[l..];
+      }
+      if terminal {
+        break;
       }
     }
 
@@ -457,120 +540,96 @@ where
     let page_size = rustix::param::page_size();
     let mut rb = vec![0u8; page_size];
 
-    'outer: loop {
+    loop {
       let nr = handle.recv(&mut rb)?;
-      let mut received = &rb[..nr];
+      let mut terminal = false;
 
-      // means auto choose interface for addr fetching
-      while received.len() >= NLMSG_HDRLEN {
-        let h = decode_nlmsghdr(received);
-        let hlen = h.nlmsg_len as usize;
-        let l = nlm_align_of(hlen);
-        if hlen < NLMSG_HDRLEN || l > received.len() {
-          return Err(rustix::io::Errno::INVAL.into());
+      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+        let message = message?;
+        if terminal {
+          continue;
         }
+        match message {
+          DumpMessage::Done => terminal = true,
+          DumpMessage::Error(NlmsgErrOutcome::Ack) => {}
+          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => terminal = true,
+          DumpMessage::Message(h, message) => match h.nlmsg_type as u32 {
+            val if val == RTM_NEWADDR => {
+              // See `netlink_interface` for why this is bounded to the
+              // current message rather than the rest of the datagram.
+              let msg_buf = &message[NLMSG_HDRLEN..];
+              let ifam = IfNetMessageHeader::parse(msg_buf)?;
+              let mut ifa_msg_data = &msg_buf[IfNetMessageHeader::SIZE..];
+              let mut point_to_point = false;
+              let mut attrs = SmallVec::new();
+              while ifa_msg_data.len() >= RtAttr::SIZE {
+                let attr = RtAttr {
+                  len: u16::from_ne_bytes(ifa_msg_data[..2].try_into().unwrap()),
+                  ty: u16::from_ne_bytes(ifa_msg_data[2..4].try_into().unwrap()),
+                };
+                let attrlen = attr.len as usize;
+                if attrlen < RtAttr::SIZE || attrlen > ifa_msg_data.len() {
+                  return Err(rustix::io::Errno::INVAL.into());
+                }
+                // `data` excludes trailing padding; `alen` (aligned) is
+                // used only to advance to the next attribute, and is
+                // clamped so a malformed last attribute cannot panic.
+                let data = &ifa_msg_data[RtAttr::SIZE..attrlen];
+                let alen = rta_align_of(attrlen).min(ifa_msg_data.len());
 
-        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.pid() {
-          return Err(rustix::io::Errno::INVAL.into());
-        }
+                if ifi == 0 || ifi == ifam.index {
+                  attrs.push((attr, data));
+                }
+                ifa_msg_data = &ifa_msg_data[alen..];
+              }
 
-        // See `netlink_interface` for why this is bounded to `hlen`.
-        let msg_buf = &received[NLMSG_HDRLEN..hlen];
+              for (attr, _) in attrs.iter() {
+                if attr.ty == IFA_LOCAL as u16 {
+                  point_to_point = true;
+                  break;
+                }
+              }
 
-        match h.nlmsg_type as u32 {
-          NLMSG_DONE => {
-            // A dump the kernel marked interrupted (NLM_F_DUMP_INTR) may be
-            // missing addresses because the table changed mid-walk (DHCP /
-            // VPN / interface flap). The Android interface fallback derives
-            // its interface list from this dump, so a partial-but-`Ok`
-            // result would silently drop interfaces. Surface EINTR so the
-            // caller can retry, matching the route walkers.
-            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
-              return Err(rustix::io::Errno::INTR.into());
+              for (attr, data) in attrs.iter() {
+                if point_to_point && attr.ty == IFA_ADDRESS as u16 {
+                  continue;
+                }
+
+                match AddressFamily::from_raw(ifam.family as u16) {
+                  AddressFamily::INET if data.len() >= 4 => {
+                    let ip: [u8; 4] = data[..4].try_into().unwrap();
+                    if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
+                      if let Some(addr) =
+                        N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
+                          f(addr)
+                        })
+                      {
+                        addrs.push(addr);
+                      }
+                    }
+                  }
+                  AddressFamily::INET6 if data.len() >= 16 => {
+                    let ip: [u8; 16] = data[..16].try_into().unwrap();
+                    if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
+                      if let Some(addr) =
+                        N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
+                          f(addr)
+                        })
+                      {
+                        addrs.push(addr);
+                      }
+                    }
+                  }
+                  _ => {}
+                }
+              }
             }
-            break 'outer;
-          }
-          // Decode the errno rather than flattening to EINVAL, mirroring the
-          // route walkers — a real error (e.g. EACCES/EPERM) propagates with
-          // its `ErrorKind` intact instead of becoming InvalidInput.
-          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
-            NlmsgErrOutcome::Ack => {
-              received = &received[l..];
-              continue;
-            }
-            NlmsgErrOutcome::FamilyUnavailable => break 'outer,
+            _ => {}
           },
-          val if val == RTM_NEWADDR => {
-            let ifam = IfNetMessageHeader::parse(msg_buf)?;
-            let mut ifa_msg_data = &msg_buf[IfNetMessageHeader::SIZE..];
-            let mut point_to_point = false;
-            let mut attrs = SmallVec::new();
-            while ifa_msg_data.len() >= RtAttr::SIZE {
-              let attr = RtAttr {
-                len: u16::from_ne_bytes(ifa_msg_data[..2].try_into().unwrap()),
-                ty: u16::from_ne_bytes(ifa_msg_data[2..4].try_into().unwrap()),
-              };
-              let attrlen = attr.len as usize;
-              if attrlen < RtAttr::SIZE || attrlen > ifa_msg_data.len() {
-                return Err(rustix::io::Errno::INVAL.into());
-              }
-              // `data` excludes trailing padding; `alen` (aligned) is
-              // used only to advance to the next attribute, and is
-              // clamped so a malformed last attribute cannot panic.
-              let data = &ifa_msg_data[RtAttr::SIZE..attrlen];
-              let alen = rta_align_of(attrlen).min(ifa_msg_data.len());
-
-              if ifi == 0 || ifi == ifam.index {
-                attrs.push((attr, data));
-              }
-              ifa_msg_data = &ifa_msg_data[alen..];
-            }
-
-            for (attr, _) in attrs.iter() {
-              if attr.ty == IFA_LOCAL as u16 {
-                point_to_point = true;
-                break;
-              }
-            }
-
-            for (attr, data) in attrs.iter() {
-              if point_to_point && attr.ty == IFA_ADDRESS as u16 {
-                continue;
-              }
-
-              match AddressFamily::from_raw(ifam.family as u16) {
-                AddressFamily::INET if data.len() >= 4 => {
-                  let ip: [u8; 4] = data[..4].try_into().unwrap();
-                  if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
-                    if let Some(addr) =
-                      N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
-                        f(addr)
-                      })
-                    {
-                      addrs.push(addr);
-                    }
-                  }
-                }
-                AddressFamily::INET6 if data.len() >= 16 => {
-                  let ip: [u8; 16] = data[..16].try_into().unwrap();
-                  if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
-                    if let Some(addr) =
-                      N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| {
-                        f(addr)
-                      })
-                    {
-                      addrs.push(addr);
-                    }
-                  }
-                }
-                _ => {}
-              }
-            }
-          }
-          _ => {}
         }
-
-        received = &received[l..];
+      }
+      if terminal {
+        break;
       }
     }
 
@@ -652,51 +711,33 @@ where
     // `u8::MAX` is the "no candidate yet" sentinel; any real route
     // will produce a strictly smaller value.
     let mut best_pref_rank: u8 = u8::MAX;
+    let mut family_unavailable = false;
 
-    'outer: loop {
+    loop {
       let nr = handle.recv(&mut rb)?;
 
-      let mut received = &rb[..nr];
-
-      while received.len() >= NLMSG_HDRLEN {
-        let h = decode_nlmsghdr(received);
-        let hlen = h.nlmsg_len as usize;
-        let l = nlm_align_of(hlen);
-
-        // Validate the message length before slicing on `hlen` /
-        // advancing by `l`. Without these guards a malformed
-        // `RTM_NEWROUTE` would either panic the slice below or — if
-        // `l == 0` — keep the inner loop from advancing forever.
-        if hlen < NLMSG_HDRLEN || l > received.len() {
-          return Err(rustix::io::Errno::INVAL.into());
+      let mut terminal = false;
+      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+        let message = message?;
+        if terminal {
+          continue;
         }
-        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.pid() {
-          return Err(rustix::io::Errno::INVAL.into());
-        }
+        let (h, received) = match message {
+          DumpMessage::Done => {
+            terminal = true;
+            continue;
+          }
+          DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
+          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
+            family_unavailable = true;
+            terminal = true;
+            continue;
+          }
+          DumpMessage::Message(h, message) => (h, message),
+        };
+        let hlen = received.len();
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => {
-            // Mirror `netlink_walk_routes`: surface EINTR if the
-            // dump was interrupted by routing-table churn (DHCP /
-            // VPN / interface flap mid-walk). Selecting a best
-            // interface from a partial snapshot would be a silent
-            // wrong answer; EINTR lets the caller retry.
-            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
-              return Err(rustix::io::Errno::INTR.into());
-            }
-            break 'outer;
-          }
-          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
-            NlmsgErrOutcome::Ack => {
-              received = &received[l..];
-              continue;
-            }
-            // No stack for this family — surface as "no best route"
-            // instead of `Err`. Lets `best_local_addrs()` keep the
-            // populated v4 result on a v6-disabled host (and vice
-            // versa).
-            NlmsgErrOutcome::FamilyUnavailable => return Ok(()),
-          },
           val if val == RTM_NEWROUTE => {
             // See `netlink_interface` for why this is bounded to `hlen`.
             let rtm = &received[NLMSG_HDRLEN..hlen];
@@ -717,11 +758,9 @@ where
             // RTA_TABLE override (for table id > 255) and RTA_SRC are
             // applied after the attribute walk below.
             if rtm_header.rtm_type != RTN_UNICAST && rtm_header.rtm_type != RTN_LOCAL {
-              received = &received[l..];
               continue;
             }
             if rtm_header.rtm_tos != 0 || rtm_header.rtm_src_len != 0 {
-              received = &received[l..];
               continue;
             }
 
@@ -747,7 +786,6 @@ where
             // around `RTNH_F_DEAD` etc.) cover the "is it deliverable"
             // question without mis-applying a BSD flag bit.
             if rtm_header.rtm_dst_len != 0 {
-              received = &received[l..];
               continue;
             }
 
@@ -873,7 +911,6 @@ where
                 && table_id != RT_TABLE_LOCAL
                 && table_id != RT_TABLE_DEFAULT)
             {
-              received = &received[l..];
               continue;
             }
 
@@ -907,7 +944,6 @@ where
                 let rank = table_rank_for(table_id);
                 let pref_rank = pref_rank_for(current_pref);
                 deferred_best.push((rank, metric, pref_rank, id));
-                received = &received[l..];
                 continue;
               }
             }
@@ -950,9 +986,14 @@ where
           }
           _ => {}
         }
-
-        received = &received[l..];
       }
+      if terminal {
+        break;
+      }
+    }
+
+    if family_unavailable {
+      return Ok(());
     }
 
     // Resolve any deferred `RTA_NH_ID` default-route references in a
@@ -1081,43 +1122,30 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
 
     let mut map: HashMap<u32, NexthopInfo> = HashMap::new();
 
-    'outer: loop {
+    loop {
       let nr = handle.recv(&mut rb)?;
-      let mut received = &rb[..nr];
+      let mut terminal = false;
 
-      while received.len() >= NLMSG_HDRLEN {
-        let h = decode_nlmsghdr(received);
-        let hlen = h.nlmsg_len as usize;
-        let l = nlm_align_of(hlen);
-        if hlen < NLMSG_HDRLEN || l > received.len() {
-          return Err(rustix::io::Errno::INVAL.into());
+      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+        let message = message?;
+        if terminal {
+          continue;
         }
-        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.pid() {
-          return Err(rustix::io::Errno::INVAL.into());
-        }
+        let (h, received) = match message {
+          DumpMessage::Done => {
+            terminal = true;
+            continue;
+          }
+          DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
+          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
+            terminal = true;
+            continue;
+          }
+          DumpMessage::Message(h, message) => (h, message),
+        };
+        let hlen = received.len();
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => {
-            // The kernel sets `NLM_F_DUMP_INTR` on the closing
-            // NLMSG_DONE if the routing/nexthop table changed during
-            // the dump (e.g. an interface flap or a DHCP renewal mid-
-            // walk). Treating an interrupted snapshot as complete
-            // would silently return missing entries.
-            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
-              return Err(rustix::io::Errno::INTR.into());
-            }
-            break 'outer;
-          }
-          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
-            NlmsgErrOutcome::Ack => {
-              received = &received[l..];
-              continue;
-            }
-            // Pre-5.3 kernels without the nexthop subsystem return
-            // EOPNOTSUPP / EPROTONOSUPPORT here; we surface those as
-            // an empty map so the route walker can proceed.
-            NlmsgErrOutcome::FamilyUnavailable => return Ok(map),
-          },
           val if val == RTM_NEWNEXTHOP => {
             // nhmsg occupies the first 8 bytes after the netlink
             // header: family (u8), scope (u8), protocol (u8), resvd
@@ -1128,7 +1156,6 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
             // route pointing at a downed nexthop would be reported as
             // live by `route_table()`.
             if hlen < NLMSG_HDRLEN + 8 {
-              received = &received[l..];
               continue;
             }
             let nh_family = received[NLMSG_HDRLEN];
@@ -1240,8 +1267,9 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
           }
           _ => {}
         }
-
-        received = &received[l..];
+      }
+      if terminal {
+        break;
       }
     }
 
@@ -1337,6 +1365,7 @@ where
     // Same pattern `rt_generic_addrs` (the gateway walker) already
     // uses; matching it here keeps the two paths consistent.
     let mut deferred_nh: Vec<(u8, u8, Option<IpAddr>, u32)> = Vec::new();
+    let mut family_unavailable = false;
 
     let handle = Handle::new()?;
 
@@ -1348,47 +1377,31 @@ where
     // carry large `RTA_MULTIPATH` ECMP payloads.
     let mut rb = vec![0u8; ROUTE_RECV_BUF_SIZE];
 
-    'outer: loop {
+    loop {
       let nr = handle.recv(&mut rb)?;
-      let mut received = &rb[..nr];
+      let mut terminal = false;
 
-      while received.len() >= NLMSG_HDRLEN {
-        let h = decode_nlmsghdr(received);
-        let hlen = h.nlmsg_len as usize;
-        let l = nlm_align_of(hlen);
-        if hlen < NLMSG_HDRLEN || l > received.len() {
-          return Err(rustix::io::Errno::INVAL.into());
+      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+        let message = message?;
+        if terminal {
+          continue;
         }
-        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.pid() {
-          return Err(rustix::io::Errno::INVAL.into());
-        }
+        let (h, received) = match message {
+          DumpMessage::Done => {
+            terminal = true;
+            continue;
+          }
+          DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
+          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
+            family_unavailable = true;
+            terminal = true;
+            continue;
+          }
+          DumpMessage::Message(h, message) => (h, message),
+        };
+        let hlen = received.len();
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => {
-            // The kernel marks the closing NLMSG_DONE with
-            // `NLM_F_DUMP_INTR` if the routing table changed during
-            // the dump (DHCP renewal, VPN connect/disconnect, an
-            // interface flap, container start, etc.). The snapshot
-            // we accumulated is silently incomplete in that case —
-            // surface as EINTR rather than treat it as success and
-            // hand back a half-walked table.
-            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
-              return Err(rustix::io::Errno::INTR.into());
-            }
-            break 'outer;
-          }
-          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
-            NlmsgErrOutcome::Ack => {
-              received = &received[l..];
-              continue;
-            }
-            // The requested family has no stack — surface as "no
-            // routes" so callers of `route_ipv6_table()` on a
-            // v4-only host get `Ok([])` instead of `Err`, and the
-            // union `route_table()` keeps whichever family is
-            // populated.
-            NlmsgErrOutcome::FamilyUnavailable => return Ok(()),
-          },
           val if val == RTM_NEWROUTE => {
             // Bound the per-message slice to `hlen` rather than the
             // rest of the recv buffer. Netlink dumps routinely pack
@@ -1407,7 +1420,6 @@ where
             // nat, etc. don't have a usable single (oif, gw) tuple,
             // and emitting them as if they did would mislead callers.
             if rtm_header.rtm_type != RTN_UNICAST && rtm_header.rtm_type != RTN_LOCAL {
-              received = &received[l..];
               continue;
             }
 
@@ -1421,7 +1433,6 @@ where
             // attribute walk below — flagged via `has_src_constraint`
             // and applied before the final on_route call).
             if rtm_header.rtm_src_len != 0 {
-              received = &received[l..];
               continue;
             }
 
@@ -1430,7 +1441,6 @@ where
             // would make a TOS-conditional route look usable for any
             // traffic. `IpRoute` has no TOS field, so skip.
             if rtm_header.rtm_tos != 0 {
-              received = &received[l..];
               continue;
             }
 
@@ -1553,7 +1563,6 @@ where
               || has_via
               || (dst.is_none() && rtm_header.rtm_dst_len != 0)
             {
-              received = &received[l..];
               continue;
             }
             // Suppress the "unused" warning for the present flag —
@@ -1563,7 +1572,6 @@ where
 
             // Skip if a source constraint snuck in via RTA_SRC.
             if has_src_constraint {
-              received = &received[l..];
               continue;
             }
 
@@ -1580,7 +1588,6 @@ where
               && table_id != RT_TABLE_LOCAL
               && table_id != RT_TABLE_DEFAULT
             {
-              received = &received[l..];
               continue;
             }
 
@@ -1608,7 +1615,6 @@ where
             //     `(oif, gw)`.
             if let Some(id) = nh_id {
               deferred_nh.push((rtm_header.rtm_family, rtm_header.rtm_dst_len, dst, id));
-              received = &received[l..];
               continue;
             }
 
@@ -1629,7 +1635,6 @@ where
                 mp,
                 &mut on_route,
               );
-              received = &received[l..];
               continue;
             }
 
@@ -1637,7 +1642,6 @@ where
             // ECMP — emitting `oif=0` would mislead callers into
             // thinking the route was usable on interface 0.
             if oif == 0 {
-              received = &received[l..];
               continue;
             }
 
@@ -1645,9 +1649,14 @@ where
           }
           _ => {}
         }
-
-        received = &received[l..];
       }
+      if terminal {
+        break;
+      }
+    }
+
+    if family_unavailable {
+      return Ok(());
     }
 
     // Resolve any deferred `RTA_NH_ID` references in a single batch.
@@ -1816,7 +1825,15 @@ fn decode_nlmsgerr(received: &[u8], hlen: usize) -> io::Result<NlmsgErrOutcome> 
     return Ok(NlmsgErrOutcome::Ack);
   }
   // The kernel reports negative errno values in `nlmsgerr.error`.
-  let raw = errno.unsigned_abs() as i32;
+  let raw = errno
+    .checked_neg()
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid NLMSG_ERROR errno"))?;
+  if raw <= 0 {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "invalid NLMSG_ERROR errno",
+    ));
+  }
   if raw == Errno::OPNOTSUPP.raw_os_error()
     || raw == Errno::PROTONOSUPPORT.raw_os_error()
     || raw == Errno::AFNOSUPPORT.raw_os_error()
@@ -1913,49 +1930,32 @@ where
     // `src/bsd_like/rt_generic.rs` and `src/windows/gateway.rs`.
     let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
 
-    'outer: loop {
+    let mut family_unavailable = false;
+    loop {
       let nr = handle.recv(&mut rb)?;
+      let mut terminal = false;
 
-      let mut received = &rb[..nr];
-
-      while received.len() >= NLMSG_HDRLEN {
-        let h = decode_nlmsghdr(received);
-        let hlen = h.nlmsg_len as usize;
-        let l = nlm_align_of(hlen);
-
-        if hlen < NLMSG_HDRLEN || l > received.len() {
-          return Err(rustix::io::Errno::INVAL.into());
+      for message in DumpMessages::new(&rb[..nr], 1, lsa.pid()) {
+        let message = message?;
+        if terminal {
+          continue;
         }
-
-        if h.nlmsg_seq != 1 || h.nlmsg_pid != lsa.pid() {
-          return Err(rustix::io::Errno::INVAL.into());
-        }
+        let (h, received) = match message {
+          DumpMessage::Done => {
+            terminal = true;
+            continue;
+          }
+          DumpMessage::Error(NlmsgErrOutcome::Ack) => continue,
+          DumpMessage::Error(NlmsgErrOutcome::FamilyUnavailable) => {
+            family_unavailable = true;
+            terminal = true;
+            continue;
+          }
+          DumpMessage::Message(h, message) => (h, message),
+        };
+        let hlen = received.len();
 
         match h.nlmsg_type as u32 {
-          NLMSG_DONE => {
-            // Mirror `netlink_walk_routes` / `netlink_best_local_addrs_into`:
-            // surface `EINTR` if the kernel signaled `NLM_F_DUMP_INTR`,
-            // because route-table churn during the walk means we
-            // returned a partial snapshot. Returning the partial set
-            // as `Ok` would silently mislead callers about which
-            // gateways actually exist.
-            if h.nlmsg_flags as u32 & NLM_F_DUMP_INTR != 0 {
-              return Err(rustix::io::Errno::INTR.into());
-            }
-            break 'outer;
-          }
-          NLMSG_ERROR => match decode_nlmsgerr(received, hlen)? {
-            NlmsgErrOutcome::Ack => {
-              received = &received[l..];
-              continue;
-            }
-            // No stack for this family — surface as an empty result
-            // instead of `Err`. Lets `gateway_addrs()` keep the
-            // populated family on a single-stack host instead of
-            // failing the whole call when the other family's dump
-            // hits `EAFNOSUPPORT` / `EPROTONOSUPPORT` / `EOPNOTSUPP`.
-            NlmsgErrOutcome::FamilyUnavailable => return Ok(SmallVec::new()),
-          },
           val if val == RTM_NEWROUTE => {
             // See `netlink_interface` for why this is bounded to `hlen`.
             let rtm = &received[NLMSG_HDRLEN..hlen];
@@ -1964,7 +1964,6 @@ where
             // Ensure it's a address we want
             if let Some(rtn) = rtn {
               if rtm_header.rtm_type != rtn {
-                received = &received[l..];
                 continue;
               }
             }
@@ -2114,9 +2113,14 @@ where
           }
           _ => {}
         }
-
-        received = &received[l..];
       }
+      if terminal {
+        break;
+      }
+    }
+
+    if family_unavailable {
+      return Ok(SmallVec::new());
     }
 
     // Resolve any deferred `RTA_NH_ID` references in a single batch.
@@ -2234,8 +2238,12 @@ impl RtmMessageHeader {
 
 // Round the length of a netlink message up to align it properly.
 #[inline]
-const fn nlm_align_of(msg_len: usize) -> usize {
-  ((msg_len as u32 + NLMSG_ALIGNTO - 1) & !(NLMSG_ALIGNTO - 1)) as usize
+const fn nlm_align_of(msg_len: usize) -> Option<usize> {
+  let align = NLMSG_ALIGNTO as usize;
+  match msg_len.checked_add(align - 1) {
+    Some(len) => Some(len & !(align - 1)),
+    None => None,
+  }
 }
 
 // Round the length of a netlink route attribute up to align it
@@ -2367,13 +2375,38 @@ impl IfNetMessageHeader {
     if src.len() < Self::SIZE {
       return Err(rustix::io::Errno::INVAL.into());
     }
+    let family = AddressFamily::from_raw(src[0] as u16);
+    let prefix_len = src[1];
+    if (family == AddressFamily::INET && prefix_len > 32)
+      || (family == AddressFamily::INET6 && prefix_len > 128)
+    {
+      return Err(rustix::io::Errno::INVAL.into());
+    }
     Ok(Self {
       family: src[0],
-      prefix_len: src[1],
+      prefix_len,
       flags: src[2],
       scope: src[3],
       index: u32::from_ne_bytes(src[4..8].try_into().unwrap()),
     })
+  }
+}
+
+#[cfg(any(test, fuzzing))]
+struct NexthopMessageHeader {
+  family: u8,
+}
+
+#[cfg(any(test, fuzzing))]
+impl NexthopMessageHeader {
+  const SIZE: usize = 8;
+
+  #[inline]
+  fn parse(src: &[u8]) -> io::Result<Self> {
+    if src.len() < Self::SIZE {
+      return Err(rustix::io::Errno::INVAL.into());
+    }
+    Ok(Self { family: src[0] })
   }
 }
 
@@ -2393,9 +2426,358 @@ fn decode_nlmsghdr(src: &[u8]) -> MessageHeader {
   }
 }
 
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub fn fuzz_netlink_dump(data: &[u8]) {
+  let (seq, pid) = if data.len() >= NLMSG_HDRLEN {
+    let header = decode_nlmsghdr(data);
+    (header.nlmsg_seq, header.nlmsg_pid)
+  } else {
+    (0, 0)
+  };
+
+  for message in DumpMessages::new(data, seq, pid) {
+    if let Ok(DumpMessage::Message(header, message)) = message {
+      let body = &message[NLMSG_HDRLEN..];
+      let _ = fuzz_message_attributes(header, body, fuzz_rtattrs);
+    }
+  }
+}
+
+#[cfg(any(test, fuzzing))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FuzzMessageKind {
+  Link,
+  Addr(u8),
+  Route(u8),
+  Nexthop(u8),
+}
+
+#[cfg(any(test, fuzzing))]
+fn fuzz_message_attributes<F>(header: MessageHeader, body: &[u8], mut f: F) -> io::Result<()>
+where
+  F: FnMut(FuzzMessageKind, &[u8]),
+{
+  match header.nlmsg_type as u32 {
+    RTM_NEWLINK => {
+      let _ = IfInfoMessageHeader::parse(body)?;
+      f(FuzzMessageKind::Link, &body[IfInfoMessageHeader::SIZE..]);
+    }
+    RTM_NEWADDR => {
+      let ifa = IfNetMessageHeader::parse(body)?;
+      f(
+        FuzzMessageKind::Addr(ifa.family),
+        &body[IfNetMessageHeader::SIZE..],
+      );
+    }
+    RTM_NEWROUTE => {
+      let rtm = RtmMessageHeader::parse(body)?;
+      f(
+        FuzzMessageKind::Route(rtm.rtm_family),
+        &body[RtmMessageHeader::SIZE..],
+      );
+    }
+    RTM_NEWNEXTHOP => {
+      let nh = NexthopMessageHeader::parse(body)?;
+      f(
+        FuzzMessageKind::Nexthop(nh.family),
+        &body[NexthopMessageHeader::SIZE..],
+      );
+    }
+    _ => {}
+  }
+  Ok(())
+}
+
+#[cfg(fuzzing)]
+fn fuzz_rtattrs(kind: FuzzMessageKind, mut data: &[u8]) {
+  while data.len() >= RtAttr::SIZE {
+    let len = u16::from_ne_bytes(data[..2].try_into().unwrap()) as usize;
+    let ty = u16::from_ne_bytes(data[2..4].try_into().unwrap());
+    if len < RtAttr::SIZE || len > data.len() {
+      break;
+    }
+    let payload = &data[RtAttr::SIZE..len];
+    match kind {
+      FuzzMessageKind::Link => match ty as u32 {
+        IFLA_MTU if payload.len() >= 4 => {
+          let _ = u32::from_ne_bytes(payload[..4].try_into().unwrap());
+        }
+        IFLA_IFNAME => {
+          let _ = interface_name_from_attr(payload);
+        }
+        IFLA_ADDRESS => {
+          let _ = mac_addr_from_attr(payload);
+        }
+        _ => {}
+      },
+      FuzzMessageKind::Addr(family) if ty as u32 == IFA_ADDRESS || ty as u32 == IFA_LOCAL => {
+        let _ = parse_rta_ipaddr(family, payload);
+      }
+      FuzzMessageKind::Route(family) if ty == RTA_DST || ty == RTA_GATEWAY => {
+        let _ = parse_rta_ipaddr(family, payload);
+      }
+      FuzzMessageKind::Nexthop(family) if ty == NHA_GATEWAY => {
+        let _ = parse_rta_ipaddr(family, payload);
+      }
+      _ => {}
+    }
+
+    let aligned = rta_align_of(len);
+    if aligned > data.len() {
+      break;
+    }
+    data = &data[aligned..];
+  }
+}
+
 #[cfg(test)]
 mod netlink_tests {
   use super::*;
+
+  const TEST_SEQ: u32 = 1;
+  const TEST_PID: u32 = 42;
+
+  fn frame(ty: u16, flags: u16, body: &[u8]) -> Vec<u8> {
+    let len = NLMSG_HDRLEN + body.len();
+    let aligned = nlm_align_of(len).unwrap();
+    let mut frame = vec![0; aligned];
+    frame[..4].copy_from_slice(&(len as u32).to_ne_bytes());
+    frame[4..6].copy_from_slice(&ty.to_ne_bytes());
+    frame[6..8].copy_from_slice(&flags.to_ne_bytes());
+    frame[8..12].copy_from_slice(&TEST_SEQ.to_ne_bytes());
+    frame[12..16].copy_from_slice(&TEST_PID.to_ne_bytes());
+    frame[NLMSG_HDRLEN..len].copy_from_slice(body);
+    frame
+  }
+
+  fn parse_dump(data: &[u8]) -> io::Result<(Vec<u16>, usize)> {
+    let mut types = Vec::new();
+    let mut done = 0;
+    for message in DumpMessages::new(data, TEST_SEQ, TEST_PID) {
+      match message? {
+        DumpMessage::Message(header, _) => types.push(header.nlmsg_type),
+        DumpMessage::Error(_) => {}
+        DumpMessage::Done => done += 1,
+      }
+    }
+    Ok((types, done))
+  }
+
+  fn rtattr(ty: u16, payload: &[u8]) -> Vec<u8> {
+    let len = RtAttr::SIZE + payload.len();
+    let mut attr = vec![0; rta_align_of(len)];
+    attr[..2].copy_from_slice(&(len as u16).to_ne_bytes());
+    attr[2..4].copy_from_slice(&ty.to_ne_bytes());
+    attr[RtAttr::SIZE..len].copy_from_slice(payload);
+    attr
+  }
+
+  fn assert_fuzz_harness_attributes(
+    ty: u16,
+    header_size: usize,
+    family: Option<u8>,
+    expected_kind: FuzzMessageKind,
+    attr_ty: u16,
+    payload: &[u8],
+  ) {
+    let attrs = rtattr(attr_ty, payload);
+    let mut body = vec![0; header_size];
+    if let Some(family) = family {
+      body[0] = family;
+    }
+    body.extend(&attrs);
+    let header = MessageHeader {
+      nlmsg_len: (NLMSG_HDRLEN + body.len()) as u32,
+      nlmsg_type: ty,
+      nlmsg_flags: 0,
+      nlmsg_seq: TEST_SEQ,
+      nlmsg_pid: TEST_PID,
+    };
+    let mut seen = None;
+    fuzz_message_attributes(header, &body, |kind, attr_data| {
+      seen = Some((kind, attr_data.to_vec()));
+    })
+    .unwrap();
+    assert_eq!(seen, Some((expected_kind, attrs)));
+  }
+
+  #[test]
+  fn fuzz_harness_validates_headers_and_passes_only_attributes() {
+    let inet = AddressFamily::INET.as_raw() as u8;
+    assert_fuzz_harness_attributes(
+      RTM_NEWLINK as u16,
+      IfInfoMessageHeader::SIZE,
+      None,
+      FuzzMessageKind::Link,
+      IFLA_IFNAME as u16,
+      b"x\0",
+    );
+    assert_fuzz_harness_attributes(
+      RTM_NEWADDR as u16,
+      IfNetMessageHeader::SIZE,
+      Some(inet),
+      FuzzMessageKind::Addr(inet),
+      IFA_LOCAL as u16,
+      &[192, 0, 2, 1],
+    );
+    assert_fuzz_harness_attributes(
+      RTM_NEWROUTE as u16,
+      RtmMessageHeader::SIZE,
+      Some(inet),
+      FuzzMessageKind::Route(inet),
+      RTA_GATEWAY,
+      &[192, 0, 2, 1],
+    );
+    assert_fuzz_harness_attributes(
+      RTM_NEWNEXTHOP as u16,
+      NexthopMessageHeader::SIZE,
+      Some(inet),
+      FuzzMessageKind::Nexthop(inet),
+      NHA_GATEWAY,
+      &[192, 0, 2, 1],
+    );
+
+    for (ty, header_size) in [
+      (RTM_NEWLINK as u16, IfInfoMessageHeader::SIZE),
+      (RTM_NEWADDR as u16, IfNetMessageHeader::SIZE),
+      (RTM_NEWROUTE as u16, RtmMessageHeader::SIZE),
+      (RTM_NEWNEXTHOP as u16, NexthopMessageHeader::SIZE),
+    ] {
+      let header = MessageHeader {
+        nlmsg_len: (NLMSG_HDRLEN + header_size - 1) as u32,
+        nlmsg_type: ty,
+        nlmsg_flags: 0,
+        nlmsg_seq: TEST_SEQ,
+        nlmsg_pid: TEST_PID,
+      };
+      let mut called = false;
+      assert!(
+        fuzz_message_attributes(header, &vec![0; header_size - 1], |_, _| {
+          called = true;
+        })
+        .is_err()
+      );
+      assert!(!called);
+    }
+  }
+
+  #[test]
+  fn ifaddr_header_rejects_oversize_prefixes() {
+    for (family, max_prefix) in [(AddressFamily::INET, 32), (AddressFamily::INET6, 128)] {
+      let mut body = [0; IfNetMessageHeader::SIZE];
+      body[0] = family.as_raw() as u8;
+      body[1] = max_prefix;
+      assert!(IfNetMessageHeader::parse(&body).is_ok());
+
+      body[1] = max_prefix + 1;
+      assert!(IfNetMessageHeader::parse(&body).is_err());
+    }
+  }
+
+  #[test]
+  fn dump_messages_accept_a_well_formed_multipart_dump() {
+    let mut data = frame(RTM_NEWLINK as u16, 0, &[]);
+    data.extend(frame(NLMSG_DONE as u16, 0, &[]));
+
+    assert_eq!(parse_dump(&data).unwrap(), (vec![RTM_NEWLINK as u16], 1));
+  }
+
+  #[test]
+  fn dump_messages_reject_malformed_framing_and_trailing_bytes() {
+    let mut malformed = frame(RTM_NEWLINK as u16, 0, &[]);
+    malformed[..4].copy_from_slice(&((NLMSG_HDRLEN - 1) as u32).to_ne_bytes());
+    assert!(parse_dump(&malformed).is_err());
+
+    let mut unaligned = frame(RTM_NEWLINK as u16, 0, &[0]);
+    unaligned.pop();
+    assert!(parse_dump(&unaligned).is_err());
+
+    let mut trailing = frame(NLMSG_DONE as u16, 0, &[]);
+    trailing.extend([0, 0, 0]);
+    assert!(parse_dump(&trailing).is_err());
+  }
+
+  #[test]
+  fn dump_messages_reject_interruption_and_overrun_from_any_message() {
+    let interrupted = frame(RTM_NEWLINK as u16, NLM_F_DUMP_INTR as u16, &[]);
+    let err = parse_dump(&interrupted).unwrap_err();
+    assert_eq!(
+      err.raw_os_error(),
+      Some(rustix::io::Errno::INTR.raw_os_error())
+    );
+
+    let overrun = frame(NLMSG_OVERRUN as u16, 0, &[]);
+    let err = parse_dump(&overrun).unwrap_err();
+    assert_eq!(
+      err.raw_os_error(),
+      Some(rustix::io::Errno::NOBUFS.raw_os_error())
+    );
+  }
+
+  #[test]
+  fn done_errno_is_decoded_without_partial_success() {
+    assert!(parse_dump(&frame(NLMSG_DONE as u16, 0, &0i32.to_ne_bytes())).is_ok());
+
+    let enomem = -rustix::io::Errno::NOMEM.raw_os_error();
+    let err = parse_dump(&frame(NLMSG_DONE as u16, 0, &enomem.to_ne_bytes())).unwrap_err();
+    assert_eq!(
+      err.raw_os_error(),
+      Some(rustix::io::Errno::NOMEM.raw_os_error())
+    );
+
+    for body in [1i32.to_ne_bytes().to_vec(), i32::MIN.to_ne_bytes().to_vec()] {
+      let err = parse_dump(&frame(NLMSG_DONE as u16, 0, &body)).unwrap_err();
+      assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    for len in 1..mem::size_of::<i32>() {
+      let err = parse_dump(&frame(NLMSG_DONE as u16, 0, &vec![0; len])).unwrap_err();
+      assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+  }
+
+  #[test]
+  fn receive_validation_uses_actual_datagram_length_and_kernel_sender() {
+    let kernel = SocketAddrNetlink::new(0, 0);
+    assert_eq!(
+      validate_recv(NLMSG_HDRLEN, NLMSG_HDRLEN, NLMSG_HDRLEN, kernel).unwrap(),
+      NLMSG_HDRLEN
+    );
+
+    let err = validate_recv(NLMSG_HDRLEN, NLMSG_HDRLEN + 1, NLMSG_HDRLEN, kernel).unwrap_err();
+    assert_eq!(
+      err.raw_os_error(),
+      Some(rustix::io::Errno::NOBUFS.raw_os_error())
+    );
+    assert!(validate_recv(
+      NLMSG_HDRLEN,
+      NLMSG_HDRLEN,
+      NLMSG_HDRLEN,
+      SocketAddrNetlink::new(1, 0)
+    )
+    .is_err());
+    assert!(validate_recv(
+      NLMSG_HDRLEN,
+      NLMSG_HDRLEN,
+      NLMSG_HDRLEN,
+      SocketAddrNetlink::new(0, 1)
+    )
+    .is_err());
+  }
+
+  #[test]
+  fn mac_and_name_attributes_preserve_only_valid_representations() {
+    assert!(mac_addr_from_attr(&[]).is_none());
+    assert!(mac_addr_from_attr(&[1; 5]).is_none());
+    assert!(mac_addr_from_attr(&[1; MAC_ADDRESS_SIZE]).is_some());
+    assert!(mac_addr_from_attr(&[0; MAC_ADDRESS_SIZE]).is_none());
+    assert!(mac_addr_from_attr(&[1; 8]).is_none());
+    assert!(mac_addr_from_attr(&[1; 20]).is_none());
+
+    assert_eq!(interface_name_from_attr(b"eth0\0ignored"), Some("eth0"));
+    assert!(interface_name_from_attr(&[b'e', 0xff, 0]).is_none());
+  }
 
   // Regression guard for Android support (issue #4). `Handle::new()`
   // intentionally does NOT bind(): the kernel autobinds a portid on the
@@ -2449,5 +2831,10 @@ mod netlink_tests {
     let err =
       decode_nlmsgerr(&buf, NLMSG_HDRLEN + 4).expect_err("a negative errno must be an error");
     assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+
+    buf[NLMSG_HDRLEN..NLMSG_HDRLEN + 4].copy_from_slice(&i32::MIN.to_ne_bytes());
+    let err =
+      decode_nlmsgerr(&buf, NLMSG_HDRLEN + 4).expect_err("i32::MIN is not a valid netlink errno");
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
   }
 }

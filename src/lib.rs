@@ -6,6 +6,22 @@
 #[macro_use]
 mod macros;
 
+#[cfg(not(any(linux_like, bsd_like, windows)))]
+compile_error!(
+  "getifs supports Linux, Android, Apple platforms, FreeBSD, NetBSD, OpenBSD, DragonFly, and Windows"
+);
+
+#[allow(unused_macros)]
+macro_rules! cfg_supported {
+  ($($item:item)*) => {
+    $(
+      #[cfg(any(linux_like, bsd_like, windows))]
+      $item
+    )*
+  };
+}
+
+cfg_supported! {
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 pub use gateway::*;
@@ -14,11 +30,13 @@ pub use idx_to_name::ifindex_to_name;
 pub use ifaddr::*;
 pub use ifnet::*;
 pub use interfaces::*;
+/// Re-export of `ipnet`, retained as part of getifs's public API contract.
 pub use ipnet;
-/// Known RFCs for IP addresses
+/// Known RFCs for IP addresses, retained as part of getifs's public API
+/// contract.
 #[doc(inline)]
 pub use iprfc as rfc;
-/// IP protocol probing
+/// IP protocol probing, retained as part of getifs's public API contract.
 #[doc(inline)]
 pub use iprobe as probe;
 pub use local_addrs::*;
@@ -29,10 +47,12 @@ pub use os::Flags;
 pub use private_ip_addrs::*;
 pub use public_ip_addrs::*;
 pub use route::*;
+/// Re-exported compact collections used by getifs return types; retained as
+/// part of getifs's public API contract.
+pub use smallvec_wrapper::{SmallVec, TinyVec};
+/// Re-export of `SmolStr`, retained as part of getifs's public API contract.
 pub use smol_str::SmolStr;
 
-// #[cfg(feature = "serde")]
-// mod serde_impl;
 mod gateway;
 mod idx_to_name;
 mod ifaddr;
@@ -58,6 +78,21 @@ mod os;
 #[cfg(windows)]
 #[path = "windows.rs"]
 mod os;
+
+#[cfg(all(fuzzing, any(linux_like, bsd_like)))]
+#[doc(hidden)]
+#[allow(missing_docs)]
+pub mod __fuzzing {
+  #[cfg(linux_like)]
+  pub fn fuzz_netlink_dump(data: &[u8]) {
+    super::os::fuzz_netlink_dump(data);
+  }
+
+  #[cfg(bsd_like)]
+  pub fn fuzz_bsd_parsers(data: &[u8]) {
+    super::os::fuzz_bsd_parsers(data);
+  }
+}
 
 #[cfg(all(test, not(windows)))]
 mod tests;
@@ -414,4 +449,5 @@ mod address_trait_tests {
     not_unspec[15] = 1;
     assert!(!is_ipv6_unspecified(not_unspec));
   }
+}
 }

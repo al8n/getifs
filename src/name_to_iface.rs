@@ -1,8 +1,9 @@
 use std::{io, net::Ipv4Addr};
 
-/// Returns the IPv4 interface of by the given name.
+/// Returns a non-link-local IPv4 address for the interface named `name`.
 ///
-/// In Rust, the IPv6 interface is the interface index of the given name.
+/// `Ok(None)` means the named interface was found but has no matching IPv4
+/// address. A missing name remains an error from [`super::ifname_to_index`].
 ///
 /// ## Example
 ///
@@ -29,9 +30,11 @@ pub fn ifname_to_v4_iface(name: &str) -> io::Result<Option<Ipv4Addr>> {
   }
 }
 
-/// Returns the IPv6 interface of by the given name.
+/// Returns the interface index for the interface named `name`.
 ///
-/// In Rust, the IPv6 interface is the interface index of the given name.
+/// `Ok(Some(index))` is the normal result. `Ok(None)` preserves the historic
+/// zero-index mapping and is not a missing-name signal; a missing name remains
+/// an error from [`super::ifname_to_index`].
 ///
 /// ## Example
 ///
@@ -47,9 +50,12 @@ pub fn ifname_to_v6_iface(name: &str) -> io::Result<Option<u32>> {
   super::name_to_idx::ifname_to_index(name).map(|idx| (idx != 0).then_some(idx))
 }
 
-/// Returns the IPv6 interface of by the given name.
+/// Returns the historic IPv4-address and interface-index tuple for `name`.
 ///
-/// In Rust, the IPv6 interface is the interface index of the given name.
+/// The first `Option` is `None` when the interface has no non-link-local IPv4
+/// address (or disappears before its addresses are read). The second is
+/// `None` only for the historic zero-index mapping; it is not a missing-name
+/// signal. A missing name remains an error from [`super::ifname_to_index`].
 ///
 /// ## Example
 ///
@@ -88,15 +94,11 @@ mod tests {
   // `iface.ipv4_addrs_by_filter` call, and the
   // `Some(iface) => ...` match arm of each entry point.
   //
-  // Skipped on:
-  //   - NetBSD: `iface.ipv4_addrs_by_filter` walks `parse_addrs`,
-  //     which hits the documented "invalid address" gap on the
-  //     vmactions VM's `RTM_NEWADDR` slot encoding.
-  //   - DragonFly: vmactions interface churn means `interface_by_index`
+  // Skipped on DragonFly: vmactions interface churn means `interface_by_index`
   //     intermittently returns `None` for an interface
   //     `interfaces()` just listed (same root cause as the cfg-gate
   //     on `tests/interfaces.rs::ifis`).
-  #[cfg(not(any(target_os = "netbsd", target_os = "dragonfly")))]
+  #[cfg(not(target_os = "dragonfly"))]
   #[test]
   fn ifname_to_v4_iface_first_interface() {
     let ift = crate::interfaces().unwrap();
@@ -115,7 +117,7 @@ mod tests {
     assert_eq!(v6, Some(first.index()));
   }
 
-  #[cfg(not(any(target_os = "netbsd", target_os = "dragonfly")))]
+  #[cfg(not(target_os = "dragonfly"))]
   #[test]
   fn ifname_to_iface_round_trips() {
     let ift = crate::interfaces().unwrap();

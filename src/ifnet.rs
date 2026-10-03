@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use ipnet::{IpNet, Ipv4Net, Ipv6Net, PrefixLenError};
 
 macro_rules! if_net {
-  ($kind:literal) => {
+  ($kind:literal, $max_prefix_len:literal) => {
     paste::paste! {
       #[doc = "An interface IP" $kind " network."]
       #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -48,7 +48,11 @@ macro_rules! if_net {
 
         #[doc = "Creates a new IP" $kind " interface address from an index, [`Ip" $kind "Addr`] and prefix length."]
         /// If called from a const context it will verify prefix length at compile time.
-        /// Otherwise it will panic at runtime if prefix length is not less then or equal to 32.
+        #[doc = concat!(
+          "Otherwise it will panic at runtime if prefix length is greater than ",
+          stringify!($max_prefix_len),
+          "."
+        )]
         #[inline]
         pub const fn with_prefix_len_assert(index: u32, addr: [<Ip $kind Addr>], prefix_len: u8) -> Self {
           Self { index, addr: [<Ip $kind Net>]::new_assert(addr, prefix_len) }
@@ -95,8 +99,8 @@ macro_rules! if_net {
   };
 }
 
-if_net!("v4");
-if_net!("v6");
+if_net!("v4", 32);
+if_net!("v6", 128);
 
 /// An interface network.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -159,7 +163,8 @@ impl IfNet {
 
   /// Creates a new IP interface address from an index, [`IpAddr`] and prefix length.
   /// If called from a const context it will verify prefix length at compile time.
-  /// Otherwise it will panic at runtime if prefix length is not less then or equal to 32.
+  /// Otherwise it will panic at runtime if the prefix length is greater than
+  /// 32 for IPv4 or 128 for IPv6.
   #[inline]
   pub const fn with_prefix_len_assert(index: u32, addr: IpAddr, prefix_len: u8) -> Self {
     match addr {

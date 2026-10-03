@@ -1,25 +1,27 @@
 #[cfg(windows)]
-pub(crate) fn friendly_name(name: windows_sys::core::PWSTR) -> Option<smol_str::SmolStr> {
-  if name.is_null() {
+pub(crate) fn friendly_name(name: &[u16]) -> Option<smol_str::SmolStr> {
+  let nul = name.iter().position(|&unit| unit == 0)?;
+  if nul == 0 {
     return None;
   }
-
-  unsafe {
-    let len = wide_str_len(name);
-    let s = match widestring::U16CStr::from_ptr(name, len) {
-      Ok(s) => s,
-      Err(_) => return None,
-    };
-    let osname_str = s.to_string_lossy();
-    Some(smol_str::SmolStr::new(&osname_str))
-  }
+  Some(String::from_utf16(&name[..nul]).ok()?.into())
 }
 
-#[cfg(windows)]
-unsafe fn wide_str_len(ptr: *mut u16) -> usize {
-  let mut len = 0;
-  while *ptr.add(len) != 0 {
-    len += 1;
+#[cfg(all(test, windows))]
+mod tests {
+  use super::friendly_name;
+
+  #[test]
+  fn friendly_name_requires_a_bounded_terminator() {
+    assert_eq!(
+      friendly_name(&[b'L' as u16, b'A' as u16, b'N' as u16]),
+      None
+    );
+    assert_eq!(friendly_name(&[0, b'x' as u16]), None);
+    assert_eq!(friendly_name(&[0xD800, 0]), None);
+    assert_eq!(
+      friendly_name(&[b'L' as u16, b'A' as u16, b'N' as u16, 0]).as_deref(),
+      Some("LAN")
+    );
   }
-  len
 }

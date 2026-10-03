@@ -1,0 +1,55 @@
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'fuzz/**'
+      - 'src/**'
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: netlink
+            corpus: corpus/netlink
+          - os: macos-latest
+            target: bsd
+            corpus: corpus/bsd
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        with:
+          toolchain: nightly
+      - name: Generate deterministic corpus
+        run: python3 fuzz/generate_corpus.py
+      - name: Install cargo-fuzz 0.12.0
+        run: cargo +nightly install cargo-fuzz --locked --version 0.12.0
+      - name: Replay corpus with fixed runs
+        if: github.event_name == 'pull_request'
+        working-directory: fuzz
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+          FUZZ_CORPUS: ${{ matrix.corpus }}
+        run: cargo +nightly fuzz run "$FUZZ_TARGET" "$FUZZ_CORPUS" -- -runs=1000
+      - name: Run bounded fuzzing
+        if: github.event_name != 'pull_request'
+        working-directory: fuzz
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+          FUZZ_CORPUS: ${{ matrix.corpus }}
+        run: cargo +nightly fuzz run "$FUZZ_TARGET" "$FUZZ_CORPUS" -- -max_total_time=60

@@ -59,6 +59,7 @@ macro_rules! cfg_bsd_multicast {
   };
 }
 
+#[allow(unused_macros)]
 macro_rules! cfg_multicast {
   ($($item:item)*) => {
     $(
@@ -66,6 +67,8 @@ macro_rules! cfg_multicast {
         target_vendor = "apple",
         target_os = "freebsd",
         target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd",
         target_os = "linux",
         target_os = "android",
         windows
@@ -76,6 +79,8 @@ macro_rules! cfg_multicast {
           target_vendor = "apple",
           target_os = "freebsd",
           target_os = "dragonfly",
+          target_os = "netbsd",
+          target_os = "openbsd",
           target_os = "linux",
           target_os = "android",
           windows

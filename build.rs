@@ -25,7 +25,7 @@ fn main() {
     use_feature("apple");
   }
 
-  if os == "linux" || os == "l4re" || os == "android" || os == "emscripten" {
+  if os == "linux" || os == "android" {
     use_feature("linux_like");
   }
 

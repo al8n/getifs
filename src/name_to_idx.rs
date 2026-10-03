@@ -42,10 +42,17 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
 }
 
 #[cfg(windows)]
+#[inline]
+fn win32_status_error(status: u32) -> io::Error {
+  io::Error::from_raw_os_error(status as i32)
+}
+
+#[cfg(windows)]
 fn ifname_to_index_in(name: &str) -> io::Result<u32> {
   use std::ffi::CString;
 
   use widestring::U16CString;
+  use windows_sys::Win32::Foundation::NO_ERROR;
   use windows_sys::Win32::NetworkManagement::{
     IpHelper::{if_nametoindex, ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex},
     Ndis::NET_LUID_LH,
@@ -59,33 +66,37 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
 
     // Convert friendly name to LUID
     let result = unsafe { ConvertInterfaceAliasToLuid(wide_name.as_ptr(), &mut luid) };
-    if result != 0 {
-      return Err(io::Error::last_os_error());
+    if result != NO_ERROR {
+      return Err(win32_status_error(result));
     }
 
     // Convert LUID to index
     let mut idx = 0u32;
     let result = unsafe { ConvertInterfaceLuidToIndex(&luid, &mut idx) };
-    if result != 0 {
-      return Err(io::Error::last_os_error());
+    if result != NO_ERROR {
+      return Err(win32_status_error(result));
     }
 
     Ok(idx)
   }
 
-  // Try friendly name first
-  try_friendly_name(name).or_else(|_| {
-    // fallback to if_nametoindex
-    let name_cstr =
-      CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-
-    let res = unsafe { if_nametoindex(name_cstr.as_ptr() as _) };
-    if res == 0 {
-      Err(io::Error::last_os_error())
-    } else {
-      Ok(res)
+  // Windows exposes friendly aliases through ConvertInterface*, while the
+  // POSIX-compatible function accepts the raw interface name. Support both,
+  // but retain the alias API's concrete status when the raw lookup also fails:
+  // `if_nametoindex` intentionally provides no error code for that case.
+  match try_friendly_name(name) {
+    Ok(index) => Ok(index),
+    Err(alias_error) => {
+      let name_cstr =
+        CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+      let index = unsafe { if_nametoindex(name_cstr.as_ptr() as _) };
+      if index == 0 {
+        Err(alias_error)
+      } else {
+        Ok(index)
+      }
     }
-  })
+  }
 }
 
 #[cfg(test)]
@@ -114,5 +125,11 @@ mod tests {
     let first = ift.iter().next().unwrap();
     let idx = ifname_to_index(first.name()).unwrap();
     assert_eq!(idx, first.index());
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn win32_status_error_preserves_the_returned_code() {
+    assert_eq!(win32_status_error(87).raw_os_error(), Some(87));
   }
 }

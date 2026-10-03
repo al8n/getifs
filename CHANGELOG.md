@@ -1,5 +1,59 @@
 # RELEASED
 
+## 0.7.0 (Unreleased)
+
+### API contract changes
+
+- Add exact local-MTU queries: `get_interface_mtu(index)` and
+  `get_ifaddr_mtu(addr)`. IP-only MTU lookups now return `NotFound` when no
+  local interface owns the address, `InvalidInput` when distinct interfaces
+  own it, and propagate address-enumeration errors instead of retrying with a
+  partial fallback.
+- `interface_by_index` and `interface_by_name` now normalize only known raw
+  OS missing-interface errors to `Ok(None)`; permission, encoding, and parse
+  failures remain errors. The historic `ifname_to_v6_iface` and tuple helper
+  retain their existing `Option` semantics.
+- Multicast APIs are present on every supported target. NetBSD and OpenBSD
+  explicitly return `ErrorKind::Unsupported` where multicast enumeration is
+  unavailable.
+- Mark `IpRoute` `#[non_exhaustive]` and explicitly document the intentional
+  same-family destination/gateway model and omission of Linux `RTA_VIA` rows.
+- Explicitly re-export `SmallVec` and `TinyVec`; `ipnet`, `rfc`, `probe`, and
+  `SmolStr` remain supported public re-exports.
+- Preserve unknown native interface-flag bits on Linux and BSD, and align
+  `Flags` ordering traits on Windows without remapping target-specific bits.
+
+### Backend hardening
+
+- Linux netlink validates multipart framing, terminal messages, and attributes
+  before decoding interface, address, route, and MAC data.
+- BSD parsing handles compact sockaddrs and KAME-scoped IPv6 safely; NetBSD
+  sysctl snapshots handle bounded `ENOMEM` retries and zero-sized results
+  without weakening genuine malformed-data or permission errors.
+- Windows validates FFI buffer lengths and alignment before walking adapter
+  records, and interface-name conversion skips unrepresentable Unicode names
+  instead of poisoning a complete enumeration.
+- Restore NetBSD runtime address and route coverage now that the ABI and
+  bounded-snapshot handling are in place.
+
+### Compatibility and packaging
+
+- Require `iprfc >=0.2.3, <0.3`; lock the public/private RFC 6890
+  classification with pure tests, including global IPv6, documentation,
+  RFC1918, CGNAT, ULA, loopback, and link-local addresses.
+- Pin `smol_str` to 0.3.2 and `criterion` to 0.7.0 for fresh Rust 1.85
+  resolution. Replace the direct unmaintained `paste` dependency with the
+  `pastey` 0.2.3 compatibility alias; RUSTSEC-2024-0436 is an unmaintained
+  advisory, not a known vulnerability, and transitive `paste` remains outside
+  this crate's control. Remove the unused `triomphe` dependency and inactive
+  serde scaffolding.
+- Restrict the Linux backend cfg to Linux and Android. Other unsupported
+  targets now fail with a clear compile-time error instead of compiling a
+  meaningless Linux path.
+- Document snapshot, ordering, deduplication, UTF-8-name, flags, value-order,
+  and platform-capability contracts in the README. Add deterministic
+  Linux/BSD parser fuzz targets and PR, scheduled, and manual CI gates.
+
 ## 0.6.2 (October 3rd, 2026)
 
 Patch release; the public API is unchanged.

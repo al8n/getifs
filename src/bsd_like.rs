@@ -374,7 +374,7 @@ bitflags::bitflags! {
   }
 }
 
-fn parse(mut b: &[u8]) -> io::Result<(SmolStr, Option<MacAddr>)> {
+fn parse(mut b: &[u8]) -> io::Result<Option<(SmolStr, Option<MacAddr>)>> {
   if b.len() < 8 {
     return Err(invalid_address());
   }
@@ -415,8 +415,13 @@ fn parse(mut b: &[u8]) -> io::Result<(SmolStr, Option<MacAddr>)> {
 
   let mut data = &b[4..];
   let name = if nlen > 0 {
-    let name = core::str::from_utf8(&data[..nlen])
-      .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    // The public interface name is UTF-8 and is expected to round-trip
+    // through `interface_by_name`. A lossy replacement would invent a name
+    // the kernel cannot look up, while failing here would discard every
+    // otherwise valid interface in the snapshot. Skip only this interface.
+    let Ok(name) = core::str::from_utf8(&data[..nlen]) else {
+      return Ok(None);
+    };
     data = &data[nlen..];
     SmolStr::from(name)
   } else {
@@ -429,10 +434,14 @@ fn parse(mut b: &[u8]) -> io::Result<(SmolStr, Option<MacAddr>)> {
     None
   };
 
-  Ok((name, addr))
+  Ok(Some((name, addr)))
 }
 
 fn parse_kernel_inet_addr(b: &[u8]) -> io::Result<(usize, IpAddr)> {
+  if b.is_empty() {
+    return Err(invalid_address());
+  }
+
   // The encoding looks similar to the NLRI encoding.
   // +----------------------------+
   // | Length           (1 octet) |
@@ -548,7 +557,7 @@ fn parse_short_inet_addr(af: i32, sa: &[u8]) -> io::Result<IpAddr> {
   }
 }
 
-fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
+pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
   // Sysctl returns a `Vec<u8>`, which only formally guarantees u8
   // alignment for its data pointer. The kernel pads each routing
   // message to KERNAL_ALIGN bytes (4 on Apple, 8 elsewhere), so the
@@ -708,44 +717,86 @@ pub(super) fn parse_addrs(
   Ok(as_)
 }
 
+/// Exercises the pure BSD wire decoders without performing any syscalls.
+///
+/// This hook exists only in cargo-fuzz builds and is not part of the normal
+/// crate API. Decoder errors are expected for arbitrary input; the invariant
+/// is that no input may panic or access bytes outside its declared frame.
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub(crate) fn fuzz_bsd_parsers(data: &[u8]) {
+  let addrs = data
+    .get(..4)
+    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+    .map(u32::from_ne_bytes)
+    .unwrap_or(u32::MAX);
+
+  let _ = parse(data);
+  let _ = parse_addrs(addrs, data);
+  let _ = parse_kernel_inet_addr(data);
+  let _ = parse_short_inet_addr(AF_INET, data);
+  let _ = parse_short_inet_addr(AF_INET6, data);
+  let _ = parse_inet_addr(AF_INET, data);
+  let _ = parse_inet_addr(AF_INET6, data);
+  rt_generic::fuzz_sockaddr_frame(data);
+}
+
 fn fetch(family: i32, rt: i32, flag: i32) -> io::Result<Vec<u8>> {
-  unsafe {
+  // The routing table can grow between the sizing call and the data call.
+  // BSD sysctl reports that race as ENOMEM; retry the complete pair a small,
+  // bounded number of times, matching Go's internal/routebsd strategy.
+  const MAX_TRIES: usize = 3;
+
+  for attempt in 0..MAX_TRIES {
     let mut mib = [CTL_NET, AF_ROUTE, 0, family, rt, flag];
 
-    // Get buffer size
     let mut len: size_t = 0;
-    if sysctl(mib.as_mut_ptr(), 6, null_mut(), &mut len, null_mut(), 0) < 0 {
+    if unsafe { sysctl(mib.as_mut_ptr(), 6, null_mut(), &mut len, null_mut(), 0) } < 0 {
       return Err(io::Error::last_os_error());
     }
 
-    // Allocate buffer. The first sysctl is a *size estimate*; the
-    // kernel can write fewer bytes on the second call when something
-    // (an interface, route, etc.) goes away in the gap. We re-read
-    // the updated `len` after the second call and truncate.
+    if len == 0 {
+      return Ok(Vec::new());
+    }
+
+    // `len` is both the capacity supplied to the kernel and, on return, the
+    // number of initialized bytes. Keep the Vec fully initialized so no
+    // `set_len` is needed at this FFI boundary.
     let mut buf = vec![0u8; len];
-    if sysctl(
-      mib.as_mut_ptr(),
-      6,
-      buf.as_mut_ptr() as *mut c_void,
-      &mut len,
-      null_mut(),
-      0,
-    ) < 0
-    {
-      return Err(io::Error::last_os_error());
+    let capacity = buf.len();
+    let status = unsafe {
+      sysctl(
+        mib.as_mut_ptr(),
+        6,
+        buf.as_mut_ptr() as *mut c_void,
+        &mut len,
+        null_mut(),
+        0,
+      )
+    };
+
+    if status == 0 {
+      if len > capacity {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          "sysctl returned a length larger than its output buffer",
+        ));
+      }
+
+      // The kernel may write fewer bytes when entries disappear between the
+      // two calls. Exclude the zero-initialized tail from message parsing.
+      buf.truncate(len);
+      return Ok(buf);
     }
 
-    // Truncate to the actually-written prefix. Without this, the
-    // tail of `buf` is the zero-init padding from `vec![0u8; len]`,
-    // and the walker reads the leading 2 bytes of that as a
-    // zero-length message header — surfacing as
-    // `Err(InvalidData "invalid message")` on platforms where the
-    // kernel routinely writes less than the size estimate
-    // (especially NetBSD/OpenBSD `NET_RT_IFLIST`).
-    buf.truncate(len);
-
-    Ok(buf)
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ENOMEM) && attempt + 1 < MAX_TRIES {
+      continue;
+    }
+    return Err(err);
   }
+
+  unreachable!("bounded sysctl retry loop always returns")
 }
 
 pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
@@ -782,20 +833,21 @@ pub(super) fn interface_table(idx: u32) -> io::Result<TinyVec<Interface>> {
         // into an aligned local without that requirement.
         let ifm: if_msghdr = core::ptr::read_unaligned(src.as_ptr() as *const if_msghdr);
         if ifm.ifm_type as i32 == RTM_IFINFO {
-          let (name, mac) = parse(&src[HEADER_SIZE..l])?;
-          let interface = Interface {
-            index: ifm.ifm_index as u32,
-            // `ifi_mtu` is `u_int32_t` on Apple, `u_long` on FreeBSD/
-            // DragonFly, `uint64_t` on NetBSD, `u_int` on OpenBSD. Cast
-            // narrows to `u32` to match `Interface.mtu`'s type —
-            // realistic MTUs never exceed 65535 so this is lossless in
-            // practice.
-            mtu: ifm.ifm_data.ifi_mtu as u32,
-            name,
-            mac_addr: mac,
-            flags: Flags::from_bits_truncate(ifm.ifm_flags as u32),
-          };
-          results.push(interface);
+          if let Some((name, mac)) = parse(&src[HEADER_SIZE..l])? {
+            let interface = Interface {
+              index: ifm.ifm_index as u32,
+              // `ifi_mtu` is `u_int32_t` on Apple, `u_long` on FreeBSD/
+              // DragonFly, `uint64_t` on NetBSD, `u_int` on OpenBSD. Cast
+              // narrows to `u32` to match `Interface.mtu`'s type —
+              // realistic MTUs never exceed 65535 so this is lossless in
+              // practice.
+              mtu: ifm.ifm_data.ifi_mtu as u32,
+              name,
+              mac_addr: mac,
+              flags: Flags::from_bits_retain(ifm.ifm_flags as u32),
+            };
+            results.push(interface);
+          }
         }
       }
 
@@ -1119,6 +1171,12 @@ mod tests {
   }
 
   #[test]
+  fn flags_retain_unknown_bits() {
+    let unknown = 1 << 31;
+    assert_eq!(Flags::from_bits_retain(unknown).bits(), unknown);
+  }
+
+  #[test]
   fn roundup_matches_kernel_alignment() {
     // `roundup(0)` returns one alignment unit (the kernel's
     // documented behaviour for empty sockaddrs).
@@ -1177,5 +1235,27 @@ mod tests {
   fn parse_inet_addr_unknown_family_errors() {
     let buf = [0u8; 32];
     assert!(parse_inet_addr(0xff, &buf).is_err());
+  }
+
+  #[test]
+  fn parse_inet_addr_strips_kame_scope_from_link_local_v6() {
+    let mut buf = [0u8; SOCK6];
+    buf[0] = SOCK6 as u8;
+    buf[1] = libc::AF_INET6 as u8;
+    // sockaddr_in6::sin6_addr starts at byte 8. KAME stores the
+    // interface index in bytes 2..4 of a link-local address.
+    buf[8..24].copy_from_slice(&[0xfe, 0x80, 0x00, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+
+    let (_, addr) = parse_inet_addr(libc::AF_INET6, &buf).unwrap();
+    assert_eq!(addr, IpAddr::V6("fe80::1".parse().unwrap()));
+  }
+
+  #[test]
+  fn parse_link_addr_skips_non_utf8_name() {
+    let mut buf = [0u8; 9];
+    // sockaddr_dl fields after len/family/index: type, nlen, alen, slen.
+    buf[5] = 1;
+    buf[8] = 0xff;
+    assert!(parse(&buf).unwrap().is_none());
   }
 }

@@ -22,7 +22,7 @@ Cross-platform enumeration of network interfaces and their MTU, gateway, multica
 
 ```toml
 [dependencies]
-getifs = "0.6"
+getifs = "0.7"
 ```
 
 ## Features
@@ -74,6 +74,23 @@ for gateway in gateways {
 
 ## Details
 
+### Platform capabilities
+
+| Platform | Interfaces, unicast addresses, and local MTU | Gateways and routes | Multicast memberships |
+| --- | --- | --- | --- |
+| Linux | Yes | Yes | Yes |
+| Android | Yes* | Yes | `Unsupported` when `/proc/net` is restricted |
+| Apple platforms | Yes | Yes | Yes |
+| FreeBSD | Yes | Yes | Yes |
+| NetBSD / OpenBSD | Yes | Yes | `Unsupported` |
+| DragonFly | Yes | Yes | `Unsupported` |
+| Windows | Yes | Yes | Yes |
+
+\* Android's untrusted-app fallback can enumerate only interfaces with at
+least one current address; see [Android](#android).
+
+### Backends
+
 OS | Approach
 --- | ---
 Linux (no `libc`) | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
@@ -81,7 +98,63 @@ Android (no `libc`) | netlink with kernel auto-bind + `SIOCGIF*` ioctl fallback 
 BSD-like | `sysctl`
 Windows | `GetAdaptersAddresses`
 
-### Android
+## API contract
+
+- `public_*` means not in the RFC 6890 special-purpose registries.
+  `private_*` is the longstanding local-use classification:
+  RFC 6890 ranges that are not in its forwarding blacklist. It includes RFC
+  1918, CGNAT, and IPv6 ULA, and excludes documentation, loopback, and
+  link-local ranges; it is not a synonym for RFC 1918 alone.
+- `get_interface_mtu` and `get_ifaddr_mtu` return a local link MTU, not a
+  remote path MTU. IP-only MTU lookup returns `NotFound` for no local match
+  and `InvalidInput` for an address assigned to distinct interfaces. IPv6
+  link-local addresses should be queried with their `IfAddr` scope.
+- `interface_by_index` and `interface_by_name` return `Ok(None)` for known
+  OS missing-interface errors only. Permission, encoding, parsing, and other
+  system errors remain errors. The older `ifname_to_v6_iface` and
+  `ifname_to_iface` retain their historical `Option` meanings; a missing name
+  remains an error there.
+- Kernel reads are weak snapshots, not transactions. An interface, address,
+  name, or index can change between calls (or during a multi-query operation),
+  so callers must handle ordinary TOCTOU races.
+- Result ordering is unspecified. There is no general deduplication guarantee;
+  deduplication is promised only where a specific API documents it.
+- `IfAddr` and `IfNet` preserve the local interface index. Their derived
+  ordering is enum family followed by stored `index` and address/network;
+  `IpRoute` ordering is family followed by `index`, destination, and gateway.
+  These are value orderings, not routing or address-preference orderings.
+  `Interface` equality and hashing cover the complete captured snapshot
+  (index, MTU, name, MAC address, and flags), not stable interface identity.
+- `Flags::bits()` is target-specific raw operating-system data; do not persist
+  or compare those bits across platforms as a portable wire format. Only
+  `UP`, `BROADCAST`, `LOOPBACK`, `POINTOPOINT`, `MULTICAST`, and `RUNNING`
+  are common semantic flags; additional constants are target-dependent.
+- Routes intentionally model only same-family destination/gateway pairs.
+  Cross-family Linux `RTA_VIA` routes are omitted rather than misrepresented.
+- Interface names are UTF-8 only. A platform can skip an unrepresentable name;
+  getifs does not promise lossless non-UTF-8 name access.
+- `ipnet`, `rfc`, `probe`, `SmolStr`, `SmallVec`, and `TinyVec` are public
+  re-exports and part of the compatibility contract. Serde is not currently
+  exposed; it may be added later as an additive feature.
+
+## Fuzzing
+
+The detached [fuzz workspace](./fuzz/README.md) contains cfg-only parser
+drivers for Linux/Android netlink and Apple/BSD sockaddr parsing. These hooks
+are not normal public API. Generate its deterministic corpus before running
+`cargo fuzz`; pull requests use fixed runs and scheduled/manual CI bounds each
+target to 60 seconds.
+
+## Maintenance
+
+The MSRV is Rust 1.85. The direct macro dependency is the maintained `pastey`
+crate, aliased as `paste` so existing macro invocations remain compatible.
+RUSTSEC-2024-0436 identifies the older `paste` crate as unmaintained, not as a
+known vulnerability. Transitive uses can still be selected by
+`hardware-address`, `iprfc`, or `smallvec-wrapper`; this crate does not modify
+those upstream dependency graphs.
+
+## Android
 
 Android runs the same libc-free netlink backend as Linux, but apps in the
 `untrusted_app` SELinux domain hit two extra restrictions, both handled

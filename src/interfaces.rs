@@ -19,11 +19,21 @@ use super::{
   target_vendor = "apple",
   target_os = "freebsd",
   target_os = "dragonfly",
+  target_os = "netbsd",
+  target_os = "openbsd",
   target_os = "linux",
   target_os = "android",
   windows
 ))]
 use super::{IfAddr, Ifv4Addr, Ifv6Addr};
+
+#[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
+fn multicast_unsupported<T>() -> io::Result<SmallVec<T>> {
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "multicast group enumeration is not supported on this platform",
+  ))
+}
 
 /// The interface struct
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,6 +59,9 @@ impl Interface {
   }
 
   /// Returns the interface MTU.
+  ///
+  /// This is the local link MTU captured with this [`Interface`] snapshot, not
+  /// a live query or a remote path MTU measurement.
   #[inline]
   pub const fn mtu(&self) -> u32 {
     self.mtu
@@ -80,8 +93,7 @@ impl Interface {
   }
 
   /// Returns a list of unicast interface addrs for a specific
-  /// interface. The filter is used to
-  /// determine which multicast addresses to include.
+  /// interface. The filter determines which unicast addresses to include.
   ///
   /// ## Example
   ///
@@ -137,8 +149,7 @@ impl Interface {
   }
 
   /// Returns a list of unicast, IPv4 interface addrs for a specific
-  /// interface. The filter is used to
-  /// determine which multicast addresses to include.
+  /// interface. The filter determines which unicast addresses to include.
   ///
   /// ## Example
   ///
@@ -197,8 +208,7 @@ impl Interface {
   }
 
   /// Returns a list of unicast, IPv6 interface addrs for a specific
-  /// interface. The filter is used to
-  /// determine which multicast addresses to include.
+  /// interface. The filter determines which unicast addresses to include.
   ///
   /// ## Example
   ///
@@ -233,6 +243,9 @@ impl Interface {
     /// Returns a list of multicast, joined group addrs
     /// for a specific interface.
     ///
+    /// NetBSD and OpenBSD expose this API for portability but return
+    /// [`io::ErrorKind::Unsupported`].
+    ///
     /// ## Example
     ///
     /// ```rust
@@ -248,7 +261,9 @@ impl Interface {
     /// ```
     pub fn multicast_addrs(&self) -> io::Result<SmallVec<IfAddr>> {
       cfg_if::cfg_if! {
-        if #[cfg(windows)] {
+        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+          multicast_unsupported()
+        } else if #[cfg(windows)] {
           os::interface_multicast_addresses(Some(self.index), |_| true)
         } else {
           os::interface_multicast_addresses(self.index, |_| true)
@@ -280,7 +295,10 @@ impl Interface {
       F: FnMut(&IpAddr) -> bool,
     {
       cfg_if::cfg_if! {
-        if #[cfg(windows)] {
+        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+          let _ = f;
+          multicast_unsupported()
+        } else if #[cfg(windows)] {
           os::interface_multicast_addresses(Some(self.index), f)
         } else {
           os::interface_multicast_addresses(self.index, f)
@@ -306,7 +324,9 @@ impl Interface {
     /// ```
     pub fn ipv4_multicast_addrs(&self) -> io::Result<SmallVec<Ifv4Addr>> {
       cfg_if::cfg_if! {
-        if #[cfg(windows)] {
+        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+          multicast_unsupported()
+        } else if #[cfg(windows)] {
           os::interface_multicast_ipv4_addresses(Some(self.index), |_| true)
         } else {
           os::interface_multicast_ipv4_addresses(self.index, |_| true)
@@ -338,7 +358,10 @@ impl Interface {
       F: FnMut(&Ipv4Addr) -> bool,
     {
       cfg_if::cfg_if! {
-        if #[cfg(windows)] {
+        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+          let _ = f;
+          multicast_unsupported()
+        } else if #[cfg(windows)] {
           os::interface_multicast_ipv4_addresses(Some(self.index), f)
         } else {
           os::interface_multicast_ipv4_addresses(self.index, f)
@@ -364,7 +387,9 @@ impl Interface {
     /// ```
     pub fn ipv6_multicast_addrs(&self) -> io::Result<SmallVec<Ifv6Addr>> {
       cfg_if::cfg_if! {
-        if #[cfg(windows)] {
+        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+          multicast_unsupported()
+        } else if #[cfg(windows)] {
           os::interface_multicast_ipv6_addresses(Some(self.index), |_| true)
         } else {
           os::interface_multicast_ipv6_addresses(self.index, |_| true)
@@ -396,7 +421,10 @@ impl Interface {
       F: FnMut(&Ipv6Addr) -> bool,
     {
       cfg_if::cfg_if! {
-        if #[cfg(windows)] {
+        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+          let _ = f;
+          multicast_unsupported()
+        } else if #[cfg(windows)] {
           os::interface_multicast_ipv6_addresses(Some(self.index), f)
         } else {
           os::interface_multicast_ipv6_addresses(self.index, f)
@@ -442,7 +470,52 @@ pub fn interfaces() -> io::Result<TinyVec<Interface>> {
   }
 }
 
+#[cfg(linux_like)]
+fn is_missing_interface_errno(raw: i32) -> bool {
+  raw == rustix::io::Errno::NODEV.raw_os_error() || raw == rustix::io::Errno::NXIO.raw_os_error()
+}
+
+#[cfg(bsd_like)]
+fn is_missing_interface_errno(raw: i32) -> bool {
+  raw == libc::ENODEV || raw == libc::ENXIO
+}
+
+#[cfg(windows)]
+fn is_missing_interface_errno(raw: i32) -> bool {
+  // ERROR_FILE_NOT_FOUND and ERROR_NOT_FOUND are the Win32 missing-interface
+  // results from if_nametoindex/ConvertInterfaceAliasToLuid.
+  matches!(raw, 2 | 1168)
+}
+
+fn is_missing_interface_error(error: &io::Error) -> bool {
+  match error.raw_os_error() {
+    Some(raw) => is_missing_interface_errno(raw),
+    None => false,
+  }
+}
+
+fn missing_interface_to_none<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+  match result {
+    Ok(value) => Ok(Some(value)),
+    Err(error) if is_missing_interface_error(&error) => Ok(None),
+    Err(error) => Err(error),
+  }
+}
+
+fn interface_table_for_index(index: u32) -> io::Result<TinyVec<Interface>> {
+  cfg_if::cfg_if! {
+    if #[cfg(windows)] {
+      os::interface_table(Some(index))
+    } else {
+      os::interface_table(index)
+    }
+  }
+}
+
 /// Returns the interface specified by index.
+///
+/// Returns `Ok(None)` only when the platform reports a known missing-interface
+/// OS error. Permission, encoding, and parse errors are preserved.
 ///
 /// ## Example
 ///
@@ -455,16 +528,22 @@ pub fn interfaces() -> io::Result<TinyVec<Interface>> {
 /// println!("{:?}", interface);
 /// ```
 pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
-  cfg_if::cfg_if! {
-    if #[cfg(windows)] {
-      os::interface_table(Some(index)).map(|v| v.into_iter().find(|ifi| ifi.index == index))
-    } else {
-      os::interface_table(index).map(|v| v.into_iter().find(|ifi| ifi.index == index))
-    }
-  }
+  let interfaces = match missing_interface_to_none(interface_table_for_index(index))? {
+    Some(interfaces) => interfaces,
+    None => return Ok(None),
+  };
+
+  Ok(
+    interfaces
+      .into_iter()
+      .find(|interface| interface.index == index),
+  )
 }
 
 /// Returns the interface specified by name.
+///
+/// Returns `Ok(None)` only when the platform reports a known missing-interface
+/// OS error. Permission, encoding, and parse errors are preserved.
 ///
 /// ## Example
 ///
@@ -477,12 +556,20 @@ pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
 /// println!("{:?}", interface);
 /// ```
 pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
-  let idx = ifname_to_index(name)?;
+  let index = match missing_interface_to_none(ifname_to_index(name))? {
+    Some(index) => index,
+    None => return Ok(None),
+  };
+  let interfaces = match missing_interface_to_none(interface_table_for_index(index))? {
+    Some(interfaces) => interfaces,
+    None => return Ok(None),
+  };
+
   cfg_if::cfg_if! {
     if #[cfg(windows)] {
-      os::interface_table(Some(idx)).map(|v| v.into_iter().find(|ifi| ifi.index == idx))
+      Ok(interfaces.into_iter().find(|interface| interface.index == index))
     } else {
-      os::interface_table(idx).map(|v| v.into_iter().find(|ifi| ifi.name == name))
+      Ok(interfaces.into_iter().find(|interface| interface.index == index && interface.name == name))
     }
   }
 }
@@ -490,8 +577,8 @@ pub fn interface_by_name(name: &str) -> io::Result<Option<Interface>> {
 /// Returns a list of the system's unicast interface
 /// addrs.
 ///
-/// The returned list does not identify the associated interface; use
-/// [`interfaces`] and [`Interface::addrs`] for more detail.
+/// Each returned [`IfNet`] retains its associated interface index through
+/// [`IfNet::index`].
 ///
 /// ## Example
 ///
@@ -517,8 +604,8 @@ pub fn interface_addrs() -> io::Result<SmallVec<IfNet>> {
 /// Returns a list of the system's unicast, IPv4 interface
 /// addrs.
 ///
-/// The returned list does not identify the associated interface; use
-/// [`interfaces`] and [`Interface::ipv4_addrs`] for more detail.
+/// Each returned [`Ifv4Net`] retains its associated interface index through
+/// [`Ifv4Net::index`].
 ///
 /// ## Example
 ///
@@ -544,8 +631,8 @@ pub fn interface_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 /// Returns a list of the system's unicast, IPv6 interface
 /// addrs.
 ///
-/// The returned list does not identify the associated interface; use
-/// [`interfaces`] and [`Interface::ipv6_addrs`] for more detail.
+/// Each returned [`Ifv6Net`] retains its associated interface index through
+/// [`Ifv6Net::index`].
 ///
 /// ## Example
 ///
@@ -571,8 +658,8 @@ pub fn interface_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// Returns a list of the system's unicast interface
 /// addrs.
 ///
-/// The returned list does not identify the associated interface; use
-/// [`interfaces`] and [`Interface::addrs`] for more detail.
+/// Each returned [`IfNet`] retains its associated interface index through
+/// [`IfNet::index`].
 ///
 /// ## Example
 ///
@@ -601,8 +688,8 @@ where
 /// Returns a list of the system's unicast, IPv4 interface
 /// addrs.
 ///
-/// The returned list does not identify the associated interface; use
-/// [`interfaces`] and [`Interface::ipv4_addrs`] for more detail.
+/// Each returned [`Ifv4Net`] retains its associated interface index through
+/// [`Ifv4Net::index`].
 ///
 /// ## Example
 ///
@@ -633,8 +720,8 @@ where
 ///
 /// Provides a filter to determine which addresses to include.
 ///
-/// The returned list does not identify the associated interface; use
-/// [`interfaces`] and [`Interface::ipv6_addrs_by_filter`] for more detail.
+/// Each returned [`Ifv6Net`] retains its associated interface index through
+/// [`Ifv6Net::index`].
 ///
 /// ## Example
 ///
@@ -664,8 +751,11 @@ cfg_multicast!(
   /// Returns a list of the system's multicast interface
   /// addrs.
   ///
-  /// The returned list does not identify the associated interface; use
-  /// [`interfaces`] and [`Interface::multicast_addrs`] for more detail.
+  /// NetBSD and OpenBSD expose this API for portability but return
+  /// [`io::ErrorKind::Unsupported`].
+  ///
+  /// Each returned [`IfAddr`] retains its associated interface index through
+  /// [`IfAddr::index`].
   ///
   /// ## Example
   ///
@@ -680,7 +770,9 @@ cfg_multicast!(
   /// ```
   pub fn interface_multicast_addrs() -> io::Result<SmallVec<IfAddr>> {
     cfg_if::cfg_if! {
-      if #[cfg(windows)] {
+      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+        multicast_unsupported()
+      } else if #[cfg(windows)] {
         os::interface_multicast_addresses(None, |_| true)
       } else {
         os::interface_multicast_addresses(0, |_| true)
@@ -692,8 +784,8 @@ cfg_multicast!(
   /// addrs. The filter is used to determine which multicast
   /// addresses to include.
   ///
-  /// The returned list does not identify the associated interface; use
-  /// [`interfaces`] and [`Interface::multicast_addrs_by_filter`] for more detail.
+  /// Each returned [`IfAddr`] retains its associated interface index through
+  /// [`IfAddr::index`].
   ///
   /// ## Example
   ///
@@ -709,7 +801,10 @@ cfg_multicast!(
     F: FnMut(&IpAddr) -> bool,
   {
     cfg_if::cfg_if! {
-      if #[cfg(windows)] {
+      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+        let _ = f;
+        multicast_unsupported()
+      } else if #[cfg(windows)] {
         os::interface_multicast_addresses(None, f)
       } else {
         os::interface_multicast_addresses(0, f)
@@ -720,8 +815,8 @@ cfg_multicast!(
   /// Returns a list of the system's multicast, IPv4 interface
   /// addrs.
   ///
-  /// The returned list does not identify the associated interface; use
-  /// [`interfaces`] and [`Interface::ipv4_multicast_addrs`] for more detail.
+  /// Each returned [`Ifv4Addr`] retains its associated interface index through
+  /// [`Ifv4Addr::index`].
   ///
   /// ## Example
   ///
@@ -736,7 +831,9 @@ cfg_multicast!(
   /// ```
   pub fn interface_multicast_ipv4_addrs() -> io::Result<SmallVec<Ifv4Addr>> {
     cfg_if::cfg_if! {
-      if #[cfg(windows)] {
+      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+        multicast_unsupported()
+      } else if #[cfg(windows)] {
         os::interface_multicast_ipv4_addresses(None, |_| true)
       } else {
         os::interface_multicast_ipv4_addresses(0, |_| true)
@@ -748,8 +845,8 @@ cfg_multicast!(
   /// addrs. The filter is used to determine which multicast
   /// addresses to include.
   ///
-  /// The returned list does not identify the associated interface; use
-  /// [`interfaces`] and [`Interface::ipv4_multicast_addrs_by_filter`] for more detail.
+  /// Each returned [`Ifv4Addr`] retains its associated interface index through
+  /// [`Ifv4Addr::index`].
   ///
   /// ## Example
   ///
@@ -765,7 +862,10 @@ cfg_multicast!(
     F: FnMut(&Ipv4Addr) -> bool,
   {
     cfg_if::cfg_if! {
-      if #[cfg(windows)] {
+      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+        let _ = f;
+        multicast_unsupported()
+      } else if #[cfg(windows)] {
         os::interface_multicast_ipv4_addresses(None, f)
       } else {
         os::interface_multicast_ipv4_addresses(0, f)
@@ -776,8 +876,8 @@ cfg_multicast!(
   /// Returns a list of the system's multicast, IPv6 interface
   /// addrs.
   ///
-  /// The returned list does not identify the associated interface; use
-  /// [`interfaces`] and [`Interface::ipv6_multicast_addrs`] for more detail.
+  /// Each returned [`Ifv6Addr`] retains its associated interface index through
+  /// [`Ifv6Addr::index`].
   ///
   /// ## Example
   ///
@@ -792,7 +892,9 @@ cfg_multicast!(
   /// ```
   pub fn interface_multicast_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
     cfg_if::cfg_if! {
-      if #[cfg(windows)] {
+      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+        multicast_unsupported()
+      } else if #[cfg(windows)] {
         os::interface_multicast_ipv6_addresses(None, |_| true)
       } else {
         os::interface_multicast_ipv6_addresses(0, |_| true)
@@ -804,8 +906,8 @@ cfg_multicast!(
   /// addrs. The filter is used to determine which multicast
   /// addresses to include.
   ///
-  /// The returned list does not identify the associated interface; use
-  /// [`interfaces`] and [`Interface::ipv6_multicast_addrs_by_filter`] for more detail.
+  /// Each returned [`Ifv6Addr`] retains its associated interface index through
+  /// [`Ifv6Addr::index`].
   ///
   /// ## Example
   ///
@@ -821,7 +923,10 @@ cfg_multicast!(
     F: FnMut(&Ipv6Addr) -> bool,
   {
     cfg_if::cfg_if! {
-      if #[cfg(windows)] {
+      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
+        let _ = f;
+        multicast_unsupported()
+      } else if #[cfg(windows)] {
         os::interface_multicast_ipv6_addresses(None, f)
       } else {
         os::interface_multicast_ipv6_addresses(0, f)
@@ -829,3 +934,76 @@ cfg_multicast!(
     }
   }
 );
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[cfg(linux_like)]
+  fn missing_interface_errno() -> i32 {
+    rustix::io::Errno::NODEV.raw_os_error()
+  }
+
+  #[cfg(bsd_like)]
+  fn missing_interface_errno() -> i32 {
+    libc::ENODEV
+  }
+
+  #[cfg(windows)]
+  fn missing_interface_errno() -> i32 {
+    2 // ERROR_FILE_NOT_FOUND
+  }
+
+  #[cfg(linux_like)]
+  fn permission_errno() -> i32 {
+    rustix::io::Errno::ACCESS.raw_os_error()
+  }
+
+  #[cfg(bsd_like)]
+  fn permission_errno() -> i32 {
+    libc::EACCES
+  }
+
+  #[cfg(windows)]
+  fn permission_errno() -> i32 {
+    5 // ERROR_ACCESS_DENIED
+  }
+
+  #[cfg(linux_like)]
+  fn invalid_input_errno() -> i32 {
+    rustix::io::Errno::INVAL.raw_os_error()
+  }
+
+  #[cfg(bsd_like)]
+  fn invalid_input_errno() -> i32 {
+    libc::EINVAL
+  }
+
+  #[cfg(windows)]
+  fn invalid_input_errno() -> i32 {
+    87 // ERROR_INVALID_PARAMETER
+  }
+
+  #[test]
+  fn known_missing_interface_error_becomes_none() {
+    let result =
+      missing_interface_to_none::<()>(Err(io::Error::from_raw_os_error(missing_interface_errno())));
+    assert_eq!(result.unwrap(), None);
+  }
+
+  #[test]
+  fn permission_error_is_preserved() {
+    let error =
+      missing_interface_to_none::<()>(Err(io::Error::from_raw_os_error(permission_errno())))
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(permission_errno()));
+  }
+
+  #[test]
+  fn invalid_input_error_is_preserved() {
+    let error =
+      missing_interface_to_none::<()>(Err(io::Error::from_raw_os_error(invalid_input_errno())))
+        .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(invalid_input_errno()));
+  }
+}
