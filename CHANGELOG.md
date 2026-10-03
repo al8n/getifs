@@ -96,6 +96,9 @@
   multi-datagram kernel replies, including interrupted-dump retries, nexthop
   resolution, and best-local address lookups, instead of a fuzz-only
   attribute walker. Unit tests cover the same walkers through the replay.
+- Report security vulnerabilities privately through GitHub's private
+  vulnerability reporting instead of the public issue tracker; see
+  `SECURITY.md`.
 
 ## 0.6.2 (October 3rd, 2026)
 
