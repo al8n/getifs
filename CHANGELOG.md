@@ -61,6 +61,12 @@
 - Windows validates FFI buffer lengths and alignment before walking adapter
   records, and interface-name conversion skips unrepresentable Unicode names
   instead of poisoning a complete enumeration.
+- Windows IP Helper tables (`GetIpForwardTable2`, `GetIpInterfaceTable`, and
+  `GetUnicastIpAddressTable`) are owned by one guard that frees them on every
+  status, including Wine's allocate-then-fail path, where they previously
+  leaked. Their rows are read with whole-allocation provenance instead of
+  through a reference to the SDK's one-element `Table` array, which was
+  undefined behavior for every row after the first.
 - Skip an address whose OS-reported prefix length exceeds 32 (IPv4) or 128
   (IPv6) instead of panicking; Windows uses 255 in `OnLinkPrefixLength` for an
   illegal value.
