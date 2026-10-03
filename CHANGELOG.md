@@ -9,10 +9,16 @@
   local interface owns the address, `InvalidInput` when distinct interfaces
   own it, and propagate address-enumeration errors instead of retrying with a
   partial fallback.
-- `interface_by_index` and `interface_by_name` now normalize only known raw
-  OS missing-interface errors to `Ok(None)`; permission, encoding, and parse
-  failures remain errors. The historic `ifname_to_v6_iface` and tuple helper
-  retain their existing `Option` semantics.
+- `interface_by_index` and `interface_by_name` return `Ok(None)` when the
+  index or name is absent from the interface enumeration (including an
+  interface skipped for an unrepresentable name) or the OS reports a known
+  missing-interface status; permission, parse, and other errors remain errors.
+  The historic `ifname_to_v6_iface` and tuple helper retain their existing
+  `Option` semantics.
+- On Windows, `ifname_to_index` reports a name that matches no interface as
+  `ERROR_FILE_NOT_FOUND` (`ErrorKind::NotFound`) instead of
+  `ERROR_INVALID_PARAMETER`, so `interface_by_name` returns `Ok(None)` for it
+  as on the other platforms.
 - Multicast APIs are present on every supported target. NetBSD and OpenBSD
   explicitly return `ErrorKind::Unsupported` where multicast enumeration is
   unavailable.
@@ -27,12 +33,20 @@
 
 - Linux netlink validates multipart framing, terminal messages, and attributes
   before decoding interface, address, route, and MAC data.
+- Linux netlink link and address dumps receive into a 32 KiB buffer, as the
+  kernel expects for dumps, so a large `RTM_NEWLINK` message (for example one
+  carrying many alternative names) no longer fails the dump.
+- Linux and Android create every netlink and `SIOCGIF*` ioctl socket with
+  `SOCK_CLOEXEC`, so the descriptors are not inherited across `exec`.
 - BSD parsing handles compact sockaddrs and KAME-scoped IPv6 safely; NetBSD
   sysctl snapshots handle bounded `ENOMEM` retries and zero-sized results
   without weakening genuine malformed-data or permission errors.
 - Windows validates FFI buffer lengths and alignment before walking adapter
   records, and interface-name conversion skips unrepresentable Unicode names
   instead of poisoning a complete enumeration.
+- Skip an address whose OS-reported prefix length exceeds 32 (IPv4) or 128
+  (IPv6) instead of panicking; Windows uses 255 in `OnLinkPrefixLength` for an
+  illegal value.
 - Restore NetBSD runtime address and route coverage now that the ABI and
   bounded-snapshot handling are in place.
 
@@ -41,8 +55,12 @@
 - Require `iprfc >=0.2.3, <0.3`; lock the public/private RFC 6890
   classification with pure tests, including global IPv6, documentation,
   RFC1918, CGNAT, ULA, loopback, and link-local addresses.
-- Pin `smol_str` to 0.3.2 and `criterion` to 0.7.0 for fresh Rust 1.85
-  resolution. Replace the direct unmaintained `paste` dependency with the
+- Require `smol_str` 0.3.2 or a later 0.3 release. `smol_str` 0.3.4 and later
+  require Rust 1.89, so Rust 1.85–1.88 users should enable Cargo's MSRV-aware
+  resolver (`resolver.incompatible-rust-versions = "fallback"` or
+  `package.resolver = "3"`) or run `cargo update -p smol_str --precise 0.3.2`.
+  Pin the `criterion` dev-dependency to 0.7.0 for Rust 1.85 test builds.
+- Replace the direct unmaintained `paste` dependency with the
   `pastey` 0.2.3 compatibility alias; RUSTSEC-2024-0436 is an unmaintained
   advisory, not a known vulnerability, and transitive `paste` remains outside
   this crate's control. Remove the unused `triomphe` dependency and inactive

@@ -79,7 +79,7 @@ for gateway in gateways {
 | Platform | Interfaces, unicast addresses, and local MTU | Gateways and routes | Multicast memberships |
 | --- | --- | --- | --- |
 | Linux | Yes | Yes | Yes |
-| Android | Yes* | Yes | `Unsupported` when `/proc/net` is restricted |
+| Android | Yes* | Yes | `Unsupported` |
 | Apple platforms | Yes | Yes | Yes |
 | FreeBSD | Yes | Yes | Yes |
 | NetBSD / OpenBSD | Yes | Yes | `Unsupported` |
@@ -109,11 +109,12 @@ Windows | `GetAdaptersAddresses`
   remote path MTU. IP-only MTU lookup returns `NotFound` for no local match
   and `InvalidInput` for an address assigned to distinct interfaces. IPv6
   link-local addresses should be queried with their `IfAddr` scope.
-- `interface_by_index` and `interface_by_name` return `Ok(None)` for known
-  OS missing-interface errors only. Permission, encoding, parsing, and other
-  system errors remain errors. The older `ifname_to_v6_iface` and
-  `ifname_to_iface` retain their historical `Option` meanings; a missing name
-  remains an error there.
+- `interface_by_index` and `interface_by_name` return `Ok(None)` when the
+  index or name is absent from the interface enumeration (including an
+  interface skipped for an unrepresentable name) or the OS reports a known
+  missing-interface status. Permission, parsing, and other system errors
+  remain errors. The older `ifname_to_v6_iface` and `ifname_to_iface` retain
+  their historical `Option` meanings; a missing name remains an error there.
 - Kernel reads are weak snapshots, not transactions. An interface, address,
   name, or index can change between calls (or during a multi-query operation),
   so callers must handle ordinary TOCTOU races.
@@ -147,7 +148,12 @@ target to 60 seconds.
 
 ## Maintenance
 
-The MSRV is Rust 1.85. The direct macro dependency is the maintained `pastey`
+The MSRV is Rust 1.85. `smol_str` 0.3.4 and later require Rust 1.89, so on
+Rust 1.85–1.88 enable Cargo's MSRV-aware resolver
+(`resolver.incompatible-rust-versions = "fallback"` in Cargo configuration, or
+`package.resolver = "3"`) or run `cargo update -p smol_str --precise 0.3.2`.
+
+The direct macro dependency is the maintained `pastey`
 crate, aliased as `paste` so existing macro invocations remain compatible.
 RUSTSEC-2024-0436 identifies the older `paste` crate as unmaintained, not as a
 known vulnerability. Transitive uses can still be selected by

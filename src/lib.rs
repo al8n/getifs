@@ -30,13 +30,15 @@ pub use idx_to_name::ifindex_to_name;
 pub use ifaddr::*;
 pub use ifnet::*;
 pub use interfaces::*;
-/// Re-export of `ipnet`, retained as part of getifs's public API contract.
+/// The `ipnet` crate, which provides the network types wrapped by [`IfNet`],
+/// [`Ifv4Net`], and [`Ifv6Net`].
 pub use ipnet;
-/// Known RFCs for IP addresses, retained as part of getifs's public API
-/// contract.
+/// Known RFCs for IP addresses, for classifying addresses in the
+/// `*_by_filter` queries.
 #[doc(inline)]
 pub use iprfc as rfc;
-/// IP protocol probing, retained as part of getifs's public API contract.
+/// IP protocol probing: whether the host supports IPv4, IPv6, and
+/// IPv4-mapped IPv6.
 #[doc(inline)]
 pub use iprobe as probe;
 pub use local_addrs::*;
@@ -47,10 +49,10 @@ pub use os::Flags;
 pub use private_ip_addrs::*;
 pub use public_ip_addrs::*;
 pub use route::*;
-/// Re-exported compact collections used by getifs return types; retained as
-/// part of getifs's public API contract.
+/// Compact collections returned by the interface, address, gateway, and route
+/// queries.
 pub use smallvec_wrapper::{SmallVec, TinyVec};
-/// Re-export of `SmolStr`, retained as part of getifs's public API contract.
+/// The string type used for interface names.
 pub use smol_str::SmolStr;
 
 mod gateway;
@@ -178,6 +180,9 @@ impl Address for Ifv6Addr {
 
 #[allow(dead_code)]
 trait Net: Sized {
+  /// Returns `None` for an address of the wrong family or a prefix length
+  /// beyond the family's maximum. The prefix comes from the OS, which can
+  /// report an illegal value (Windows uses 255 in `OnLinkPrefixLength`).
   fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self>;
 
   fn try_from_with_filter<F>(index: u32, addr: IpAddr, prefix: u8, mut f: F) -> Option<Self>
@@ -199,7 +204,7 @@ trait Net: Sized {
 impl Net for IfNet {
   #[inline]
   fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
-    Some(IfNet::with_prefix_len_assert(index, addr, prefix))
+    IfNet::with_prefix_len(index, addr, prefix).ok()
   }
 
   #[inline]
@@ -217,7 +222,7 @@ impl Net for Ifv4Net {
   #[inline]
   fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
     match addr {
-      IpAddr::V4(ip) => Some(Ifv4Net::with_prefix_len_assert(index, ip, prefix)),
+      IpAddr::V4(ip) => Ifv4Net::with_prefix_len(index, ip, prefix).ok(),
       _ => None,
     }
   }
@@ -237,7 +242,7 @@ impl Net for Ifv6Net {
   #[inline]
   fn try_from(index: u32, addr: IpAddr, prefix: u8) -> Option<Self> {
     match addr {
-      IpAddr::V6(ip) => Some(Ifv6Net::with_prefix_len_assert(index, ip, prefix)),
+      IpAddr::V6(ip) => Ifv6Net::with_prefix_len(index, ip, prefix).ok(),
       _ => None,
     }
   }
@@ -394,6 +399,37 @@ mod address_trait_tests {
     // Wrong-family input → None.
     let wrong = <Ifv6Net as Net>::try_from(2, v4([10, 0, 0, 0]), 8);
     assert!(wrong.is_none());
+  }
+
+  // OS-reported prefix lengths are untrusted (Windows uses 255 in
+  // `OnLinkPrefixLength` for an illegal value): an out-of-range prefix must
+  // skip the address rather than panic, while the family maximum stays valid.
+  #[test]
+  fn ifnet_net_rejects_out_of_range_prefix() {
+    assert!(<IfNet as Net>::try_from(1, v4([10, 0, 0, 1]), 33).is_none());
+    assert!(<IfNet as Net>::try_from(1, v4([10, 0, 0, 1]), 255).is_none());
+    assert!(<IfNet as Net>::try_from(1, v6([0u8; 16]), 129).is_none());
+    assert!(<IfNet as Net>::try_from(1, v6([0u8; 16]), 255).is_none());
+    let v4_max = <IfNet as Net>::try_from(1, v4([10, 0, 0, 1]), 32).unwrap();
+    assert_eq!(v4_max.prefix_len(), 32);
+    let v6_max = <IfNet as Net>::try_from(1, v6([0u8; 16]), 128).unwrap();
+    assert_eq!(v6_max.prefix_len(), 128);
+  }
+
+  #[test]
+  fn ifv4net_net_rejects_out_of_range_prefix() {
+    assert!(<Ifv4Net as Net>::try_from(1, v4([10, 0, 0, 1]), 33).is_none());
+    assert!(<Ifv4Net as Net>::try_from(1, v4([10, 0, 0, 1]), 255).is_none());
+    let max = <Ifv4Net as Net>::try_from(1, v4([10, 0, 0, 1]), 32).unwrap();
+    assert_eq!(max.prefix_len(), 32);
+  }
+
+  #[test]
+  fn ifv6net_net_rejects_out_of_range_prefix() {
+    assert!(<Ifv6Net as Net>::try_from(1, v6([0u8; 16]), 129).is_none());
+    assert!(<Ifv6Net as Net>::try_from(1, v6([0u8; 16]), 255).is_none());
+    let max = <Ifv6Net as Net>::try_from(1, v6([0u8; 16]), 128).unwrap();
+    assert_eq!(max.prefix_len(), 128);
   }
 
   #[test]

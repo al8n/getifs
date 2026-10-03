@@ -1,8 +1,18 @@
 # getifs fuzzing
 
-The fuzz targets call the crate's cfg-only `getifs::__fuzzing` hooks. They do
-not duplicate production parsers. From the repository root, install the CLI
-with stable Rust, then generate the deterministic binary corpus before a run:
+The fuzz targets call the crate's cfg-only `getifs::__fuzzing` hooks:
+
+- `netlink` drives the production `DumpMessages` framing, the link, address,
+  and route header parsers, and the leaf attribute decoders. Its attribute
+  walk is the fuzz-only `fuzz_rtattrs`, so the per-message attribute loops in
+  the production dump walkers are not fuzzed.
+- `bsd` drives the production decoders (`parse`, `parse_addrs`, the inet
+  address decoders, and `take_sockaddr_frame`), but not the sysctl message
+  walkers that call them (`interface_table`, `interface_addr_table_into`, and
+  `rt_generic_addrs_in`).
+
+From the repository root, install the CLI with stable Rust, then generate the
+deterministic binary corpus before a run:
 
 ```sh
 cargo +stable install cargo-fuzz --locked --version 0.12.0

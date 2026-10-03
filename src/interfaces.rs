@@ -537,8 +537,11 @@ fn is_missing_interface_errno(raw: i32) -> bool {
 
 #[cfg(windows)]
 fn is_missing_interface_errno(raw: i32) -> bool {
-  // ERROR_FILE_NOT_FOUND and ERROR_NOT_FOUND are the Win32 missing-interface
-  // results from if_nametoindex/ConvertInterfaceAliasToLuid.
+  // ERROR_FILE_NOT_FOUND is the status ConvertInterfaceIndexToLuid documents
+  // for an unknown interface. `ifname_to_index` reports an unknown name with
+  // it as well, because ConvertInterfaceAliasToLuid documents only
+  // ERROR_INVALID_PARAMETER and `if_nametoindex` provides no error code.
+  // ERROR_NOT_FOUND is accepted as a defensive equivalent.
   matches!(raw, 2 | 1168)
 }
 
@@ -569,8 +572,10 @@ fn interface_table_for_index(index: u32) -> io::Result<TinyVec<Interface>> {
 
 /// Returns the interface specified by index.
 ///
-/// Returns `Ok(None)` only when the platform reports a known missing-interface
-/// OS error. Permission, encoding, and parse errors are preserved.
+/// Returns `Ok(None)` when the index is absent from the interface enumeration,
+/// including an interface skipped because its name is not representable as
+/// UTF-8, or when the platform reports a known missing-interface OS error.
+/// Permission, parse, and other errors are returned as `Err`.
 ///
 /// ## Example
 ///
@@ -597,8 +602,10 @@ pub fn interface_by_index(index: u32) -> io::Result<Option<Interface>> {
 
 /// Returns the interface specified by name.
 ///
-/// Returns `Ok(None)` only when the platform reports a known missing-interface
-/// OS error. Permission, encoding, and parse errors are preserved.
+/// Returns `Ok(None)` when the name does not resolve to an interface in the
+/// enumeration, including one skipped because its name is not representable as
+/// UTF-8, or when the platform reports a known missing-interface OS error.
+/// Permission, parse, and other errors are returned as `Err`.
 ///
 /// ## Example
 ///

@@ -178,7 +178,7 @@ impl Information {
       let result = unsafe {
         GetAdaptersAddresses(
           AF_UNSPEC as u32,
-          GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_INCLUDE_ALL_INTERFACES,
+          GAA_FLAG_INCLUDE_PREFIX,
           std::ptr::null() as _,
           buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
           &mut size,

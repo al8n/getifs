@@ -300,7 +300,9 @@ jobs:
           copyback: false
           prepare: |
             pkg install -y rust
+          # pkg's Rust can trail dependencies' rust-version; resolve compatible versions.
           run: |
+            export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback
             cargo build --all-features
             cargo test --all-features --lib --tests -- --nocapture
             cargo doc --no-deps --all-features

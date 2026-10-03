@@ -42,7 +42,7 @@ use rustix::{
   ioctl::{self, Opcode, Updater},
   net::{
     netdevice::{index_to_name_inlined, name_to_index},
-    socket, AddressFamily, SocketType,
+    socket_with, AddressFamily, SocketFlags, SocketType,
   },
 };
 use smallvec_wrapper::TinyVec;
@@ -87,7 +87,12 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   // permitted for untrusted_app (unlike RTM_GETLINK). AF_INET creation
   // requires android.permission.INTERNET — see the module-level permission
   // note.
-  let sock = socket(AddressFamily::INET, SocketType::DGRAM, None)?;
+  let sock = socket_with(
+    AddressFamily::INET,
+    SocketType::DGRAM,
+    SocketFlags::CLOEXEC,
+    None,
+  )?;
 
   let mut out = TinyVec::new();
 

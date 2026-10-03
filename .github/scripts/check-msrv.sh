@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+# Resolve like an MSRV-aware consumer: newest versions whose rust-version fits.
+export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback
+
 repo_root=${1:-"$PWD"}
 scratch_root=${RUNNER_TEMP:-${TMPDIR:-/tmp}}
 worktree=$(mktemp -d "${scratch_root%/}/getifs-msrv.XXXXXX")

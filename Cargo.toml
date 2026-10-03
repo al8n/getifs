@@ -44,7 +44,7 @@ iprobe = "0.1"
 ipnet = "2"
 iprfc = ">=0.2.3, <0.3"
 paste = { package = "pastey", version = "0.2.3" }
-smol_str = "=0.3.2"
+smol_str = "0.3.2"
 smallvec-wrapper = "0.4"
 
 [target.'cfg(all(not(windows), not(any(target_os = "android", target_os = "linux"))))'.dependencies]

@@ -364,22 +364,19 @@ fn decode_nlmsg_done(body: &[u8]) -> io::Result<()> {
   Err(io::Error::from_raw_os_error(raw))
 }
 
-/// Receive-buffer size for route / nexthop dumps.
+/// Receive-buffer size for every netlink dump.
 ///
-/// A single `RTM_NEWROUTE` message can comfortably exceed 4 KiB on
-/// hosts with large ECMP `RTA_MULTIPATH` lists or `RTM_NEWNEXTHOP`
-/// dumps with deep `NHA_GROUP` payloads (8 bytes per member). The
-/// per-interface and per-address walks stay on a page (their messages
-/// are small and bounded), but route walks must handle any single
-/// message the kernel produces. `Handle::recv` uses `MSG_TRUNC` and
-/// returns `ENOBUFS` when this buffer is too small rather than parsing
-/// a partial message.
+/// The kernel's `netlink_dump` (net/netlink/af_netlink.c) expects the reader
+/// to provide a buffer as large as max(`min_dump_alloc`, 32 KiB); a smaller
+/// buffer truncates any datagram that exceeds it. Single messages can exceed
+/// a 4 KiB page: `RTM_NEWLINK` grows with each alternative interface name,
+/// `RTM_NEWROUTE` with large ECMP `RTA_MULTIPATH` lists, and `RTM_NEWNEXTHOP`
+/// with deep `NHA_GROUP` payloads (8 bytes per member). `Handle::recv` uses
+/// `MSG_TRUNC` and returns `ENOBUFS` when a datagram is larger than this
+/// buffer, rather than parsing a partial message.
 ///
-/// `iproute2` uses 32 KiB for the same dumps; matching that gives
-/// plenty of headroom for ECMP across dozens of nexthops without
-/// resorting to the more invasive `recvmsg` + `MSG_TRUNC` retry
-/// pattern.
-const ROUTE_RECV_BUF_SIZE: usize = 32 * 1024;
+/// `iproute2` uses 32 KiB for the same dumps.
+const DUMP_RECV_BUF_SIZE: usize = 32 * 1024;
 
 #[inline]
 fn mac_addr_from_attr(data: &[u8]) -> Option<MacAddr> {
@@ -411,8 +408,7 @@ pub(super) fn netlink_interface(family: AddressFamily, ifi: u32) -> io::Result<T
     let lsa = handle.sock()?;
 
     // Receive and process messages
-    let page_size = rustix::param::page_size();
-    let mut rb = vec![0u8; page_size];
+    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
 
     let mut interfaces = TinyVec::new();
 
@@ -537,8 +533,7 @@ where
     let lsa = handle.sock()?;
 
     // Receive and process messages
-    let page_size = rustix::param::page_size();
-    let mut rb = vec![0u8; page_size];
+    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
 
     loop {
       let nr = handle.recv(&mut rb)?;
@@ -686,8 +681,8 @@ where
     let lsa = handle.sock()?;
 
     // Route walks must accept any single message the kernel emits —
-    // see `ROUTE_RECV_BUF_SIZE` for why a page is too small here.
-    let mut rb = vec![0u8; ROUTE_RECV_BUF_SIZE];
+    // see `DUMP_RECV_BUF_SIZE` for why a page is too small here.
+    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
     // Set of interfaces tied at `best_metric`. ECMP / nexthop-object
     // groups can list multiple usable nexthops behind a single route,
     // and equal-metric default routes on different interfaces are
@@ -1116,9 +1111,8 @@ fn dump_nexthops() -> io::Result<std::collections::HashMap<u32, NexthopInfo>> {
 
     let lsa = handle.sock()?;
     // Nexthop dumps can carry deep `NHA_GROUP` payloads (8 bytes per
-    // member); use the route-walk buffer size for the same reason
-    // detailed at `ROUTE_RECV_BUF_SIZE`.
-    let mut rb = vec![0u8; ROUTE_RECV_BUF_SIZE];
+    // member); see `DUMP_RECV_BUF_SIZE`.
+    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
 
     let mut map: HashMap<u32, NexthopInfo> = HashMap::new();
 
@@ -1373,9 +1367,9 @@ where
     handle.send(&req)?;
 
     let lsa = handle.sock()?;
-    // See `ROUTE_RECV_BUF_SIZE`: a page is too small for routes that
+    // See `DUMP_RECV_BUF_SIZE`: a page is too small for routes that
     // carry large `RTA_MULTIPATH` ECMP payloads.
-    let mut rb = vec![0u8; ROUTE_RECV_BUF_SIZE];
+    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
 
     loop {
       let nr = handle.recv(&mut rb)?;
@@ -1921,8 +1915,8 @@ where
     let lsa = handle.sock()?;
 
     // Receive and process messages. `rt_generic_addrs` walks routes
-    // with `RTA_MULTIPATH` payloads — see `ROUTE_RECV_BUF_SIZE`.
-    let mut rb = vec![0u8; ROUTE_RECV_BUF_SIZE];
+    // with `RTA_MULTIPATH` payloads — see `DUMP_RECV_BUF_SIZE`.
+    let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
     let mut gateways = SmallVec::new();
     // Policy-routing tables and multipath/ECMP entries can surface the
     // same gateway on multiple route messages. Dedup via a HashSet

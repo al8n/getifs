@@ -113,6 +113,14 @@ fn ifis() {
   }
 }
 
+// The name is shorter than IFNAMSIZ, so BSD's `if_nametoindex` cannot
+// truncate it into the name of a real interface.
+#[test]
+fn missing_name_is_none() {
+  let result = interface_by_name("getifs-none0");
+  assert!(matches!(result, Ok(None)), "unexpected result: {result:?}");
+}
+
 #[test]
 fn if_addrs() {
   let snapshot = interfaces().unwrap();
