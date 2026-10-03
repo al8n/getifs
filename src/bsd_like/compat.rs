@@ -339,40 +339,53 @@ pub(super) use libc::NET_RT_IFMALIST;
 #[cfg(any(apple, target_os = "freebsd"))]
 pub(super) use libc::ifa_msghdr as IfaMsghdr;
 
-// DragonFly `<net/if.h>` `struct ifa_msghdr` (matches FreeBSD):
+// DragonFly `<net/if.h>` `struct ifa_msghdr` for RTM_VERSION 7:
 //
 //     struct ifa_msghdr {
 //         u_short ifam_msglen;
 //         u_char  ifam_version;
 //         u_char  ifam_type;
-//         int     ifam_addrs;
-//         int     ifam_flags;
 //         u_short ifam_index;
+//         int     ifam_flags;
+//         int     ifam_addrs;
+//         int     ifam_addrflags;
 //         int     ifam_metric;
 //     };
+//
+// DragonFly commit 43a373152df2d405c9940983e584e6a25e76632d
+// reordered this header, added address flags, and bumped RTM_VERSION to 7;
+// follow-up c7700f286d46231166dfc96646ac83506147ae97 removed the short-lived
+// `ifam_pid` field. Go's DragonFly route parser uses this resulting 24-byte
+// body offset for kernels at the 500705 OS-version boundary and newer. The
+// message walker already rejects records whose version differs from
+// libc::RTM_VERSION, so retaining the pre-v7 20-byte layout here would not
+// provide compatibility with old kernels; it only misdecodes current v7
+// messages.
 #[cfg(target_os = "dragonfly")]
 #[repr(C)]
 pub(super) struct IfaMsghdr {
   pub ifam_msglen: u16,
   pub ifam_version: u8,
   pub ifam_type: u8,
-  pub ifam_addrs: libc::c_int,
-  pub ifam_flags: libc::c_int,
   pub ifam_index: u16,
-  _pad: u16,
+  _pad_to_flags: u16,
+  pub ifam_flags: libc::c_int,
+  pub ifam_addrs: libc::c_int,
+  pub ifam_addrflags: libc::c_int,
   pub ifam_metric: libc::c_int,
 }
 
 #[cfg(target_os = "dragonfly")]
-const _: () = assert!(core::mem::size_of::<IfaMsghdr>() == 20);
+const _: () = assert!(core::mem::size_of::<IfaMsghdr>() == 24);
 #[cfg(target_os = "dragonfly")]
 const _: () = {
   use core::mem::offset_of;
   assert!(offset_of!(IfaMsghdr, ifam_msglen) == 0);
-  assert!(offset_of!(IfaMsghdr, ifam_addrs) == 4);
+  assert!(offset_of!(IfaMsghdr, ifam_index) == 4);
   assert!(offset_of!(IfaMsghdr, ifam_flags) == 8);
-  assert!(offset_of!(IfaMsghdr, ifam_index) == 12);
-  assert!(offset_of!(IfaMsghdr, ifam_metric) == 16);
+  assert!(offset_of!(IfaMsghdr, ifam_addrs) == 12);
+  assert!(offset_of!(IfaMsghdr, ifam_addrflags) == 16);
+  assert!(offset_of!(IfaMsghdr, ifam_metric) == 20);
 };
 
 // NetBSD `<net/if.h>` (modern — NetBSD 8+):

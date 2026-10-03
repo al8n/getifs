@@ -243,21 +243,31 @@ impl Interface {
     /// Returns a list of multicast, joined group addrs
     /// for a specific interface.
     ///
-    /// NetBSD and OpenBSD expose this API for portability but return
-    /// [`io::ErrorKind::Unsupported`].
+    /// Multicast membership is capability-dependent: Android, DragonFly,
+    /// NetBSD, and OpenBSD return [`io::ErrorKind::Unsupported`]. Do not
+    /// assume every Unix platform provides multicast-group enumeration.
     ///
     /// ## Example
     ///
     /// ```rust
     /// use getifs::interfaces;
     ///
-    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    /// # fn main() -> std::io::Result<()> {
+    /// let Some(interface) = interfaces()?.into_iter().next() else {
+    ///   return Ok(());
+    /// };
     ///
-    /// let addrs = interface.multicast_addrs().unwrap();
+    /// let addrs = match interface.multicast_addrs() {
+    ///   Ok(v) => v,
+    ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+    ///   Err(e) => return Err(e),
+    /// };
     ///
     /// for addr in addrs {
     ///   println!("Multicast Addr: {}", addr);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn multicast_addrs(&self) -> io::Result<SmallVec<IfAddr>> {
       cfg_if::cfg_if! {
@@ -280,15 +290,24 @@ impl Interface {
     /// ```rust
     /// use getifs::interfaces;
     ///
-    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    /// # fn main() -> std::io::Result<()> {
+    /// let Some(interface) = interfaces()?.into_iter().next() else {
+    ///   return Ok(());
+    /// };
     ///
-    /// let addrs = interface.multicast_addrs_by_filter(|addr| {
+    /// let addrs = match interface.multicast_addrs_by_filter(|addr| {
     ///   !addr.is_loopback()
-    /// }).unwrap();
+    /// }) {
+    ///   Ok(v) => v,
+    ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+    ///   Err(e) => return Err(e),
+    /// };
     ///
     /// for addr in addrs {
     ///   println!("Multicast Addr: {}", addr);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn multicast_addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<IfAddr>>
     where
@@ -314,13 +333,22 @@ impl Interface {
     /// ```rust
     /// use getifs::interfaces;
     ///
-    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    /// # fn main() -> std::io::Result<()> {
+    /// let Some(interface) = interfaces()?.into_iter().next() else {
+    ///   return Ok(());
+    /// };
     ///
-    /// let addrs = interface.ipv4_multicast_addrs().unwrap();
+    /// let addrs = match interface.ipv4_multicast_addrs() {
+    ///   Ok(v) => v,
+    ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+    ///   Err(e) => return Err(e),
+    /// };
     ///
     /// for addr in addrs {
     ///   println!("Multicast IPv4 Addr: {}", addr);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn ipv4_multicast_addrs(&self) -> io::Result<SmallVec<Ifv4Addr>> {
       cfg_if::cfg_if! {
@@ -343,15 +371,24 @@ impl Interface {
     /// ```rust
     /// use getifs::interfaces;
     ///
-    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    /// # fn main() -> std::io::Result<()> {
+    /// let Some(interface) = interfaces()?.into_iter().next() else {
+    ///   return Ok(());
+    /// };
     ///
-    /// let addrs = interface.ipv4_multicast_addrs_by_filter(|addr| {
+    /// let addrs = match interface.ipv4_multicast_addrs_by_filter(|addr| {
     ///   !addr.is_loopback()
-    /// }).unwrap();
+    /// }) {
+    ///   Ok(v) => v,
+    ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+    ///   Err(e) => return Err(e),
+    /// };
     ///
     /// for addr in addrs {
     ///   println!("Multicast IPv4 Addr: {}", addr);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn ipv4_multicast_addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<Ifv4Addr>>
     where
@@ -377,13 +414,22 @@ impl Interface {
     /// ```rust
     /// use getifs::interfaces;
     ///
-    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    /// # fn main() -> std::io::Result<()> {
+    /// let Some(interface) = interfaces()?.into_iter().next() else {
+    ///   return Ok(());
+    /// };
     ///
-    /// let addrs = interface.ipv6_multicast_addrs().unwrap();
+    /// let addrs = match interface.ipv6_multicast_addrs() {
+    ///   Ok(v) => v,
+    ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+    ///   Err(e) => return Err(e),
+    /// };
     ///
     /// for addr in addrs {
     ///   println!("Multicast IPv6 Addr: {}", addr);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn ipv6_multicast_addrs(&self) -> io::Result<SmallVec<Ifv6Addr>> {
       cfg_if::cfg_if! {
@@ -406,15 +452,24 @@ impl Interface {
     /// ```rust
     /// use getifs::interfaces;
     ///
-    /// let interface = interfaces().unwrap().into_iter().next().unwrap();
+    /// # fn main() -> std::io::Result<()> {
+    /// let Some(interface) = interfaces()?.into_iter().next() else {
+    ///   return Ok(());
+    /// };
     ///
-    /// let addrs = interface.ipv6_multicast_addrs_by_filter(|addr| {
+    /// let addrs = match interface.ipv6_multicast_addrs_by_filter(|addr| {
     ///   !addr.is_loopback()
-    /// }).unwrap();
+    /// }) {
+    ///   Ok(v) => v,
+    ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+    ///   Err(e) => return Err(e),
+    /// };
     ///
     /// for addr in addrs {
     ///   println!("Multicast IPv6 Addr: {}", addr);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn ipv6_multicast_addrs_by_filter<F>(&self, f: F) -> io::Result<SmallVec<Ifv6Addr>>
     where
@@ -751,8 +806,9 @@ cfg_multicast!(
   /// Returns a list of the system's multicast interface
   /// addrs.
   ///
-  /// NetBSD and OpenBSD expose this API for portability but return
-  /// [`io::ErrorKind::Unsupported`].
+  /// Multicast membership is capability-dependent: Android, DragonFly,
+  /// NetBSD, and OpenBSD return [`io::ErrorKind::Unsupported`]. Do not assume
+  /// every Unix platform provides multicast-group enumeration.
   ///
   /// Each returned [`IfAddr`] retains its associated interface index through
   /// [`IfAddr::index`].
@@ -762,11 +818,18 @@ cfg_multicast!(
   /// ```rust
   /// use getifs::interface_multicast_addrs;
   ///
-  /// let addrs = interface_multicast_addrs().unwrap();
+  /// # fn main() -> std::io::Result<()> {
+  /// let addrs = match interface_multicast_addrs() {
+  ///   Ok(v) => v,
+  ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+  ///   Err(e) => return Err(e),
+  /// };
   ///
   /// for addr in addrs {
   ///   println!("Multicast Addr: {:?}", addr);
   /// }
+  /// # Ok(())
+  /// # }
   /// ```
   pub fn interface_multicast_addrs() -> io::Result<SmallVec<IfAddr>> {
     cfg_if::cfg_if! {
@@ -792,9 +855,16 @@ cfg_multicast!(
   /// ```rust
   /// use getifs::interface_multicast_addrs_by_filter;
   ///
-  /// let addrs = interface_multicast_addrs_by_filter(|addr| {
-  ///  !addr.is_loopback()
-  /// }).unwrap();
+  /// # fn main() -> std::io::Result<()> {
+  /// let addrs = match interface_multicast_addrs_by_filter(|addr| {
+  ///   !addr.is_loopback()
+  /// }) {
+  ///   Ok(v) => v,
+  ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+  ///   Err(e) => return Err(e),
+  /// };
+  /// # Ok(())
+  /// # }
   /// ```
   pub fn interface_multicast_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<IfAddr>>
   where
@@ -823,11 +893,18 @@ cfg_multicast!(
   /// ```rust
   /// use getifs::interface_multicast_ipv4_addrs;
   ///
-  /// let addrs = interface_multicast_ipv4_addrs().unwrap();
+  /// # fn main() -> std::io::Result<()> {
+  /// let addrs = match interface_multicast_ipv4_addrs() {
+  ///   Ok(v) => v,
+  ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+  ///   Err(e) => return Err(e),
+  /// };
   ///
   /// for addr in addrs {
   ///  println!("Multicast IPv4 Addr: {:?}", addr);
   /// }
+  /// # Ok(())
+  /// # }
   /// ```
   pub fn interface_multicast_ipv4_addrs() -> io::Result<SmallVec<Ifv4Addr>> {
     cfg_if::cfg_if! {
@@ -853,9 +930,16 @@ cfg_multicast!(
   /// ```rust
   /// use getifs::interface_multicast_ipv4_addrs_by_filter;
   ///
-  /// let addrs = interface_multicast_ipv4_addrs_by_filter(|addr| {
+  /// # fn main() -> std::io::Result<()> {
+  /// let addrs = match interface_multicast_ipv4_addrs_by_filter(|addr| {
   ///   !addr.is_loopback()
-  /// }).unwrap();
+  /// }) {
+  ///   Ok(v) => v,
+  ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+  ///   Err(e) => return Err(e),
+  /// };
+  /// # Ok(())
+  /// # }
   /// ```
   pub fn interface_multicast_ipv4_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
   where
@@ -884,11 +968,18 @@ cfg_multicast!(
   /// ```rust
   /// use getifs::interface_multicast_ipv6_addrs;
   ///
-  /// let addrs = interface_multicast_ipv6_addrs().unwrap();
+  /// # fn main() -> std::io::Result<()> {
+  /// let addrs = match interface_multicast_ipv6_addrs() {
+  ///   Ok(v) => v,
+  ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+  ///   Err(e) => return Err(e),
+  /// };
   ///
   /// for addr in addrs {
   ///   println!("Multicast IPv6 Addr: {:?}", addr);
   /// }
+  /// # Ok(())
+  /// # }
   /// ```
   pub fn interface_multicast_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
     cfg_if::cfg_if! {
@@ -914,9 +1005,16 @@ cfg_multicast!(
   /// ```rust
   /// use getifs::interface_multicast_ipv6_addrs_by_filter;
   ///
-  /// let addrs = interface_multicast_ipv6_addrs_by_filter(|addr| {
+  /// # fn main() -> std::io::Result<()> {
+  /// let addrs = match interface_multicast_ipv6_addrs_by_filter(|addr| {
   ///   !addr.is_loopback()
-  /// }).unwrap();
+  /// }) {
+  ///   Ok(v) => v,
+  ///   Err(e) if e.kind() == std::io::ErrorKind::Unsupported => return Ok(()),
+  ///   Err(e) => return Err(e),
+  /// };
+  /// # Ok(())
+  /// # }
   /// ```
   pub fn interface_multicast_ipv6_addrs_by_filter<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
   where

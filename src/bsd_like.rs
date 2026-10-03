@@ -1258,4 +1258,59 @@ mod tests {
     buf[8] = 0xff;
     assert!(parse(&buf).unwrap().is_none());
   }
+
+  #[cfg(target_os = "dragonfly")]
+  #[test]
+  fn dragonfly_v7_ifa_header_decodes_loopback_fixture() {
+    use super::compat::IfaMsghdr;
+
+    const HEADER_SIZE: usize = 24;
+    let addrs_mask = (1u32 << RTAX_NETMASK as u32) | (1u32 << RTAX_IFA as u32);
+    let mut message = vec![0u8; HEADER_SIZE + 8 + 16];
+
+    let message_len = message.len() as u16;
+    message[0..2].copy_from_slice(&message_len.to_ne_bytes());
+    message[2] = RTM_VERSION as u8;
+    message[3] = RTM_NEWADDR as u8;
+    message[4..6].copy_from_slice(&2u16.to_ne_bytes()); // lo0 in the CI VM
+    message[8..12].copy_from_slice(&1i32.to_ne_bytes()); // ifam_flags
+    message[12..16].copy_from_slice(&(addrs_mask as i32).to_ne_bytes());
+
+    // Compact IPv4 /8 netmask followed by a full 127.0.0.1 sockaddr.
+    message[HEADER_SIZE..HEADER_SIZE + 8]
+      .copy_from_slice(&[8, AF_INET as u8, 0, 0, 255, 0, 0, 0]);
+    message[HEADER_SIZE + 8..].copy_from_slice(&[
+      16,
+      AF_INET as u8,
+      0,
+      0,
+      127,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+    ]);
+
+    assert_eq!(mem::size_of::<IfaMsghdr>(), HEADER_SIZE);
+    // SAFETY: `message` contains at least HEADER_SIZE initialized bytes;
+    // read_unaligned copies the repr(C) header into an aligned local.
+    let header: IfaMsghdr = unsafe { core::ptr::read_unaligned(message.as_ptr().cast()) };
+    assert_eq!(header.ifam_index, 2);
+    assert_eq!(header.ifam_addrs as u32, addrs_mask);
+
+    let addrs = parse_addrs(header.ifam_addrs as u32, &message[HEADER_SIZE..]).unwrap();
+    let mask = addrs[RTAX_NETMASK as usize].unwrap();
+    assert_eq!(ip_mask_to_prefix(mask).unwrap(), 8);
+    assert_eq!(
+      addrs[RTAX_IFA as usize],
+      Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+    );
+  }
 }
