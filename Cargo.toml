@@ -49,14 +49,16 @@ smallvec-wrapper = "0.4"
 
 [target.'cfg(all(not(windows), not(any(target_os = "android", target_os = "linux"))))'.dependencies]
 libc = "0.2"
+# `time` works around rustix 1.1.5's `timespec` gate, which breaks iprobe's `net`-only build (bytecodealliance/rustix#1689); getifs does not use it.
 rustix = { version = "1.1", features = ["time"] }
 
 [target.'cfg(all(any(target_os = "android", target_os = "linux")))'.dependencies]
-rustix = { version = "1.1", features = ["net", "param", "time"] }
+# `time` works around rustix 1.1.5's `timespec` gate, which breaks iprobe's `net`-only build (bytecodealliance/rustix#1689); getifs does not use it.
+rustix = { version = "1.1", features = ["net", "time"] }
 linux-raw-sys = { version = "0.12", features = ["if_arp", "net", "netlink"] }
 
 [target.'cfg(all(any(target_os = "android", target_os = "linux")))'.dev-dependencies]
-rustix = { version = "1.1", features = ["net", "param", "process"] }
+rustix = { version = "1.1", features = ["net", "process"] }
 
 
 [target.'cfg(windows)'.dependencies]

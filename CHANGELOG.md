@@ -95,6 +95,9 @@
   `UnsupportedAddressSize` variant. `hardware-address` 1.0 uses `pastey`, so
   the unmaintained `paste` now enters only through `iprfc` and
   `smallvec-wrapper`.
+- Remove rustix's unused `param` feature from the Linux and Android
+  dependencies. The `time` feature is retained for the rustix 1.1.5
+  workaround (see 0.6.2).
 - Restrict the Linux backend cfg to Linux and Android. Other unsupported
   targets now fail with a clear compile-time error instead of compiling a
   meaningless Linux path.
