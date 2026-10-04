@@ -6,6 +6,7 @@
 
 use std::io;
 
+use common::interface_disappeared;
 use getifs::{
   gateway_addrs_by_filter, gateway_ipv4_addrs_by_filter, gateway_ipv6_addrs_by_filter,
   interface_addrs_by_filter, interface_ipv4_addrs_by_filter, interface_ipv6_addrs_by_filter,
@@ -13,6 +14,8 @@ use getifs::{
   private_addrs_by_filter, private_ipv4_addrs_by_filter, private_ipv6_addrs_by_filter,
   public_addrs_by_filter, public_ipv4_addrs_by_filter, public_ipv6_addrs_by_filter,
 };
+
+mod common;
 
 #[cfg(any(
   target_vendor = "apple",
@@ -45,13 +48,6 @@ fn assert_multicast_result<T>(result: io::Result<T>) {
   if let Err(error) = result {
     panic!("multicast enumeration failed: {error}");
   }
-}
-
-fn interface_disappeared(index: u32, name: &str) -> bool {
-  !interfaces()
-    .expect("refresh interface snapshot after lookup race")
-    .iter()
-    .any(|interface| interface.index() == index && interface.name().as_str() == name)
 }
 
 #[test]

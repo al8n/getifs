@@ -503,17 +503,17 @@ pub fn interfaces() -> io::Result<TinyVec<Interface>> {
 }
 
 #[cfg(linux_like)]
-fn is_missing_interface_errno(raw: i32) -> bool {
+pub(crate) fn is_missing_interface_errno(raw: i32) -> bool {
   raw == rustix::io::Errno::NODEV.raw_os_error() || raw == rustix::io::Errno::NXIO.raw_os_error()
 }
 
 #[cfg(bsd_like)]
-fn is_missing_interface_errno(raw: i32) -> bool {
+pub(crate) fn is_missing_interface_errno(raw: i32) -> bool {
   raw == libc::ENODEV || raw == libc::ENXIO
 }
 
 #[cfg(windows)]
-fn is_missing_interface_errno(raw: i32) -> bool {
+pub(crate) fn is_missing_interface_errno(raw: i32) -> bool {
   // ERROR_FILE_NOT_FOUND is the status ConvertInterfaceIndexToLuid documents
   // for an unknown interface. `ifname_to_index` reports an unknown name with
   // it as well, because ConvertInterfaceAliasToLuid documents only

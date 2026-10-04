@@ -187,5 +187,5 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> io::Result<Option<Interf
 /// as `ENODEV` / `ENXIO`; only those are treated as "skip this index". Every
 /// other errno is a real failure that must propagate.
 fn vanished(e: rustix::io::Errno) -> bool {
-  e == rustix::io::Errno::NODEV || e == rustix::io::Errno::NXIO
+  crate::interfaces::is_missing_interface_errno(e.raw_os_error())
 }
