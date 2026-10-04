@@ -510,7 +510,8 @@ fn decode_nlmsg_done(body: &[u8]) -> io::Result<()> {
   Err(io::Error::from_raw_os_error(raw))
 }
 
-/// Receive-buffer size for every netlink dump.
+/// Receive-buffer size for the link, route, nexthop and gateway dumps. An
+/// address dump receives [`addr_dump_recv_buf_size`] bytes instead.
 ///
 /// The kernel's `netlink_dump` (net/netlink/af_netlink.c) expects the reader
 /// to provide a buffer as large as max(`min_dump_alloc`, 32 KiB); a smaller
@@ -522,11 +523,32 @@ fn decode_nlmsg_done(body: &[u8]) -> io::Result<()> {
 /// buffer, rather than parsing a partial message.
 ///
 /// The buffer is received into without zero-filling, and the kernel touches
-/// only the bytes it writes, so its size adds no per-dump cost beyond the
+/// only the bytes it writes, so its size adds no user-space cost beyond the
 /// allocation.
 ///
 /// `iproute2` uses 32 KiB for the same dumps.
 const DUMP_RECV_BUF_SIZE: usize = 32 * 1024;
+
+/// Receive capacity for an `RTM_GETADDR` dump: one page, capped at
+/// [`DUMP_RECV_BUF_SIZE`] because the kernel never sends an address-dump
+/// datagram larger than `SKB_WITH_OVERHEAD(32768)`.
+///
+/// `RTM_GETADDR` sets no `min_dump_alloc`, so the kernel's `netlink_dump`
+/// (net/netlink/af_netlink.c) sizes each reply skb as max(`NLMSG_GOODSIZE`,
+/// `max_recvmsg_len`) and trims it to that size. `NLMSG_GOODSIZE` is at most
+/// one page, and at most `SKB_WITH_OVERHEAD(8192)` on larger pages.
+/// `max_recvmsg_len` is the largest buffer the reader has passed to
+/// `recvmsg`, capped at `SKB_WITH_OVERHEAD(32768)`, so this capacity covers
+/// every skb allocated after the first `recvmsg`. The first skb is allocated
+/// while the kernel handles the request, before any `recvmsg` has set
+/// `max_recvmsg_len`, so it is `NLMSG_GOODSIZE`, which this capacity also
+/// covers. A larger buffer only makes the kernel allocate larger skbs for a
+/// dump that never needs them. A datagram that still did not fit would make
+/// `Handle::recv` fail with `ENOBUFS`, through `MSG_TRUNC`, rather than parse
+/// a partial message.
+fn addr_dump_recv_buf_size() -> usize {
+  rustix::param::page_size().min(DUMP_RECV_BUF_SIZE)
+}
 
 /// How a netlink dump ended.
 enum DumpEnd {
@@ -540,6 +562,9 @@ enum DumpEnd {
 /// then hands each data message of the reply to `on_message` until
 /// `NLMSG_DONE` or a family-unavailable `NLMSG_ERROR` ends the dump.
 ///
+/// `capacity` is the receive buffer size, so the largest datagram the dump
+/// accepts: a longer one fails it with `ENOBUFS`. It must be non-zero.
+///
 /// `request` must carry sequence number 1. [`DumpMessages`] checks every
 /// reply message against it and the socket's port id, along with the framing
 /// and the dump-wide control messages. That includes messages after the
@@ -548,12 +573,13 @@ enum DumpEnd {
 fn run_dump<T: Transport>(
   transport: &mut T,
   request: &[u8],
+  capacity: usize,
   mut on_message: impl FnMut(MessageHeader, &[u8]) -> io::Result<()>,
 ) -> io::Result<DumpEnd> {
   let handle = transport.open()?;
   handle.send(request)?;
   let pid = handle.pid()?;
-  let mut rb = Vec::with_capacity(DUMP_RECV_BUF_SIZE);
+  let mut rb = Vec::with_capacity(capacity);
 
   loop {
     let nr = handle.recv(&mut rb)?;
@@ -647,7 +673,8 @@ fn netlink_interface_once<T: Transport>(
 
   let mut interfaces = TinyVec::new();
 
-  run_dump(transport, req.as_bytes(), |h, message| {
+  let request = req.as_bytes();
+  run_dump(transport, request, DUMP_RECV_BUF_SIZE, |h, message| {
     match h.nlmsg_type as u32 {
       val if val == RTM_NEWLINK => {
         // Bound the per-message slice to the netlink message rather than
@@ -776,7 +803,9 @@ where
 {
   let req = NetlinkRouteRequest::new(RTM_GETADDR as u16, 1, family.as_raw() as u8, ifi);
 
-  run_dump(transport, req.as_bytes(), |h, message| {
+  let request = req.as_bytes();
+  let capacity = addr_dump_recv_buf_size();
+  run_dump(transport, request, capacity, |h, message| {
     match h.nlmsg_type as u32 {
       val if val == RTM_NEWADDR => {
         // See `netlink_interface` for why this is bounded to the
@@ -944,7 +973,8 @@ where
   // will produce a strictly smaller value.
   let mut best_pref_rank: u8 = u8::MAX;
 
-  let end = run_dump(transport, req.as_bytes(), |h, received| {
+  let request = req.as_bytes();
+  let end = run_dump(transport, request, DUMP_RECV_BUF_SIZE, |h, received| {
     let hlen = received.len();
 
     match h.nlmsg_type as u32 {
@@ -1321,7 +1351,7 @@ fn dump_nexthops<T: Transport>(
 
   let mut map: HashMap<u32, NexthopInfo> = HashMap::new();
 
-  run_dump(transport, &req, |h, received| {
+  run_dump(transport, &req, DUMP_RECV_BUF_SIZE, |h, received| {
     let hlen = received.len();
 
     match h.nlmsg_type as u32 {
@@ -1578,7 +1608,8 @@ where
 
   let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
 
-  let end = run_dump(transport, req.as_bytes(), |h, received| {
+  let request = req.as_bytes();
+  let end = run_dump(transport, request, DUMP_RECV_BUF_SIZE, |h, received| {
     let hlen = received.len();
 
     match h.nlmsg_type as u32 {
@@ -2126,7 +2157,8 @@ where
   // `src/bsd_like/rt_generic.rs` and `src/windows/gateway.rs`.
   let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
 
-  let end = run_dump(transport, req.as_bytes(), |h, received| {
+  let request = req.as_bytes();
+  let end = run_dump(transport, request, DUMP_RECV_BUF_SIZE, |h, received| {
     let hlen = received.len();
 
     match h.nlmsg_type as u32 {
@@ -3548,6 +3580,35 @@ mod netlink_tests {
       &[interface(1, "eth0"), interface(2, "eth1")]
     );
     assert_eq!(opens, 1);
+  }
+
+  // An address dump receives `addr_dump_recv_buf_size()` bytes and a link dump
+  // `DUMP_RECV_BUF_SIZE`, so a datagram between the two sizes overflows only
+  // the address dump.
+  #[test]
+  fn datagram_over_the_address_buffer_fails_the_address_dump_but_not_the_link_dump() {
+    let capacity = addr_dump_recv_buf_size();
+    assert_eq!(capacity, rustix::param::page_size().min(DUMP_RECV_BUF_SIZE));
+
+    // A link message grown past the address buffer, as by many alternative
+    // names.
+    let mut body = link(1, b"eth0\0");
+    body.extend(rtattr(if_arp::IFLA_PROP_LIST as u16, &vec![0; capacity]));
+    let datagram = [frame(RTM_NEWLINK as u16, 0, &body), done()].concat();
+    assert!(datagram.len() > capacity);
+
+    let err = replay_addrs(vec![datagram.clone()]).0.unwrap_err();
+    assert_eq!(
+      err.raw_os_error(),
+      Some(rustix::io::Errno::NOBUFS.raw_os_error())
+    );
+
+    // Where pages reach `DUMP_RECV_BUF_SIZE` the two buffers are equal, so no
+    // datagram fits one but not the other.
+    if datagram.len() <= DUMP_RECV_BUF_SIZE {
+      let links = replay_links(vec![datagram]).0.unwrap();
+      assert_eq!(links.as_slice(), &[interface(1, "eth0")]);
+    }
   }
 
   // The Android interface fallback engages only on `PermissionDenied`, which

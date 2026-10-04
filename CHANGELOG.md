@@ -44,9 +44,11 @@
   flagged dump is attempted up to three times before `ErrorKind::Interrupted`
   is returned, and a receive interrupted by a signal is re-issued. Address and
   gateway filters may be invoked again across attempts.
-- Linux netlink link and address dumps receive into a 32 KiB buffer, as the
-  kernel expects for dumps, so a large `RTM_NEWLINK` message (for example one
+- Linux netlink link dumps receive into a 32 KiB buffer, as the kernel
+  expects for dumps, so a large `RTM_NEWLINK` message (for example one
   carrying many alternative names) no longer fails the dump.
+- Linux netlink dumps are received without zero-filling the buffer, and
+  address dumps use a page-sized buffer, so they are no slower than in 0.6.
 - Linux and Android create every netlink and `SIOCGIF*` ioctl socket with
   `SOCK_CLOEXEC`, so the descriptors are not inherited across `exec`.
 - BSD parsing handles compact sockaddrs and KAME-scoped IPv6 safely; NetBSD
@@ -95,9 +97,6 @@
   `UnsupportedAddressSize` variant. `hardware-address` 1.0 uses `pastey`, so
   the unmaintained `paste` now enters only through `iprfc` and
   `smallvec-wrapper`.
-- Remove rustix's unused `param` feature from the Linux and Android
-  dependencies. The `time` feature is retained for the rustix 1.1.5
-  workaround (see 0.6.2).
 - Restrict the Linux backend cfg to Linux and Android. Other unsupported
   targets now fail with a clear compile-time error instead of compiling a
   meaningless Linux path.
