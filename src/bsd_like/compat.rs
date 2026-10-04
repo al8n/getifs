@@ -1,7 +1,7 @@
 //! Cross-BSD kernel-struct compatibility.
 //!
 //! The `libc` crate exports `rt_msghdr` **only** on Apple targets and
-//! `ifa_msghdr` only on Apple/FreeBSD/DragonFly. For the remaining
+//! `ifa_msghdr` only on Apple/FreeBSD. For the remaining
 //! BSDs we define the structs ourselves, using the layout from each
 //! OS's `<net/route.h>` and `<net/if.h>`. Only the fields we actually
 //! consult need to be named by hand; the remaining fields are filled
@@ -152,7 +152,7 @@ const _: () = {
 // `rtm_index` as `c_int` would interpret the kernel-zeroed padding
 // bytes as the high half of the index value, mangling the result on
 // big-endian. The total size and the offsets of every other field are
-// the same as before — only the read of `rtm_index` differs.
+// the same either way — only the read of `rtm_index` differs.
 
 #[cfg(target_os = "netbsd")]
 #[repr(C)]
@@ -198,9 +198,7 @@ pub(super) struct RtMetricsU64 {
 // Also assert the offset of every field we read at runtime: a
 // reorder that happens to keep the total size constant but moves a
 // field would otherwise pass the size check while still corrupting
-// the read. This catches the previous `rtm_index: c_int` mistake
-// (where the size was right but the field was 4 bytes wide instead
-// of 2 + 2-byte pad).
+// the read.
 #[cfg(target_os = "netbsd")]
 const _: () = assert!(core::mem::size_of::<RtMetricsU64>() == 80);
 #[cfg(target_os = "netbsd")]
@@ -263,12 +261,10 @@ pub(super) struct RtMsghdr {
 //         u_int     rmx_pad;
 //     };
 //
-// 2 × u64 + 10 × u_int = 16 + 40 = 56 bytes. Previous revision had
-// the u64 fields and u_int fields in the wrong order (e.g. claimed
-// `rmx_locks` was u64; it's actually u_int); the kernel's
-// `rmx_recvpipe` ended up at offset 88 in the Rust struct vs 32 in
-// the kernel struct, so `best_local_addrs_in` read garbage as the
-// metric.
+// 2 × u64 + 10 × u_int = 16 + 40 = 56 bytes. The u64 fields come first
+// and `rmx_locks` onward are u_int, which puts `rmx_recvpipe` at offset
+// 32; the offset assertions below keep the field order and widths from
+// drifting from the kernel's.
 #[cfg(target_os = "openbsd")]
 #[repr(C)]
 pub(super) struct RtMetricsOpenBsd {
@@ -308,8 +304,11 @@ const _: () = {
 // ifma_msghdr (multicast group membership)
 // =====================================================================
 //
-// Apple / FreeBSD: `libc` exports the struct + `NET_RT_IFMALIST`
-// directly.
+// FreeBSD: `libc` exports the struct and `NET_RT_IFMALIST`, which are
+// re-exported below.
+//
+// Apple: `bsd_like.rs` uses `libc::ifma_msghdr2` and `NET_RT_IFLIST2`
+// directly, so nothing is defined here.
 //
 // DragonFly / NetBSD / OpenBSD: the kernels do not expose multicast
 // group enumeration via sysctl at all — none of them defines

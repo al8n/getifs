@@ -119,7 +119,8 @@ fn build_routev4(
   // broadcast address of one of this host's own unicast prefixes —
   // see `directed_broadcast_set` for how that set is derived. Drop
   // all three so cross-platform behavior is consistent with
-  // `bsd_like::build_routev4` and Linux's `RTN_BROADCAST` filter.
+  // `bsd_like::build_routev4` and Linux's `RTN_UNICAST` / `RTN_LOCAL`
+  // type filter.
   if dst_v4.is_multicast() || dst_v4.is_broadcast() {
     return None;
   }

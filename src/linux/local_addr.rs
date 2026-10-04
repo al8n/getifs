@@ -25,9 +25,9 @@ pub(crate) fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 
 pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
   // Walk AF_INET and AF_INET6 separately, matching the BSD/Windows
-  // pathways. `netlink_best_local_addrs(AF_UNSPEC)` would track a
-  // single `best_ifindex` across both families, then fetch all
-  // addresses from that one interface — on dual-stack hosts where
+  // pathways. `netlink_best_local_addrs(AF_UNSPEC)` would rank the
+  // default routes of both families on one shared key, then fetch all
+  // addresses from the winning interface(s) — on dual-stack hosts where
   // the v4 and v6 default routes live on different interfaces (a
   // VPN's v4 default with native v6, for example), one family's
   // addresses would be silently dropped or misattributed.

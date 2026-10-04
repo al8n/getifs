@@ -33,18 +33,18 @@ use super::{compat::RtMsghdr, fetch, message_too_short, parse_addrs};
 /// `AF_INET` / `AF_INET6` to limit the dump to one family.
 ///
 /// **Per-message parse failures are propagated**, not swallowed.
-/// Earlier revisions tolerated `parse_addrs` errors so NetBSD and
-/// OpenBSD's compact-form netmask sockaddrs (where `sa_family =
-/// AF_INET[6]` but `sa_len < size_of::<sockaddr_in[6]>()`) wouldn't
-/// fail the whole dump — at the cost of returning a successful but
-/// silently incomplete routing table. The decoder now handles those
-/// short forms via `parse_short_inet_addr`, so a `parse_addrs` failure
-/// here is a real malformed message and surfaces to the caller.
+/// NetBSD and OpenBSD's compact-form netmask sockaddrs (where
+/// `sa_family = AF_INET[6]` but `sa_len < size_of::<sockaddr_in[6]>()`)
+/// decode through `parse_short_inet_addr`, so a `parse_addrs` failure
+/// here is a real malformed message. Tolerating it would return a
+/// successful but silently incomplete routing table, so it surfaces to
+/// the caller.
 ///
 /// Length-shorter-than-header (`l < size_of::<RtMsghdr>()`) is *not*
-/// tolerated — that's a real kernel-side bug. Trailing zero padding
-/// (`l == 0` or `src.len() < l`) is the kernel's normal end-of-stream
-/// sentinel and terminates the loop cleanly.
+/// tolerated — that's a real kernel-side bug. A message that declares
+/// more bytes than remain (`src.len() < l`) is truncation and fails the
+/// walk too. Trailing zero padding (`l == 0`) is the kernel's normal
+/// end-of-stream sentinel and terminates the loop cleanly.
 pub(super) fn walk_route_table<F>(family: i32, on_route: F) -> io::Result<()>
 where
   F: FnMut(u32, libc::c_int, Option<IpAddr>, Option<IpAddr>, Option<IpAddr>),

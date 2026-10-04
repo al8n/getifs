@@ -343,8 +343,7 @@ mod tests {
     assert_eq!(r.destination(), &dst);
     assert_eq!(r.gateway(), gw);
     assert!(!r.is_default());
-    // Don't assert on `r.name()` — the previous version called
-    // `name().is_ok()` with a hard-coded index of 2, which fails on
+    // Don't assert on `r.name()`: a hard-coded index of 2 fails on
     // hosts (Windows runners, some macOS / container CIs) where no
     // interface happens to be at that index. The constructor under
     // test doesn't depend on that lookup; this is a unit test, not

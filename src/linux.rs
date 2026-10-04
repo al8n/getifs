@@ -346,10 +346,11 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   // Android 11+ untrusted_app is denied RTM_GETLINK (it needs the SELinux
   // `nlmsg_readpriv` permission, neverallowed for apps targeting API >= 30),
   // so the netlink interface dump fails with PermissionDenied even though
-  // the bind is gone. Fall back to the RTM_GETADDR + SIOCGIF* ioctl path
-  // (see linux/android.rs) — the same combination bionic's getifaddrs and
-  // Go's net package use. Older Android / app domains that still permit
-  // RTM_GETLINK keep the richer netlink result (including the MAC address).
+  // the socket is never bound explicitly. Fall back to the RTM_GETADDR +
+  // SIOCGIF* ioctl path (see linux/android.rs) — the same combination
+  // bionic's getifaddrs and Go's net package use. Older Android / app
+  // domains that still permit RTM_GETLINK keep the richer netlink result
+  // (including the MAC address).
   match netlink_interface(AddressFamily::UNSPEC, index) {
     Err(e) if e.kind() == io::ErrorKind::PermissionDenied => android::interface_table(index),
     other => other,

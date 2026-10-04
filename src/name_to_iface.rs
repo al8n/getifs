@@ -101,8 +101,8 @@ mod tests {
   fn ifname_to_v4_iface_first_interface() {
     let ift = crate::interfaces().unwrap();
     let first = ift.iter().next().unwrap();
-    // Result may be None (loopback has no non-link-local v4 on
-    // many CI hosts), but the call itself must succeed.
+    // Result may be None (the first interface can lack a
+    // non-link-local v4 address), but the call itself must succeed.
     let _ = ifname_to_v4_iface(first.name()).unwrap();
   }
 

@@ -1,11 +1,10 @@
 use std::env::var;
 
 fn main() {
-  // Don't rerun this on changes other than build.rs, as we only depend on
-  // the rustc version.
+  // Rerun only when this script changes: its output depends on nothing but
+  // the target OS.
   println!("cargo:rerun-if-changed=build.rs");
 
-  // Gather target information.
   let os = var("CARGO_CFG_TARGET_OS").unwrap();
 
   // Rust's libc crate groups some OS's together which have similar APIs;

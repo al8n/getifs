@@ -19,8 +19,8 @@ use windows_sys::Win32::Networking::WinSock::*;
 /// effective metric for the requested family's default route, or an
 /// empty `SmallVec` if no usable default exists. Plural return is
 /// deliberate: Windows does install equal-cost defaults (multi-homed
-/// hosts, ECMP-style WAN bonding), and the previous single-`Option`
-/// shape silently dropped every interface past the first one in
+/// hosts, ECMP-style WAN bonding), and a single-`Option` return would
+/// silently drop every interface past the first one in
 /// `GetIpForwardTable2` order. Mirrors the Linux/BSD `best_oifs`
 /// pattern so all three platforms behave consistently when a metric
 /// tie exists.
@@ -32,12 +32,13 @@ use windows_sys::Win32::Networking::WinSock::*;
 /// Joining the interface metric matters on multi-homed hosts where a
 /// low-route-metric default sits on a high-cost interface (Wi-Fi
 /// behind a cellular fallback, for example) — comparing on
-/// `route.Metric` alone would silently misorder them.
+/// `route.Metric` alone would silently misorder them. Rows on an
+/// interface that is not `Connected` (or is absent from
+/// `GetIpInterfaceTable`) are skipped.
 ///
-/// History: earlier revisions of this code used `GetBestRoute2(NULL,
-/// 0, NULL, &dest, ...)` and then `GetBestInterfaceEx(&zero_dest,
-/// ...)`. Both queries — passing the unspecified address as a
-/// destination — are outside the documented contracts of those APIs:
+/// This walks the forwarding table instead of asking `GetBestRoute2`
+/// or `GetBestInterfaceEx` for the best route to the unspecified
+/// address, which is outside the documented contracts of both APIs:
 /// `GetBestRoute2` requires both the destination AND at least one
 /// interface selector to be initialized
 /// (https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getbestroute2),
@@ -45,12 +46,11 @@ use windows_sys::Win32::Networking::WinSock::*;
 /// route to the *specified* IPv4 or IPv6 address"
 /// (https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getbestinterfaceex)
 /// — `0.0.0.0` / `::` is an unspecified address, not a documented
-/// "give me the default" sentinel. Both happened to work on shipping
-/// Windows, but neither is guaranteed by the API contract. The
-/// forwarding-table walk is the right shape: it asks the only
-/// question Windows answers unambiguously — "which routes have
-/// `/0`?" — and applies the same effective-metric tie-break the
-/// kernel uses.
+/// "give me the default" sentinel. Both calls happen to work on
+/// shipping Windows, but neither is guaranteed by its API contract.
+/// The forwarding-table walk asks the only question Windows answers
+/// unambiguously — "which routes have `/0`?" — and applies the same
+/// effective-metric tie-break the kernel uses.
 fn best_default_route_interface(family: u16) -> io::Result<SmallVec<u32>> {
   // SAFETY: `GetIpForwardTable2` is an IP Helper table getter.
   let forward = match unsafe { OwnedMibTable::fetch(|table| GetIpForwardTable2(family, table)) } {
@@ -230,9 +230,8 @@ mod tests {
 
   // Pure-function unit test for `classify_table_error`. Covers
   // every arm of the whitelist match plus the catch-all error
-  // path. Live tarpaulin runs only ever hit this when a Win32
-  // table API actually fails on the host, so the branches stayed
-  // uncovered.
+  // path, which a live run reaches only when a Win32 table API
+  // actually fails on the host.
   #[test]
   fn classify_table_error_whitelist_returns_empty() {
     for code in [50u32, 1168u32, 1231u32] {

@@ -17,11 +17,6 @@ impl TestInterface {
     let ifconfig =
       which::which("ifconfig").map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
 
-    // `Command::new` already specifies the program; the previous code
-    // also pushed "ifconfig" as argv[1] (a port-from-Go thinko, since
-    // Go's `Cmd.Args` includes argv[0] but Rust's `args()` does not),
-    // so the resulting invocation was `ifconfig ifconfig <name> create`
-    // and ifconfig parsed "ifconfig" as the interface name.
     let mut setup_cmd = Command::new(&ifconfig);
     setup_cmd.arg(&self.name).arg("create");
     self.setup_cmds.push(setup_cmd);

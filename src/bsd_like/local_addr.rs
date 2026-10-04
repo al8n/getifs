@@ -71,8 +71,8 @@ pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
 /// present (`rmx_recvpipe`, `rmx_pksent`, etc.) are TCP-pipe metrics,
 /// not routing priority. Returning `0` for those targets makes every
 /// candidate compare equal, and the caller-side selector then
-/// collects every default-route ifindex (instead of arbitrarily
-/// picking by an irrelevant TCP metric, which the previous code did).
+/// collects every default-route ifindex instead of arbitrarily
+/// picking by an irrelevant TCP metric.
 #[cfg(target_os = "openbsd")]
 #[inline]
 fn route_priority(rtm: &RtMsghdr) -> u8 {
@@ -103,14 +103,13 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
 pub(super) fn best_route_interfaces(routes: &[u8], family: i32) -> io::Result<SmallVec<u16>> {
   // Selection key: route priority (lower wins on OpenBSD, all-zero
   // elsewhere). `best_oifs` holds every interface that ties at the
-  // current best priority. The previous code keyed on
-  // `rtm_rmx.rmx_recvpipe` — a TCP receive-pipe metric, not a routing
-  // priority — so on hosts with multiple defaults it could pick an
-  // interface based on irrelevant TCP state instead of the one the
-  // kernel actually uses. On non-OpenBSD BSDs there is no usable
-  // priority field at all, so we collect every default-route oif and
-  // emit addresses for all of them; that's strictly more conservative
-  // than picking arbitrarily.
+  // current best priority. `rtm_rmx.rmx_recvpipe` is not a key: it is
+  // a TCP receive-pipe metric, not a routing priority, so keying on it
+  // would pick an interface based on irrelevant TCP state instead of
+  // the one the kernel actually uses. On non-OpenBSD BSDs there is no
+  // usable priority field at all, so we collect every default-route
+  // oif and emit addresses for all of them; that's strictly more
+  // conservative than picking arbitrarily.
   let mut best_oifs: SmallVec<u16> = SmallVec::new();
   let mut best_priority: u8 = u8::MAX;
 
@@ -137,13 +136,13 @@ pub(super) fn best_route_interfaces(routes: &[u8], family: i32) -> io::Result<Sm
 
       // SAFETY: `src` is a `Vec<u8>` (u8-aligned); copy the header
       // out via `read_unaligned` before reading fields. Same rationale
-      // as `walk_route_table` / `rt_generic_addrs_in` /
+      // as `parse_route_table` / `parse_rt_generic_addrs` /
       // `parse_inet_addr` — see comments there.
       let header_size = std::mem::size_of::<RtMsghdr>();
       if l < header_size {
         // Message claims a length shorter than its own header type —
         // a kernel-side bug or version skew. Surface it (consistent
-        // with `walk_route_table` / `rt_generic_addrs_in`) rather
+        // with `parse_route_table` / `parse_rt_generic_addrs`) rather
         // than reading past the message into the next entry.
         return Err(message_too_short());
       }
@@ -151,7 +150,7 @@ pub(super) fn best_route_interfaces(routes: &[u8], family: i32) -> io::Result<Sm
 
       // Same usable-route filter as `bsd_like/route.rs`. A
       // `RTF_REJECT` / `RTF_BLACKHOLE` default route can be `RTF_UP`
-      // with a low metric and would otherwise win `best_ifindex`,
+      // with a low metric and would otherwise win the selection,
       // making `best_local_*` return addresses on an interface the
       // kernel never delivers via. `RTF_BROADCAST` / `RTF_MULTICAST`
       // are housekeeping routes the kernel attaches to interfaces
@@ -167,7 +166,7 @@ pub(super) fn best_route_interfaces(routes: &[u8], family: i32) -> io::Result<Sm
       // outbound traffic" walk must not pick them — the addresses
       // returned would only be correct for traffic that already has
       // a matching source bound. Same per-platform shape as
-      // `walk_route_table` (NetBSD: `RTF_SRC`; OpenBSD:
+      // `parse_route_table` (NetBSD: `RTF_SRC`; OpenBSD:
       // `RTAX_SRC` / `RTAX_SRCMASK` slots in `rtm_addrs`).
       #[cfg(target_os = "netbsd")]
       {
@@ -192,9 +191,9 @@ pub(super) fn best_route_interfaces(routes: &[u8], family: i32) -> io::Result<Sm
       //     `RTAX_DST` entirely (one BSD encoding of the default
       //     route is "no destination, only a gateway");
       //   - decodes the compact `sa_family = AF_INET[6]` short
-      //     sockaddrs that NetBSD/OpenBSD emit for netmasks and that
-      //     the previous inline decode here silently dropped, leaving
-      //     `is_default` false for valid default routes.
+      //     sockaddrs that NetBSD/OpenBSD emit for netmasks; a decoder
+      //     that silently dropped them would leave `is_default` false
+      //     for valid default routes.
       let addrs = parse_addrs(rtm.rtm_addrs as u32, &src[header_size..l])?;
       let dst = addrs[RTAX_DST as usize];
       let dst_present = (rtm.rtm_addrs as u32 & libc::RTA_DST as u32) != 0;

@@ -20,7 +20,6 @@ pub fn ifname_to_index(name: &str) -> io::Result<u32> {
 fn ifname_to_index_in(name: &str) -> io::Result<u32> {
   use std::ffi::CString;
 
-  // Convert to CString for C interface
   let name_cstr = CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
   let res = unsafe { libc::if_nametoindex(name_cstr.as_ptr()) };
@@ -79,7 +78,6 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
       status => return Err(win32_status_error(status)),
     }
 
-    // Convert LUID to index
     let mut idx = 0u32;
     let result = unsafe { ConvertInterfaceLuidToIndex(&luid, &mut idx) };
     if result != NO_ERROR {
@@ -125,8 +123,7 @@ mod tests {
   // Covers the success arm by round-tripping a real interface
   // (looked up via `interfaces()` first). Skipped on DragonFly:
   // its vmactions VM has interface churn during test runs, so a
-  // name from `interfaces()` may not still resolve a moment later
-  // (same root cause as the cfg-gate on `tests/interfaces.rs::ifis`).
+  // name from `interfaces()` may not still resolve a moment later.
   #[cfg(not(target_os = "dragonfly"))]
   #[test]
   fn round_trip_first_interface() {

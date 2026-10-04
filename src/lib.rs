@@ -306,7 +306,7 @@ fn is_ipv6_unspecified(addr: [u8; 16]) -> bool {
 // family arms of `try_from`, the simple `addr()` / `index()`
 // delegations, and the filter / unspecified-address helpers all live
 // in this file but are only ever invoked through deeply layered
-// platform code paths, so live tarpaulin runs miss them. These
+// platform code paths, so live coverage runs miss them. These
 // trivial unit tests give us a direct hit on each arm without
 // requiring a particular host network configuration.
 #[cfg(test)]

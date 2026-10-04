@@ -82,9 +82,9 @@ where
 {
   let mut results = SmallVec::new();
   // The routing table can contain many duplicates (same address
-  // reached via different routes). Previously the code used
-  // `results.contains(&addr)` which is O(n²); this tracks dedup in a
-  // HashSet keyed by `(index, IpAddr)` for O(1) check per candidate.
+  // reached via different routes). Tracking dedup in a HashSet keyed
+  // by `(index, IpAddr)` is an O(1) check per candidate, where scanning
+  // `results` would be O(n²).
   let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
   unsafe {
     let mut src = buf;
@@ -92,7 +92,7 @@ where
     while src.len() > 4 {
       let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
       // Same end-of-stream sentinel as `walk_route_table` /
-      // `best_local_addrs_in`: a zero-length record byte-pair is the
+      // `best_route_interfaces`: a zero-length record byte-pair is the
       // kernel's residual padding past the last valid message, not a
       // malformed message. Erroring here would discard the entire
       // gateway/best-local result on platforms whose sysctl response
@@ -120,24 +120,23 @@ where
       // upcoming `read_unaligned` doesn't read past this message into
       // the next one when the kernel reports a short / version-skewed
       // record. (Same defence the route walker has at
-      // `bsd_like/route.rs::walk_route_table`.)
+      // `bsd_like/route.rs::parse_route_table`.)
       if l < header_size {
         return Err(message_too_short());
       }
 
       // SAFETY: `src` is a `Vec<u8>` (u8-aligned), `read_unaligned`
       // copies into an aligned local before we read fields. Same
-      // rationale as in `walk_route_table` / `parse_inet_addr`.
+      // rationale as in `parse_route_table` / `parse_inet_addr`.
       let rtm: RtMsghdr = std::ptr::read_unaligned(src.as_ptr() as *const RtMsghdr);
 
       // Require *both* `RTF_UP` and the caller's requested flag
-      // (e.g. `RTF_GATEWAY` for `gateway_addrs*`). The previous
-      // `(rtm_flags & (RTF_UP | rtf)) == 0` predicate was an OR
-      // mask that admitted any route with *either* bit set — so a
-      // down gateway (`RTF_GATEWAY` without `RTF_UP`) would still
-      // pass through and surface in the output even though the
-      // kernel will not use it for forwarding. Although
-      // `NET_RT_FLAGS` asks the kernel to filter by `rtf`,
+      // (e.g. `RTF_GATEWAY` for `gateway_addrs*`). An OR-mask test
+      // like `(rtm_flags & (RTF_UP | rtf)) == 0` would admit any route
+      // with *either* bit set — so a down gateway (`RTF_GATEWAY`
+      // without `RTF_UP`) would pass through and surface in the output
+      // even though the kernel will not use it for forwarding.
+      // Although `NET_RT_FLAGS` asks the kernel to filter by `rtf`,
       // entries can still come back with `RTF_UP` cleared during
       // churn or shutdown.
       if (rtm.rtm_flags & RTF_UP) == 0 || (rtm.rtm_flags & rtf) == 0 {
@@ -147,11 +146,11 @@ where
 
       // The address area starts after the message header and is
       // bounded by the message length `l`. Walking a `&[u8]` cursor
-      // (instead of raw pointers) gives us cheap length checks before
-      // every `read_unaligned`, so a malformed `sa_len` or unexpected
-      // `RtMsghdr` layout on a single BSD target can no longer make us
-      // read past the message into the next entry or off the end of
-      // the sysctl buffer.
+      // (instead of raw pointers) bounds-checks every sockaddr before
+      // it is decoded, so a malformed `sa_len` or unexpected
+      // `RtMsghdr` layout on a single BSD target cannot make us read
+      // past the message into the next entry or off the end of the
+      // sysctl buffer.
       let header_size = std::mem::size_of::<RtMsghdr>();
       if l < header_size {
         // Message claims a length shorter than its own header type;
@@ -161,7 +160,6 @@ where
       }
       let mut cur = &src[header_size..l];
 
-      // Iterate through addresses
       let mut i = 1;
       let mut addrs = rtm.rtm_addrs;
       while addrs != 0 {

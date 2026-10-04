@@ -28,10 +28,8 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
     return Err(io::Error::last_os_error());
   }
 
-  // Use CStr to handle null-terminated string
   let name = unsafe { CStr::from_ptr(ifname.as_ptr() as *const libc::c_char) };
 
-  // Convert to string and then to SmolStr
   name
     .to_str()
     .map(SmolStr::new)

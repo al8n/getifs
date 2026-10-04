@@ -9,9 +9,9 @@ use libc::{
 #[cfg(apple)]
 use libc::NET_RT_IFLIST2;
 
-// `libc::ifa_msghdr` is absent on NetBSD/OpenBSD. Route it through the
-// compat module, which provides a local definition on those targets
-// and re-exports `libc::ifa_msghdr` everywhere else.
+// `libc::ifa_msghdr` is absent on DragonFly, NetBSD and OpenBSD. Route
+// it through the compat module, which defines it locally on those
+// targets and re-exports `libc::ifa_msghdr` on Apple and FreeBSD.
 use compat::IfaMsghdr as ifa_msghdr;
 use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
@@ -131,8 +131,8 @@ fn build_routev4(
   //   as `0.0.0.0` (or omits it entirely); treat as `/0`.
   // - `RTF_HOST` set: explicit host route, prefix is `/32`.
   // - Otherwise: a network route whose mask we can't decode — skip
-  //   rather than fabricate `/32` (Codex round-13 caught this turning
-  //   `fe80::/64` into `fe80::/128` in the IPv6 path).
+  //   rather than fabricate a host prefix (`/32`, or `/128` for IPv6),
+  //   which would turn `fe80::/64` into `fe80::/128`.
   let prefix_len = match netmask {
     Some(IpAddr::V4(m)) => ip_mask_to_prefix(IpAddr::V4(m)).ok()?,
     _ if dst_v4.is_unspecified() => 0,
@@ -190,7 +190,8 @@ fn build_routev6(
 /// `EOPNOTSUPP`. Anything else propagates. The numeric values for
 /// these errnos vary across BSDs (macOS `EOPNOTSUPP = 102` vs.
 /// FreeBSD/NetBSD/OpenBSD `EOPNOTSUPP = 45`), so we read them from
-/// `libc::E*` rather than hardcoding — `rustix` isn't a BSD dep.
+/// `libc::E*` rather than hardcoding — getifs does not use `rustix` on
+/// BSD.
 ///
 /// Used by the two-family BSD union APIs (`route_table_by_filter`,
 /// `best_local_addrs`) so a single-stack host that successfully
@@ -604,8 +605,9 @@ fn strip_kame_scope(mut ip: [u8; 16]) -> Ipv6Addr {
 pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
   // Sysctl returns a `Vec<u8>`, which only formally guarantees u8
   // alignment for its data pointer. The kernel pads each routing
-  // message to KERNAL_ALIGN bytes (4 on Apple, 8 elsewhere), so the
-  // sockaddr offsets happen to land on a usable boundary in practice
+  // message to KERNAL_ALIGN bytes (4 on Apple, 8 on NetBSD, the pointer
+  // size on the other BSDs), so the sockaddr offsets happen to land on
+  // a usable boundary in practice
   // — but creating `&libc::sockaddr_in[6]` from `b.as_ptr()` is still
   // UB by the language rules whenever `b` isn't aligned for the
   // target type. `read_unaligned` copies into an aligned local
@@ -634,7 +636,7 @@ pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> 
       let sockaddr: libc::sockaddr_in6 =
         unsafe { core::ptr::read_unaligned(b.as_ptr() as *const libc::sockaddr_in6) };
 
-      // TODO: create own Ipv6Addr
+      // `Ipv6Addr` has no zone, so the scope id is read but dropped.
       let _zone_id = sockaddr.sin6_scope_id;
       let addr = strip_kame_scope(sockaddr.sin6_addr.s6_addr);
 
@@ -657,12 +659,12 @@ pub(super) fn parse_addrs(
     }
 
     // The kernel claimed slot `i` is present, so a sockaddr is
-    // expected. Bailing here on `b.len() < KERNAL_ALIGN` (the previous
-    // pre-loop break) silently turned a truncated message — for
-    // instance a route record advertising `RTAX_DST` with no body —
-    // into `as_[RTAX_DST] = None`, which the route_table builder then
-    // folded into a synthetic `0.0.0.0/0` / `::/0` default route.
-    // Surface as a malformed message instead of fabricating data.
+    // expected. Breaking out of the loop on `b.len() < KERNAL_ALIGN`
+    // would silently turn a truncated message — for instance a route
+    // record advertising `RTAX_DST` with no body — into
+    // `as_[RTAX_DST] = None`, which the route_table builder folds into
+    // a synthetic `0.0.0.0/0` / `::/0` default route. Surface it as a
+    // malformed message instead of fabricating data.
     if b.len() < KERNAL_ALIGN {
       return Err(io::Error::new(
         io::ErrorKind::InvalidData,
@@ -1010,8 +1012,8 @@ where
         // `RTAX_NETMASK` for point-to-point and tunnel interfaces
         // (the mask slot sometimes carries peer-address bytes
         // instead of a clean prefix mask). Propagating that error
-        // killed `interfaces()` / `Interface::addrs()` entirely on
-        // those hosts even though the rest of the addresses were
+        // would kill `interfaces()` / `Interface::addrs()` entirely on
+        // those hosts even though the rest of the addresses are
         // perfectly readable. A skipped address is strictly better
         // than no addresses; if the caller only cares about a
         // single interface they can detect the gap themselves.
@@ -1094,7 +1096,7 @@ cfg_apple!(
           core::ptr::read_unaligned(b.as_ptr() as *const libc::ifma_msghdr2);
         let len = ifam.ifmam_msglen as usize;
 
-        // Same per-message length checks as `interface_addr_table`.
+        // Same per-message length checks as `parse_interface_addr_table_into`.
         if len < HEADER_SIZE || len > b.len() {
           return Err(message_too_short());
         }
@@ -1161,7 +1163,7 @@ where
       let ifam: IfmaMsghdr = core::ptr::read_unaligned(b.as_ptr() as *const IfmaMsghdr);
       let len = ifam.ifmam_msglen as usize;
 
-      // Same per-message length checks as `interface_addr_table`.
+      // Same per-message length checks as `parse_interface_addr_table_into`.
       if len < HEADER_SIZE || len > b.len() {
         return Err(message_too_short());
       }
@@ -1227,9 +1229,10 @@ mod tests {
 
   // Pure-function unit tests for the BSD parser helpers and the
   // `family_unavailable_to_empty` errno classifier. These run on
-  // every BSD CI target (FreeBSD VM + macOS) and exercise branches
-  // that are otherwise reachable only via specific kernel-message
-  // shapes which a live test environment doesn't necessarily emit.
+  // every BSD CI target (the FreeBSD, OpenBSD, NetBSD and DragonFly
+  // VMs, and macOS) and exercise branches that are otherwise
+  // reachable only via specific kernel-message shapes which a live
+  // test environment doesn't necessarily emit.
 
   #[test]
   fn family_unavailable_collapses_known_errnos() {

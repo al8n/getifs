@@ -48,10 +48,10 @@ where
 {
   let mut results = SmallVec::new();
   // Multi-homed or multi-path Windows hosts can surface the same
-  // gateway via several routes in the forwarding table. The previous
-  // `!results.contains(&addr)` check was O(n²); dedup via a HashSet
-  // keyed by `(index, IpAddr)` makes it O(1) per candidate, matching
-  // the pattern already used on BSD (`src/bsd_like/rt_generic.rs`).
+  // gateway via several routes in the forwarding table. Dedup via a
+  // HashSet keyed by `(index, IpAddr)` is an O(1) check per candidate,
+  // where scanning `results` would be O(n²). The BSD walker
+  // (`src/bsd_like/rt_generic.rs`) dedups the same way.
   let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
 
   // Query each requested family independently. `forward_table` reports

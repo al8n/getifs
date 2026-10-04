@@ -52,11 +52,11 @@ const RTA_SRC: u16 = netlink::rtattr_type_t::RTA_SRC as u16;
 // custom policy tables as if they were the main table.
 const RTA_TABLE: u16 = netlink::rtattr_type_t::RTA_TABLE as u16;
 // RTA_NH_ID indicates the route is installed via an `ip nexthop`
-// nexthop-object (resolved by a separate netlink subsystem). The
-// current `IpRoute` model has no way to dereference it, so we skip
-// these routes deliberately rather than letting them fall through the
-// `oif == 0` guard. Decoding nexthop objects is documented as a
-// known gap in `route_table`.
+// nexthop-object (resolved by a separate netlink subsystem). Such a
+// route carries no inline `RTA_OIF` / `RTA_GATEWAY`, so the walkers
+// defer it and resolve the id against an `RTM_GETNEXTHOP` dump (see
+// `resolve_nh_id`) rather than letting it fall through the
+// `oif == 0` guard.
 const RTA_NH_ID: u16 = netlink::rtattr_type_t::RTA_NH_ID as u16;
 // RTA_VIA carries a cross-family gateway: an `__kernel_sa_family_t`
 // followed by the address payload, used when the nexthop's family
@@ -244,11 +244,11 @@ impl Handle {
     // `untrusted_app` domain denies `bind` on netlink_route_socket
     // (b/155595000) but allows the autobind-on-send that getifaddrs() and
     // Go's net package rely on — so skipping the explicit bind is what lets
-    // this crate run inside an Android app. There is no behavioural change
-    // on other platforms: the socket ends up with the same kernel-assigned
-    // portid either way, and every entry point sends before calling
-    // getsockname(), so the portid is set before the nlmsg_pid filter reads
-    // it.
+    // this crate run inside an Android app. Skipping the bind makes no
+    // difference on other platforms: the socket ends up with the same
+    // kernel-assigned portid either way, and every entry point sends
+    // before calling getsockname(), so the portid is set before the
+    // nlmsg_pid filter reads it.
     let sock = socket_with(
       AddressFamily::NETLINK,
       SocketType::RAW,
@@ -943,7 +943,7 @@ where
   run_dump(transport, request, capacity, |h, message| {
     match h.nlmsg_type as u32 {
       val if val == RTM_NEWADDR => {
-        // See `netlink_interface` for why this is bounded to the
+        // See `netlink_interface_once` for why this is bounded to the
         // current message rather than the rest of the datagram.
         let msg_buf = &message[NLMSG_HDRLEN..];
         let ifam = IfNetMessageHeader::parse(msg_buf)?;
@@ -1116,7 +1116,7 @@ where
 
     match h.nlmsg_type as u32 {
       val if val == RTM_NEWROUTE => {
-        // See `netlink_interface` for why this is bounded to `hlen`.
+        // See `netlink_interface_once` for why this is bounded to `hlen`.
         let rtm = &received[NLMSG_HDRLEN..hlen];
         let rtm_header = RtmMessageHeader::parse(rtm)?;
 
@@ -1643,9 +1643,9 @@ fn dump_nexthops<T: Transport>(
 ///   no retry, no error.
 /// - `Some(non-empty)`: one or more `(oif, gw)` pairs to emit.
 ///
-/// Conflating the bottom two cases (the previous `SmallVec`-only API
-/// did) made `route_table()` fail with `EINTR` whenever any single
-/// route pointed at a downed nexthop.
+/// Conflating the bottom two cases (as a `SmallVec`-only return
+/// would) makes `route_table()` fail with `EINTR` whenever any single
+/// route points at a downed nexthop.
 fn resolve_nh_id(
   map: &std::collections::HashMap<u32, NexthopInfo>,
   id: u32,
@@ -2088,7 +2088,7 @@ fn walk_multipath<F>(
       continue;
     }
 
-    // Decode sub-attributes. We track four skip states:
+    // Decode sub-attributes. We track the gateway and three skip flags:
     //   - `nh_gw = Some(addr)`: parsed RTA_GATEWAY → emit with this gw.
     //   - `nh_gw = None`, no skip flag set: no gateway sub-attr at
     //     all → on-link nexthop, emit with `gw = None`.
@@ -2324,7 +2324,7 @@ where
 
     match h.nlmsg_type as u32 {
       val if val == RTM_NEWROUTE => {
-        // See `netlink_interface` for why this is bounded to `hlen`.
+        // See `netlink_interface_once` for why this is bounded to `hlen`.
         let rtm = &received[NLMSG_HDRLEN..hlen];
         let rtm_header = RtmMessageHeader::parse(rtm)?;
 
@@ -2355,7 +2355,7 @@ where
 
           let attrlen = attr.len as usize;
           if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-            // Same rationale as in `netlink_best_local_addrs`:
+            // Same rationale as in `netlink_best_local_addrs_into_once`:
             // a partially-parsed route could emit a bogus address
             // into `gateways`. Fail the whole call instead.
             return Err(rustix::io::Errno::INVAL.into());
@@ -2612,9 +2612,8 @@ struct NetlinkRouteRequest {
 
 impl NetlinkRouteRequest {
   /// `nlmsghdr` (16 bytes) + `rtgenmsg` (1 byte) rounded up to
-  /// `NLMSG_ALIGNTO` (4 bytes) = 20. Matches what the previous
-  /// `repr(C)` typed struct used to serialize, so kernel-side parsing
-  /// is unchanged.
+  /// `NLMSG_ALIGNTO` (4 bytes) = 20, the size a `repr(C)` struct of
+  /// the same fields serializes to.
   const SIZE: usize = (mem::size_of::<MessageHeader>()
     + mem::size_of::<u8>() // rtgenmsg::family
     + (NLMSG_ALIGNTO as usize - 1))
@@ -2623,11 +2622,6 @@ impl NetlinkRouteRequest {
   #[inline]
   fn new(proto: u16, seq: u32, family: u8, _ifi: u32) -> Self {
     // TODO(al8n): do not dump when ifi is not 0
-    // let flags = if ifi == 0 {
-    //   (libc::NLM_F_DUMP | libc::NLM_F_REQUEST) as u16
-    // } else {
-    //   libc::NLM_F_REQUEST as u16
-    // };
     let mut bytes = [0u8; Self::SIZE];
     // `nlmsghdr` (offsets per the C layout):
     //   bytes 0..4   nlmsg_len  : u32
@@ -3194,10 +3188,10 @@ mod netlink_tests {
     );
   }
 
-  // Codex round 3: an in-band RTM_GETLINK denial arrives as
-  // NLMSG_ERROR(-EACCES/-EPERM). `decode_nlmsgerr` must surface the real
-  // errno as PermissionDenied (not flatten it to EINVAL) so the Android
-  // ioctl fallback in `super::interface_table` actually engages.
+  // An in-band RTM_GETLINK denial arrives as NLMSG_ERROR(-EACCES/-EPERM).
+  // `decode_nlmsgerr` must surface the real errno as PermissionDenied (not
+  // flatten it to EINVAL) so the Android ioctl fallback in
+  // `super::interface_table` actually engages.
   #[test]
   fn nlmsgerr_decodes_eacces_as_permission_denied() {
     use std::io::ErrorKind;
