@@ -200,7 +200,13 @@ trait DumpSocket {
   fn pid(&self) -> io::Result<u32>;
 
   /// Receives one whole datagram into `dst` and returns its length.
-  fn recv(&self, dst: &mut [u8]) -> io::Result<usize>;
+  ///
+  /// `dst` is cleared first, and its capacity is the largest datagram
+  /// accepted: a longer one is consumed and reported as `ENOBUFS`. The
+  /// capacity must be non-zero, because `rustix::buffer::spare_capacity`
+  /// asserts it in debug builds. On `Ok(n)`, `dst.len() == n`; on `Err`, the
+  /// contents of `dst` are unspecified.
+  fn recv(&self, dst: &mut Vec<u8>) -> io::Result<usize>;
 }
 
 /// Opens the socket for each dump. A walker opens one per attempt, and its
@@ -270,17 +276,25 @@ impl DumpSocket for Handle {
     Ok(self.sock()?.pid())
   }
 
-  fn recv(&self, dst: &mut [u8]) -> io::Result<usize> {
+  fn recv(&self, dst: &mut Vec<u8>) -> io::Result<usize> {
+    // `spare_capacity` receives after the current length, so an empty `dst`
+    // makes its whole capacity the receive buffer.
+    dst.clear();
+    let capacity = dst.capacity();
     // A signal interrupts the receive before it consumes any data, and the
     // dump's progress lives on the socket, so re-issuing only the receive is
     // correct and keeps a signal from costing a whole-dump attempt.
     let (copied, actual, sender) = loop {
-      match recvfrom(&self.fd, &mut *dst, RecvFlags::TRUNC) {
+      match recvfrom(
+        &self.fd,
+        rustix::buffer::spare_capacity(dst),
+        RecvFlags::TRUNC,
+      ) {
         Err(error) if error == rustix::io::Errno::INTR => {}
         result => break result?,
       }
     };
-    if actual > dst.len() {
+    if actual > capacity {
       return Err(rustix::io::Errno::NOBUFS.into());
     }
     let sender = sender
@@ -288,7 +302,7 @@ impl DumpSocket for Handle {
       .try_into()
       .map_err(|_| rustix::io::Errno::INVAL)?;
 
-    validate_recv(copied, actual, dst.len(), sender)
+    validate_recv(copied, actual, capacity, sender)
   }
 }
 
@@ -380,7 +394,8 @@ impl DumpSocket for ReplaySocket {
     Ok(self.pid)
   }
 
-  fn recv(&self, dst: &mut [u8]) -> io::Result<usize> {
+  fn recv(&self, dst: &mut Vec<u8>) -> io::Result<usize> {
+    dst.clear();
     let datagram = self
       .datagrams
       .borrow_mut()
@@ -388,10 +403,10 @@ impl DumpSocket for ReplaySocket {
       .ok_or(io::ErrorKind::UnexpectedEof)?;
     // As with `Handle`, a datagram larger than the buffer is consumed and
     // reported as `ENOBUFS`.
-    dst
-      .get_mut(..datagram.len())
-      .ok_or(rustix::io::Errno::NOBUFS)?
-      .copy_from_slice(&datagram);
+    if datagram.len() > dst.capacity() {
+      return Err(rustix::io::Errno::NOBUFS.into());
+    }
+    dst.extend_from_slice(&datagram);
     Ok(datagram.len())
   }
 }
@@ -506,6 +521,10 @@ fn decode_nlmsg_done(body: &[u8]) -> io::Result<()> {
 /// `MSG_TRUNC` and returns `ENOBUFS` when a datagram is larger than this
 /// buffer, rather than parsing a partial message.
 ///
+/// The buffer is received into without zero-filling, and the kernel touches
+/// only the bytes it writes, so its size adds no per-dump cost beyond the
+/// allocation.
+///
 /// `iproute2` uses 32 KiB for the same dumps.
 const DUMP_RECV_BUF_SIZE: usize = 32 * 1024;
 
@@ -534,7 +553,7 @@ fn run_dump<T: Transport>(
   let handle = transport.open()?;
   handle.send(request)?;
   let pid = handle.pid()?;
-  let mut rb = vec![0u8; DUMP_RECV_BUF_SIZE];
+  let mut rb = Vec::with_capacity(DUMP_RECV_BUF_SIZE);
 
   loop {
     let nr = handle.recv(&mut rb)?;
@@ -2772,19 +2791,38 @@ mod netlink_tests {
 
     let socket = Replay::from_fuzz_input(&input).open().unwrap();
     assert_eq!(socket.pid().unwrap(), TEST_PID);
-    let mut buf = [0; 64];
+    let mut buf = Vec::with_capacity(64);
     assert_eq!(socket.recv(&mut buf).unwrap(), done.len());
-    assert_eq!(&buf[..done.len()], done.as_slice());
+    assert_eq!(buf, done);
     assert_eq!(socket.recv(&mut buf).unwrap(), 0);
     let err = socket.recv(&mut buf).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
 
     let socket = Replay::new(vec![done]).open().unwrap();
-    let err = socket.recv(&mut [0; NLMSG_HDRLEN - 1]).unwrap_err();
+    let err = socket
+      .recv(&mut Vec::with_capacity(NLMSG_HDRLEN - 1))
+      .unwrap_err();
     assert_eq!(
       err.raw_os_error(),
       Some(rustix::io::Errno::NOBUFS.raw_os_error())
     );
+  }
+
+  #[test]
+  fn replay_consumes_a_datagram_longer_than_the_buffer() {
+    let done = frame(NLMSG_DONE as u16, 0, &[]);
+    let long = frame(RTM_NEWLINK as u16, 0, &[0; 4]);
+    let socket = Replay::new(vec![long, done.clone()]).open().unwrap();
+
+    // The buffer holds `done` exactly and is too small for `long`.
+    let mut buf = Vec::with_capacity(done.len());
+    let err = socket.recv(&mut buf).unwrap_err();
+    assert_eq!(
+      err.raw_os_error(),
+      Some(rustix::io::Errno::NOBUFS.raw_os_error())
+    );
+    assert_eq!(socket.recv(&mut buf).unwrap(), done.len());
+    assert_eq!(buf, done);
   }
 
   // The walker abandons a dump at its flagged message, and the sockets of a
