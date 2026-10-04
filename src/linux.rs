@@ -419,21 +419,19 @@ where
         Ok(res) => idx = res,
         Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
       }
-    } else if field0.len() == 8 {
-      if ifi == 0 || ifi == idx {
-        // The Linux kernel puts the IP address in /proc/net/igmp in
-        // native endianness.
-        let src = field0.as_bytes();
-        let mut b = [0u8; 4];
-        for i in (0..src.len()).step_by(2) {
-          b[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
-        }
+    } else if field0.len() == 8 && (ifi == 0 || ifi == idx) {
+      // The Linux kernel puts the IP address in /proc/net/igmp in
+      // native endianness.
+      let src = field0.as_bytes();
+      let mut b = [0u8; 4];
+      for i in (0..src.len()).step_by(2) {
+        b[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
+      }
 
-        b.reverse();
-        let ip = b.into();
-        if f(&ip) {
-          ifmat.push(Ifv4Addr::new(idx, ip));
-        }
+      b.reverse();
+      let ip = b.into();
+      if f(&ip) {
+        ifmat.push(Ifv4Addr::new(idx, ip));
       }
     }
   }
