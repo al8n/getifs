@@ -2726,6 +2726,7 @@ pub fn fuzz_netlink_dump(data: &[u8]) {
 #[cfg(test)]
 mod netlink_tests {
   use super::*;
+  use crate::{IfAddr, IfNet};
 
   const TEST_SEQ: u32 = 1;
   const TEST_PID: u32 = 42;
@@ -3123,5 +3124,596 @@ mod netlink_tests {
     let err =
       decode_nlmsgerr(&buf, NLMSG_HDRLEN + 4).expect_err("i32::MIN is not a valid netlink errno");
     assert_eq!(err.kind(), ErrorKind::InvalidData);
+  }
+
+  /// An attribute carrying a native-endian `u32`, such as `RTA_OIF`.
+  fn u32_attr(ty: u16, value: u32) -> Vec<u8> {
+    rtattr(ty, &value.to_ne_bytes())
+  }
+
+  /// An attribute of type `ty` whose length runs past the end of its message.
+  fn overlong(ty: u16) -> Vec<u8> {
+    let mut attr = rtattr(ty, &[0; 4]);
+    attr[..2].copy_from_slice(&u16::MAX.to_ne_bytes());
+    attr
+  }
+
+  fn done() -> Vec<u8> {
+    frame(NLMSG_DONE as u16, 0, &[])
+  }
+
+  /// An `NLMSG_ERROR` reply carrying `errno`.
+  fn nlmsgerr(errno: rustix::io::Errno) -> Vec<u8> {
+    frame(
+      NLMSG_ERROR as u16,
+      0,
+      &(-errno.raw_os_error()).to_ne_bytes(),
+    )
+  }
+
+  /// An `RTM_NEWADDR` body: an `ifaddrmsg` for a `family` address with a
+  /// `prefix_len`-bit prefix on interface `index`, then `attrs`.
+  fn ifaddr(family: AddressFamily, prefix_len: u8, index: u32, attrs: &[Vec<u8>]) -> Vec<u8> {
+    let mut body = vec![family.as_raw() as u8, prefix_len, 0, 0];
+    body.extend(index.to_ne_bytes());
+    body.extend(attrs.concat());
+    body
+  }
+
+  /// An `RTM_NEWADDR` message for one IPv4 address on interface `index`.
+  fn ipv4_addr(index: u32, addr: [u8; 4], prefix_len: u8) -> Vec<u8> {
+    let attrs = [rtattr(IFA_ADDRESS as u16, &addr)];
+    frame(
+      RTM_NEWADDR as u16,
+      0,
+      &ifaddr(AddressFamily::INET, prefix_len, index, &attrs),
+    )
+  }
+
+  /// An `RTM_NEWROUTE` message: an `rtmsg` for an IPv4 unicast route in the
+  /// main table with a `dst_len`-bit destination, then `attrs`.
+  fn route(dst_len: u8, attrs: &[Vec<u8>]) -> Vec<u8> {
+    let inet = AddressFamily::INET.as_raw() as u8;
+    // rtmsg: family, dst_len, src_len, tos, table, protocol, scope, type, flags
+    let mut body = vec![inet, dst_len, 0, 0, RT_TABLE_MAIN as u8, 0, 0, RTN_UNICAST];
+    body.extend(0u32.to_ne_bytes());
+    body.extend(attrs.concat());
+    frame(RTM_NEWROUTE as u16, 0, &body)
+  }
+
+  /// A `struct rtnexthop` for an `RTA_MULTIPATH` payload: interface `oif`
+  /// with an `RTA_GATEWAY` sub-attribute.
+  fn rtnexthop(oif: i32, gateway: [u8; 4]) -> Vec<u8> {
+    let gateway = rtattr(RTA_GATEWAY, &gateway);
+    // rtnexthop: len, flags, hops, ifindex
+    let mut entry = ((8 + gateway.len()) as u16).to_ne_bytes().to_vec();
+    entry.extend([0, 0]);
+    entry.extend(oif.to_ne_bytes());
+    entry.extend(gateway);
+    entry
+  }
+
+  /// An `RTM_NEWNEXTHOP` message: an IPv4 `nhmsg` without flags, then `attrs`.
+  fn nexthop(attrs: &[Vec<u8>]) -> Vec<u8> {
+    // nhmsg: family, scope, protocol, resvd, flags
+    let mut body = vec![AddressFamily::INET.as_raw() as u8, 0, 0, 0];
+    body.extend(0u32.to_ne_bytes());
+    body.extend(attrs.concat());
+    frame(RTM_NEWNEXTHOP as u16, 0, &body)
+  }
+
+  /// An `RTM_NEWNEXTHOP` message for nexthop `id` through `gateway` on `oif`.
+  fn nexthop_via(id: u32, oif: u32, gateway: [u8; 4]) -> Vec<u8> {
+    nexthop(&[
+      u32_attr(NHA_ID, id),
+      u32_attr(NHA_OIF, oif),
+      rtattr(NHA_GATEWAY, &gateway),
+    ])
+  }
+
+  /// An `RTM_NEWNEXTHOP` message for group `id` of the `members` nexthops.
+  fn nexthop_group(id: u32, members: &[u32]) -> Vec<u8> {
+    // One `struct nexthop_grp` per member: id, weight, weight_high, resvd2.
+    let group: Vec<u8> = members
+      .iter()
+      .flat_map(|member| [member.to_ne_bytes(), [0; 4]].concat())
+      .collect();
+    nexthop(&[u32_attr(NHA_ID, id), rtattr(NHA_GROUP, &group)])
+  }
+
+  fn interface(index: u32, name: &str) -> Interface {
+    let mut interface = Interface::new(index, Flags::empty());
+    interface.name = name.into();
+    interface
+  }
+
+  fn net(index: u32, addr: impl Into<IpAddr>, prefix_len: u8) -> IfNet {
+    IfNet::with_prefix_len(index, addr.into(), prefix_len).unwrap()
+  }
+
+  /// `on_route` arguments: family, oif, dst_len, dst, gateway.
+  type Route = (u8, u32, u8, Option<IpAddr>, Option<IpAddr>);
+  /// A nexthop map entry: id, oif, gateway, group members, filtered.
+  type Nexthop = (u32, u32, Option<IpAddr>, Option<Vec<u32>>, bool);
+
+  // Each `replay_*` runs one walker over `datagrams` and also returns the
+  // number of dumps it opened.
+
+  fn replay_links(datagrams: Vec<Vec<u8>>) -> (io::Result<TinyVec<Interface>>, usize) {
+    let mut transport = CountingReplay::new(datagrams);
+    let links = netlink_interface_with(&mut transport, AddressFamily::UNSPEC, 0);
+    (links, transport.opens)
+  }
+
+  fn replay_addrs(datagrams: Vec<Vec<u8>>) -> (io::Result<SmallVec<IfNet>>, usize) {
+    let mut transport = CountingReplay::new(datagrams);
+    let mut addrs = SmallVec::new();
+    let result = netlink_addr_into_with(
+      &mut transport,
+      AddressFamily::UNSPEC,
+      0,
+      |_| true,
+      &mut addrs,
+    );
+    (result.map(|()| addrs), transport.opens)
+  }
+
+  fn replay_best_local(datagrams: Vec<Vec<u8>>) -> (io::Result<SmallVec<IfNet>>, usize) {
+    let mut transport = CountingReplay::new(datagrams);
+    let mut addrs = SmallVec::new();
+    let result =
+      netlink_best_local_addrs_into_with(&mut transport, AddressFamily::INET, &mut addrs);
+    (result.map(|()| addrs), transport.opens)
+  }
+
+  fn replay_nexthops(datagrams: Vec<Vec<u8>>) -> (io::Result<Vec<Nexthop>>, usize) {
+    let mut transport = CountingReplay::new(datagrams);
+    let nexthops = dump_nexthops(&mut transport).map(|map| {
+      let mut nexthops: Vec<Nexthop> = map
+        .into_iter()
+        .map(|(id, nh)| {
+          (
+            id,
+            nh.oif,
+            nh.gw,
+            nh.group.map(SmallVec::into_vec),
+            nh.filtered,
+          )
+        })
+        .collect();
+      nexthops.sort_unstable_by_key(|nexthop| nexthop.0);
+      nexthops
+    });
+    (nexthops, transport.opens)
+  }
+
+  fn replay_routes(datagrams: Vec<Vec<u8>>) -> (io::Result<Vec<Route>>, usize) {
+    let mut transport = CountingReplay::new(datagrams);
+    let mut routes = Vec::new();
+    let result = netlink_walk_routes_with(
+      &mut transport,
+      AddressFamily::INET,
+      |family, oif, dst_len, dst, gw| routes.push((family, oif, dst_len, dst, gw)),
+    );
+    (result.map(|()| routes), transport.opens)
+  }
+
+  fn replay_gateways(datagrams: Vec<Vec<u8>>) -> (io::Result<SmallVec<IfAddr>>, usize) {
+    let mut transport = CountingReplay::new(datagrams);
+    let gateways = rt_generic_addrs_with(
+      &mut transport,
+      AddressFamily::INET,
+      RTA_GATEWAY,
+      None,
+      |_| true,
+    );
+    (gateways, transport.opens)
+  }
+
+  /// The gateway of every route and nexthop in [`one_of_each`].
+  const GATEWAY: [u8; 4] = [192, 0, 2, 1];
+
+  /// One message for every walker, all on interface 1: link `eth0`, address
+  /// 192.0.2.10/24, nexthop 7 through [`GATEWAY`], a default route through
+  /// [`GATEWAY`], and a default route through nexthop 7.
+  fn one_of_each() -> Vec<u8> {
+    [
+      frame(RTM_NEWLINK as u16, 0, &link(1, b"eth0\0")),
+      ipv4_addr(1, [192, 0, 2, 10], 24),
+      nexthop_via(7, 1, GATEWAY),
+      route(0, &[rtattr(RTA_GATEWAY, &GATEWAY), u32_attr(RTA_OIF, 1)]),
+      route(0, &[u32_attr(RTA_NH_ID, 7)]),
+    ]
+    .concat()
+  }
+
+  #[test]
+  fn addr_dump_applies_the_index_filter_before_the_caller_filter() {
+    let v6 = std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x10);
+    let dump = [
+      ipv4_addr(1, [127, 0, 0, 1], 8),
+      ipv4_addr(2, [192, 0, 2, 10], 24),
+      ipv4_addr(2, [192, 0, 2, 20], 24),
+      frame(
+        RTM_NEWADDR as u16,
+        0,
+        &ifaddr(
+          AddressFamily::INET6,
+          64,
+          2,
+          &[rtattr(IFA_ADDRESS as u16, &v6.octets())],
+        ),
+      ),
+      // With IFA_LOCAL present, IFA_ADDRESS (the peer of a point-to-point
+      // link) is not reported.
+      frame(
+        RTM_NEWADDR as u16,
+        0,
+        &ifaddr(
+          AddressFamily::INET,
+          32,
+          2,
+          &[
+            rtattr(IFA_ADDRESS as u16, &[10, 0, 0, 2]),
+            rtattr(IFA_LOCAL as u16, &[10, 0, 0, 1]),
+          ],
+        ),
+      ),
+      done(),
+    ];
+
+    let mut seen = Vec::new();
+    let mut addrs = SmallVec::<IfNet>::new();
+    netlink_addr_into_with(
+      &mut Replay::new(vec![dump.concat()]),
+      AddressFamily::UNSPEC,
+      2,
+      |addr| {
+        seen.push(*addr);
+        *addr != IpAddr::from([192, 0, 2, 20])
+      },
+      &mut addrs,
+    )
+    .unwrap();
+
+    assert_eq!(
+      seen,
+      [
+        IpAddr::from([192, 0, 2, 10]),
+        IpAddr::from([192, 0, 2, 20]),
+        IpAddr::from(v6),
+        IpAddr::from([10, 0, 0, 1]),
+      ]
+    );
+    assert_eq!(
+      addrs.as_slice(),
+      &[
+        net(2, [192, 0, 2, 10], 24),
+        net(2, v6, 64),
+        net(2, [10, 0, 0, 1], 32),
+      ]
+    );
+  }
+
+  #[test]
+  fn best_local_reports_the_addresses_behind_the_best_default_routes() {
+    let default_via = |gateway: [u8; 4], oif, metric| {
+      route(
+        0,
+        &[
+          rtattr(RTA_GATEWAY, &gateway),
+          u32_attr(RTA_OIF, oif),
+          u32_attr(RTA_PRIORITY, metric),
+        ],
+      )
+    };
+    let routes = [
+      default_via([192, 0, 2, 1], 2, 100),
+      default_via([198, 51, 100, 1], 3, 50),
+      default_via([203, 0, 113, 1], 5, 50),
+      // Not a default route, so its lower metric does not compete.
+      route(24, &[rtattr(RTA_DST, &[10, 0, 0, 0]), u32_attr(RTA_OIF, 4)]),
+      done(),
+    ];
+    // One address dump per selected interface, in index order.
+    let addrs_of_3 = [
+      ipv4_addr(2, [192, 0, 2, 10], 24),
+      ipv4_addr(3, [198, 51, 100, 10], 24),
+      // Link-local, so not a local address for best-local.
+      ipv4_addr(3, [169, 254, 1, 1], 16),
+      done(),
+    ];
+    let addrs_of_5 = [ipv4_addr(5, [203, 0, 113, 10], 24), done()];
+
+    let (addrs, opens) = replay_best_local(vec![
+      routes.concat(),
+      addrs_of_3.concat(),
+      addrs_of_5.concat(),
+    ]);
+    assert_eq!(
+      addrs.unwrap().as_slice(),
+      &[
+        net(3, [198, 51, 100, 10], 24),
+        net(5, [203, 0, 113, 10], 24),
+      ]
+    );
+    assert_eq!(opens, 3);
+  }
+
+  #[test]
+  fn best_local_resolves_a_nexthop_object_default_route() {
+    let routes = [route(0, &[u32_attr(RTA_NH_ID, 7)]), done()];
+    let nexthops = [nexthop_via(7, 2, GATEWAY), done()];
+    let addrs_of_2 = [ipv4_addr(2, [192, 0, 2, 10], 24), done()];
+
+    let (addrs, opens) = replay_best_local(vec![
+      routes.concat(),
+      nexthops.concat(),
+      addrs_of_2.concat(),
+    ]);
+    assert_eq!(addrs.unwrap().as_slice(), &[net(2, [192, 0, 2, 10], 24)]);
+    assert_eq!(opens, 3);
+  }
+
+  #[test]
+  fn route_dump_resolves_nexthop_objects_in_one_later_dump() {
+    let routes = [
+      route(
+        24,
+        &[rtattr(RTA_DST, &[198, 51, 100, 0]), u32_attr(RTA_NH_ID, 7)],
+      ),
+      route(0, &[u32_attr(RTA_NH_ID, 9)]),
+      done(),
+    ];
+    let nexthops = [
+      nexthop_via(7, 2, [192, 0, 2, 1]),
+      nexthop_via(8, 3, [192, 0, 2, 2]),
+      nexthop_group(9, &[7, 8]),
+      done(),
+    ];
+
+    let (routes, opens) = replay_routes(vec![routes.concat(), nexthops.concat()]);
+    let inet = AddressFamily::INET.as_raw() as u8;
+    let gateway = |last| Some(IpAddr::from([192, 0, 2, last]));
+    assert_eq!(
+      routes.unwrap(),
+      [
+        (
+          inet,
+          2,
+          24,
+          Some(IpAddr::from([198, 51, 100, 0])),
+          gateway(1)
+        ),
+        (inet, 2, 0, None, gateway(1)),
+        (inet, 3, 0, None, gateway(2)),
+      ]
+    );
+    assert_eq!(opens, 2);
+  }
+
+  #[test]
+  fn gateway_dump_reports_each_gateway_once_per_interface() {
+    let gateway = |last| [192, 0, 2, last];
+    let multipath = [rtnexthop(2, gateway(1)), rtnexthop(4, gateway(4))].concat();
+    let routes = [
+      route(0, &[rtattr(RTA_GATEWAY, &gateway(1)), u32_attr(RTA_OIF, 2)]),
+      // The same gateway on the same interface.
+      route(
+        8,
+        &[
+          rtattr(RTA_DST, &[10, 0, 0, 0]),
+          rtattr(RTA_GATEWAY, &gateway(1)),
+          u32_attr(RTA_OIF, 2),
+        ],
+      ),
+      // The same gateway on another interface.
+      route(
+        12,
+        &[
+          rtattr(RTA_DST, &[172, 16, 0, 0]),
+          rtattr(RTA_GATEWAY, &gateway(1)),
+          u32_attr(RTA_OIF, 3),
+        ],
+      ),
+      route(
+        24,
+        &[
+          rtattr(RTA_DST, &[198, 51, 100, 0]),
+          rtattr(RTA_MULTIPATH, &multipath),
+        ],
+      ),
+      route(
+        24,
+        &[rtattr(RTA_DST, &[203, 0, 113, 0]), u32_attr(RTA_NH_ID, 9)],
+      ),
+      done(),
+    ];
+    let nexthops = [
+      nexthop_via(7, 3, gateway(1)),
+      nexthop_via(8, 5, gateway(5)),
+      nexthop_group(9, &[7, 8]),
+      done(),
+    ];
+
+    let (gateways, opens) = replay_gateways(vec![routes.concat(), nexthops.concat()]);
+    let expected = |index, last| IfAddr::new(index, IpAddr::from(gateway(last)));
+    assert_eq!(
+      gateways.unwrap().as_slice(),
+      &[
+        expected(2, 1),
+        expected(3, 1),
+        expected(4, 4),
+        expected(5, 5),
+      ]
+    );
+    assert_eq!(opens, 2);
+  }
+
+  #[test]
+  fn family_unavailable_reply_is_an_empty_dump_for_every_walker() {
+    use rustix::io::Errno;
+
+    for errno in [Errno::AFNOSUPPORT, Errno::OPNOTSUPP, Errno::PROTONOSUPPORT] {
+      let reply = || vec![nlmsgerr(errno)];
+      assert!(replay_links(reply()).0.unwrap().is_empty());
+      assert!(replay_addrs(reply()).0.unwrap().is_empty());
+      assert!(replay_best_local(reply()).0.unwrap().is_empty());
+      assert!(replay_nexthops(reply()).0.unwrap().is_empty());
+      assert!(replay_routes(reply()).0.unwrap().is_empty());
+      assert!(replay_gateways(reply()).0.unwrap().is_empty());
+    }
+  }
+
+  #[test]
+  fn family_unavailable_after_messages_ends_every_walker_without_error() {
+    let mut datagram = one_of_each();
+    datagram.extend(nlmsgerr(rustix::io::Errno::AFNOSUPPORT));
+    let replay = || vec![datagram.clone()];
+    let gateway = IpAddr::from(GATEWAY);
+
+    // The link, address and nexthop dumps keep the messages before it.
+    let links = replay_links(replay()).0.unwrap();
+    assert_eq!(links.as_slice(), &[interface(1, "eth0")]);
+    let addrs = replay_addrs(replay()).0.unwrap();
+    assert_eq!(addrs.as_slice(), &[net(1, [192, 0, 2, 10], 24)]);
+    let nexthops = replay_nexthops(replay()).0.unwrap();
+    assert_eq!(nexthops, [(7, 1, Some(gateway), None, false)]);
+
+    // The route walk has reported its plain route, but neither it nor
+    // best-local opens another dump for nexthop 7 or for addresses.
+    let (routes, opens) = replay_routes(replay());
+    let inet = AddressFamily::INET.as_raw() as u8;
+    assert_eq!(routes.unwrap(), [(inet, 1, 0, None, Some(gateway))]);
+    assert_eq!(opens, 1);
+    let (addrs, opens) = replay_best_local(replay());
+    assert!(addrs.unwrap().is_empty());
+    assert_eq!(opens, 1);
+
+    // The gateway walk drops the gateway it had collected.
+    let (gateways, opens) = replay_gateways(replay());
+    assert!(gateways.unwrap().is_empty());
+    assert_eq!(opens, 1);
+  }
+
+  #[test]
+  fn every_walker_validates_messages_after_done() {
+    let mut datagram = one_of_each();
+    datagram.extend(done());
+    // A trailing message addressed to another socket.
+    let mut stray = frame(RTM_NEWLINK as u16, 0, &link(2, b"eth1\0"));
+    stray[12..16].copy_from_slice(&(TEST_PID + 1).to_ne_bytes());
+    datagram.extend(stray);
+    let replay = || vec![datagram.clone()];
+
+    let einval = Some(rustix::io::Errno::INVAL.raw_os_error());
+    assert_eq!(replay_links(replay()).0.unwrap_err().raw_os_error(), einval);
+    assert_eq!(replay_addrs(replay()).0.unwrap_err().raw_os_error(), einval);
+    assert_eq!(
+      replay_best_local(replay()).0.unwrap_err().raw_os_error(),
+      einval
+    );
+    assert_eq!(
+      replay_nexthops(replay()).0.unwrap_err().raw_os_error(),
+      einval
+    );
+    assert_eq!(
+      replay_routes(replay()).0.unwrap_err().raw_os_error(),
+      einval
+    );
+    assert_eq!(
+      replay_gateways(replay()).0.unwrap_err().raw_os_error(),
+      einval
+    );
+  }
+
+  #[test]
+  fn link_dump_does_not_deliver_a_message_after_done() {
+    let datagram = [
+      frame(RTM_NEWLINK as u16, 0, &link(1, b"eth0\0")),
+      done(),
+      frame(RTM_NEWLINK as u16, 0, &link(2, b"eth1\0")),
+    ];
+
+    let (links, opens) = replay_links(vec![datagram.concat()]);
+    assert_eq!(links.unwrap().as_slice(), &[interface(1, "eth0")]);
+    assert_eq!(opens, 1);
+  }
+
+  #[test]
+  fn link_dump_continues_across_datagrams_until_done() {
+    let first = frame(RTM_NEWLINK as u16, 0, &link(1, b"eth0\0"));
+    let last = [frame(RTM_NEWLINK as u16, 0, &link(2, b"eth1\0")), done()].concat();
+
+    let (links, opens) = replay_links(vec![first, last]);
+    assert_eq!(
+      links.unwrap().as_slice(),
+      &[interface(1, "eth0"), interface(2, "eth1")]
+    );
+    assert_eq!(opens, 1);
+  }
+
+  // The Android interface fallback engages only on `PermissionDenied`, which
+  // an `RTM_GETLINK` denial reports in-band as `NLMSG_ERROR(-EACCES)`.
+  #[test]
+  fn link_dump_reports_an_eacces_reply_as_permission_denied() {
+    let datagram = [
+      frame(RTM_NEWLINK as u16, 0, &link(1, b"eth0\0")),
+      nlmsgerr(rustix::io::Errno::ACCESS),
+    ];
+
+    let err = replay_links(vec![datagram.concat()]).0.unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+  }
+
+  #[test]
+  fn ack_does_not_end_a_dump() {
+    let datagram = [
+      frame(RTM_NEWLINK as u16, 0, &link(1, b"eth0\0")),
+      frame(NLMSG_ERROR as u16, 0, &0i32.to_ne_bytes()),
+      frame(RTM_NEWLINK as u16, 0, &link(2, b"eth1\0")),
+      done(),
+    ];
+
+    let links = replay_links(vec![datagram.concat()]).0.unwrap();
+    assert_eq!(
+      links.as_slice(),
+      &[interface(1, "eth0"), interface(2, "eth1")]
+    );
+  }
+
+  #[test]
+  fn malformed_attribute_fails_every_walker_but_the_nexthop_dump() {
+    let mut link_body = vec![0; IfInfoMessageHeader::SIZE];
+    link_body[4..8].copy_from_slice(&1i32.to_ne_bytes());
+    link_body.extend(overlong(IFLA_MTU as u16));
+    let addr_body = ifaddr(AddressFamily::INET, 24, 1, &[overlong(IFA_ADDRESS as u16)]);
+    let datagram = [
+      frame(RTM_NEWLINK as u16, 0, &link_body),
+      frame(RTM_NEWADDR as u16, 0, &addr_body),
+      nexthop(&[u32_attr(NHA_ID, 7), overlong(NHA_OIF)]),
+      route(0, &[overlong(RTA_OIF)]),
+      done(),
+    ];
+    let replay = || vec![datagram.concat()];
+
+    let einval = Some(rustix::io::Errno::INVAL.raw_os_error());
+    assert_eq!(replay_links(replay()).0.unwrap_err().raw_os_error(), einval);
+    assert_eq!(replay_addrs(replay()).0.unwrap_err().raw_os_error(), einval);
+    assert_eq!(
+      replay_best_local(replay()).0.unwrap_err().raw_os_error(),
+      einval
+    );
+    assert_eq!(
+      replay_routes(replay()).0.unwrap_err().raw_os_error(),
+      einval
+    );
+    assert_eq!(
+      replay_gateways(replay()).0.unwrap_err().raw_os_error(),
+      einval
+    );
+    // The nexthop dump keeps the id it had read, marked unusable.
+    let nexthops = replay_nexthops(replay()).0.unwrap();
+    assert_eq!(nexthops, [(7, 0, None, None, true)]);
   }
 }
