@@ -342,106 +342,59 @@ pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>
 
   for adapter in info.iter() {
     let index = adapter_index(adapter);
+    if idx.is_some_and(|i| i != index) {
+      continue;
+    }
 
-    if let Some(idx) = idx {
-      if idx == index {
-        let Some(name) = info
-          .friendly_name(adapter.FriendlyName)
-          .or_else(|| interface_name_fallback(index))
-        else {
-          continue;
-        };
+    let Some(name) = info
+      .friendly_name(adapter.FriendlyName)
+      .or_else(|| interface_name_fallback(index))
+    else {
+      continue;
+    };
 
-        let mut flags = Flags::empty();
-        if adapter.OperStatus == IfOperStatusUp {
-          flags |= Flags::UP | Flags::RUNNING;
-        }
+    let mut flags = Flags::empty();
+    if adapter.OperStatus == IfOperStatusUp {
+      flags |= Flags::UP | Flags::RUNNING;
+    }
 
-        match adapter.IfType {
-          IF_TYPE_ETHERNET_CSMACD
-          | IF_TYPE_IEEE80211
-          | IF_TYPE_IEEE1394
-          | IF_TYPE_ISO88025_TOKENRING => {
-            flags |= Flags::BROADCAST | Flags::MULTICAST;
-          }
-          IF_TYPE_PPP | IF_TYPE_TUNNEL => {
-            flags |= Flags::POINTOPOINT | Flags::MULTICAST;
-          }
-          IF_TYPE_SOFTWARE_LOOPBACK => {
-            flags |= Flags::LOOPBACK | Flags::MULTICAST;
-          }
-          IF_TYPE_ATM => {
-            flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
-          }
-          _ => {}
-        }
-
-        let mtu = if adapter.Mtu == 0xffffffff {
-          0
-        } else {
-          adapter.Mtu
-        };
-
-        let hardware_addr = adapter_mac_address(adapter);
-
-        let interface = Interface {
-          index,
-          name,
-          flags,
-          mtu,
-          mac_addr: hardware_addr,
-        };
-
-        interfaces.push(interface);
-        break;
+    match adapter.IfType {
+      IF_TYPE_ETHERNET_CSMACD
+      | IF_TYPE_IEEE80211
+      | IF_TYPE_IEEE1394
+      | IF_TYPE_ISO88025_TOKENRING => {
+        flags |= Flags::BROADCAST | Flags::MULTICAST;
       }
+      IF_TYPE_PPP | IF_TYPE_TUNNEL => {
+        flags |= Flags::POINTOPOINT | Flags::MULTICAST;
+      }
+      IF_TYPE_SOFTWARE_LOOPBACK => {
+        flags |= Flags::LOOPBACK | Flags::MULTICAST;
+      }
+      IF_TYPE_ATM => {
+        flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
+      }
+      _ => {}
+    }
+
+    let mtu = if adapter.Mtu == 0xffffffff {
+      0
     } else {
-      let Some(name) = info
-        .friendly_name(adapter.FriendlyName)
-        .or_else(|| interface_name_fallback(index))
-      else {
-        continue;
-      };
+      adapter.Mtu
+    };
 
-      let mut flags = Flags::empty();
-      if adapter.OperStatus == IfOperStatusUp {
-        flags |= Flags::UP | Flags::RUNNING;
-      }
+    let hardware_addr = adapter_mac_address(adapter);
 
-      match adapter.IfType {
-        IF_TYPE_ETHERNET_CSMACD
-        | IF_TYPE_IEEE80211
-        | IF_TYPE_IEEE1394
-        | IF_TYPE_ISO88025_TOKENRING => {
-          flags |= Flags::BROADCAST | Flags::MULTICAST;
-        }
-        IF_TYPE_PPP | IF_TYPE_TUNNEL => {
-          flags |= Flags::POINTOPOINT | Flags::MULTICAST;
-        }
-        IF_TYPE_SOFTWARE_LOOPBACK => {
-          flags |= Flags::LOOPBACK | Flags::MULTICAST;
-        }
-        IF_TYPE_ATM => {
-          flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
-        }
-        _ => {}
-      }
+    interfaces.push(Interface {
+      index,
+      name,
+      flags,
+      mtu,
+      mac_addr: hardware_addr,
+    });
 
-      let mtu = if adapter.Mtu == 0xffffffff {
-        0
-      } else {
-        adapter.Mtu
-      };
-
-      let hardware_addr = adapter_mac_address(adapter);
-
-      interfaces.push(Interface {
-        index,
-        name,
-        flags,
-        mtu,
-        mac_addr: hardware_addr,
-      });
+    if idx.is_some() {
+      break;
     }
   }
 
@@ -483,54 +436,30 @@ where
 
   for adapter in info.iter() {
     let index = adapter_index(adapter);
+    if ifi.is_some_and(|i| i != index) {
+      continue;
+    }
 
-    if let Some(ifi) = ifi {
-      if ifi == index {
-        unsafe {
-          let mut unicast = adapter.FirstUnicastAddress;
-          while let Some(addr) = unicast.as_ref() {
-            if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
-              if let Some(ip) = T::try_from_with_filter(index, ip, addr.OnLinkPrefixLength, &mut f)
-              {
-                addresses.push(ip);
-              }
-            }
-            unicast = addr.Next;
+    unsafe {
+      let mut unicast = adapter.FirstUnicastAddress;
+      while let Some(addr) = unicast.as_ref() {
+        if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
+          if let Some(ip) = T::try_from_with_filter(index, ip, addr.OnLinkPrefixLength, &mut f) {
+            addresses.push(ip);
           }
-
-          // TODO(al8n): Should we include anycast addresses?
-          // let mut anycast = adapter.FirstAnycastAddress;
-          // while let Some(addr) = anycast.as_ref() {
-          //   if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-          //     let ip = IfNet::new(index, ip);
-          //     addresses.push(ip);
-          //   }
-          //   anycast = addr.Next;
-          // }
         }
+        unicast = addr.Next;
       }
-    } else {
-      unsafe {
-        let mut unicast = adapter.FirstUnicastAddress;
-        while let Some(addr) = unicast.as_ref() {
-          if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
-            if let Some(ip) = T::try_from_with_filter(index, ip, addr.OnLinkPrefixLength, &mut f) {
-              addresses.push(ip);
-            }
-          }
-          unicast = addr.Next;
-        }
 
-        // TODO(al8n): Should we include anycast addresses?
-        // let mut anycast = adapter.FirstAnycastAddress;
-        // while let Some(addr) = anycast.as_ref() {
-        //   if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-        //     let ip = IfNet::new(index, ip);
-        //     addresses.push(ip);
-        //   }
-        //   anycast = addr.Next;
-        // }
-      }
+      // TODO(al8n): Should we include anycast addresses?
+      // let mut anycast = adapter.FirstAnycastAddress;
+      // while let Some(addr) = anycast.as_ref() {
+      //   if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
+      //     let ip = IfNet::new(index, ip);
+      //     addresses.push(ip);
+      //   }
+      //   anycast = addr.Next;
+      // }
     }
   }
 
@@ -587,32 +516,19 @@ where
 
   for adapter in info.iter() {
     let index = adapter_index(adapter);
+    if ifi.is_some_and(|i| i != index) {
+      continue;
+    }
 
-    if let Some(ifi) = ifi {
-      if ifi == index {
-        let mut multicast = adapter.FirstMulticastAddress;
-        unsafe {
-          while let Some(addr) = multicast.as_ref() {
-            if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
-              if let Some(ip) = T::try_from_with_filter(index, ip, &mut f) {
-                addresses.push(ip);
-              }
-            }
-            multicast = addr.Next;
+    let mut multicast = adapter.FirstMulticastAddress;
+    unsafe {
+      while let Some(addr) = multicast.as_ref() {
+        if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
+          if let Some(ip) = T::try_from_with_filter(index, ip, &mut f) {
+            addresses.push(ip);
           }
         }
-      }
-    } else {
-      let mut multicast = adapter.FirstMulticastAddress;
-      unsafe {
-        while let Some(addr) = multicast.as_ref() {
-          if let Some(ip) = sockaddr_to_ipaddr(family, addr.Address.lpSockaddr) {
-            if let Some(ip) = T::try_from_with_filter(index, ip, &mut f) {
-              addresses.push(ip);
-            }
-          }
-          multicast = addr.Next;
-        }
+        multicast = addr.Next;
       }
     }
   }
