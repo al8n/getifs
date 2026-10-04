@@ -212,6 +212,18 @@ pub(super) fn family_unavailable_to_empty(result: io::Result<()>) -> io::Result<
   }
 }
 
+pub(super) fn route_table() -> io::Result<SmallVec<IpRoute>> {
+  route_table_by_filter(|_| true)
+}
+
+pub(super) fn route_ipv4_table() -> io::Result<SmallVec<Ipv4Route>> {
+  route_ipv4_table_by_filter(|_| true)
+}
+
+pub(super) fn route_ipv6_table() -> io::Result<SmallVec<Ipv6Route>> {
+  route_ipv6_table_by_filter(|_| true)
+}
+
 pub(super) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<IpRoute>>
 where
   F: FnMut(&IpRoute) -> bool,

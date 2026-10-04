@@ -231,7 +231,7 @@ impl IpRoute {
 /// }
 /// ```
 pub fn route_table() -> io::Result<SmallVec<IpRoute>> {
-  os::route_table_by_filter(|_| true)
+  os::route_table()
 }
 
 /// Returns the IPv4 unicast/local entries from the kernel routing
@@ -248,7 +248,7 @@ pub fn route_table() -> io::Result<SmallVec<IpRoute>> {
 /// }
 /// ```
 pub fn route_ipv4_table() -> io::Result<SmallVec<Ipv4Route>> {
-  os::route_ipv4_table_by_filter(|_| true)
+  os::route_ipv4_table()
 }
 
 /// Returns the IPv6 unicast/local entries from the kernel routing
@@ -265,7 +265,7 @@ pub fn route_ipv4_table() -> io::Result<SmallVec<Ipv4Route>> {
 /// }
 /// ```
 pub fn route_ipv6_table() -> io::Result<SmallVec<Ipv6Route>> {
-  os::route_ipv6_table_by_filter(|_| true)
+  os::route_ipv6_table()
 }
 
 /// Returns routing-table entries that match the given filter. Only

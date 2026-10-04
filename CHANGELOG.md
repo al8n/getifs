@@ -42,8 +42,11 @@
   rtnetlink dumpers flag the first message of the batch emitted after a
   table-generation change, so `NLMSG_DONE` almost never carries the flag. A
   flagged dump is attempted up to three times before `ErrorKind::Interrupted`
-  is returned, and a receive interrupted by a signal is re-issued. Address and
-  gateway filters may be invoked again across attempts.
+  is returned, and a receive interrupted by a signal is re-issued. A filter
+  sees each entry of a successful dump once and never sees the entries of an
+  attempt that is retried: entries wait for the filter until the dump
+  completes or 16384 of them are pending, and a dump interrupted after that
+  point returns `ErrorKind::Interrupted` instead of being retried.
 - Linux netlink link dumps receive into a 32 KiB buffer, as the kernel
   expects for dumps, so a large `RTM_NEWLINK` message (for example one
   carrying many alternative names) no longer fails the dump.

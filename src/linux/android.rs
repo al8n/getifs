@@ -48,7 +48,10 @@ use rustix::{
 use smallvec_wrapper::TinyVec;
 use smol_str::SmolStr;
 
-use super::{netlink::netlink_addr, Flags};
+use super::{
+  netlink::{netlink_addr, FilterMode},
+  Flags,
+};
 use crate::{IfNet, Interface};
 
 const IF_NAMESIZE: usize = 16;
@@ -105,7 +108,7 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
 
   // `RTM_GETADDR` is permitted even when `RTM_GETLINK` is not; use it to
   // discover the interface indices that currently have an address.
-  let addrs = netlink_addr::<IfNet, _>(AddressFamily::UNSPEC, 0, |_| true)?;
+  let addrs = netlink_addr::<IfNet, _>(AddressFamily::UNSPEC, 0, |_| true, FilterMode::Pure)?;
   let mut seen = BTreeSet::new();
   for net in &addrs {
     let idx = net.index();

@@ -32,7 +32,9 @@ mod local_addr;
 #[path = "linux/android.rs"]
 mod android;
 
-use netlink::{netlink_addr, netlink_interface, netlink_walk_routes};
+use netlink::{
+  netlink_addr, netlink_interface, netlink_routes_into, FilterMode, FILTER_DEFER_LIMIT,
+};
 
 macro_rules! rt_generic_mod {
   ($($name:ident($rta:expr, $rtn:expr)), +$(,)?) => {
@@ -52,40 +54,58 @@ macro_rules! rt_generic_mod {
 
           use super::{
             super::{IfAddr, Ifv4Addr, Ifv6Addr},
-            netlink::rt_generic_addrs,
+            netlink::{rt_generic_addrs, FilterMode, FILTER_DEFER_LIMIT},
           };
 
           pub(crate) fn [< $name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
-            rt_generic_addrs(AddressFamily::UNSPEC, $rta, $rtn, |_| true)
+            rt_generic_addrs(AddressFamily::UNSPEC, $rta, $rtn, |_| true, FilterMode::Pure)
           }
 
           pub(crate) fn [< $name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
-            rt_generic_addrs(AddressFamily::INET, $rta, $rtn, |_| true)
+            rt_generic_addrs(AddressFamily::INET, $rta, $rtn, |_| true, FilterMode::Pure)
           }
 
           pub(crate) fn [< $name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
-            rt_generic_addrs(AddressFamily::INET6, $rta, $rtn, |_| true)
+            rt_generic_addrs(AddressFamily::INET6, $rta, $rtn, |_| true, FilterMode::Pure)
           }
 
           pub(crate) fn [< $name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
           where
             F: FnMut(&IpAddr) -> bool,
           {
-            rt_generic_addrs(AddressFamily::UNSPEC, $rta, $rtn, f)
+            rt_generic_addrs(
+              AddressFamily::UNSPEC,
+              $rta,
+              $rtn,
+              f,
+              FilterMode::Deferred(FILTER_DEFER_LIMIT),
+            )
           }
 
           pub(crate) fn [< $name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
           where
             F: FnMut(&Ipv4Addr) -> bool,
           {
-            rt_generic_addrs(AddressFamily::INET, $rta, $rtn, ipv4_filter_to_ip_filter(f))
+            rt_generic_addrs(
+              AddressFamily::INET,
+              $rta,
+              $rtn,
+              ipv4_filter_to_ip_filter(f),
+              FilterMode::Deferred(FILTER_DEFER_LIMIT),
+            )
           }
 
           pub(crate) fn [< $name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
           where
             F: FnMut(&Ipv6Addr) -> bool,
           {
-            rt_generic_addrs(AddressFamily::INET6, $rta, $rtn, ipv6_filter_to_ip_filter(f))
+            rt_generic_addrs(
+              AddressFamily::INET6,
+              $rta,
+              $rtn,
+              ipv6_filter_to_ip_filter(f),
+              FilterMode::Deferred(FILTER_DEFER_LIMIT),
+            )
           }
         }
       }
@@ -152,7 +172,68 @@ fn route_v6_from_raw(
   Some(Ipv6Route::new(oif, net, gw))
 }
 
-pub(super) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<IpRoute>>
+/// Converts a route of the `AF_INET` dump, skipping any other family.
+fn ipv4_route(
+  family: u8,
+  oif: u32,
+  dst_len: u8,
+  dst: Option<IpAddr>,
+  gw: Option<IpAddr>,
+) -> Option<Ipv4Route> {
+  if family as u16 != AddressFamily::INET.as_raw() {
+    return None;
+  }
+  route_v4_from_raw(oif, dst_len, dst, gw)
+}
+
+/// Converts a route of the `AF_INET6` dump, skipping any other family.
+fn ipv6_route(
+  family: u8,
+  oif: u32,
+  dst_len: u8,
+  dst: Option<IpAddr>,
+  gw: Option<IpAddr>,
+) -> Option<Ipv6Route> {
+  if family as u16 != AddressFamily::INET6.as_raw() {
+    return None;
+  }
+  route_v6_from_raw(oif, dst_len, dst, gw)
+}
+
+pub(super) fn route_table() -> io::Result<SmallVec<IpRoute>> {
+  route_table_with_mode(|_| true, FilterMode::Pure)
+}
+
+pub(super) fn route_table_by_filter<F>(f: F) -> io::Result<SmallVec<IpRoute>>
+where
+  F: FnMut(&IpRoute) -> bool,
+{
+  route_table_with_mode(f, FilterMode::Deferred(FILTER_DEFER_LIMIT))
+}
+
+pub(super) fn route_ipv4_table() -> io::Result<SmallVec<Ipv4Route>> {
+  route_ipv4_table_with_mode(|_| true, FilterMode::Pure)
+}
+
+pub(super) fn route_ipv4_table_by_filter<F>(f: F) -> io::Result<SmallVec<Ipv4Route>>
+where
+  F: FnMut(&Ipv4Route) -> bool,
+{
+  route_ipv4_table_with_mode(f, FilterMode::Deferred(FILTER_DEFER_LIMIT))
+}
+
+pub(super) fn route_ipv6_table() -> io::Result<SmallVec<Ipv6Route>> {
+  route_ipv6_table_with_mode(|_| true, FilterMode::Pure)
+}
+
+pub(super) fn route_ipv6_table_by_filter<F>(f: F) -> io::Result<SmallVec<Ipv6Route>>
+where
+  F: FnMut(&Ipv6Route) -> bool,
+{
+  route_ipv6_table_with_mode(f, FilterMode::Deferred(FILTER_DEFER_LIMIT))
+}
+
+fn route_table_with_mode<F>(mut f: F, mode: FilterMode) -> io::Result<SmallVec<IpRoute>>
 where
   F: FnMut(&IpRoute) -> bool,
 {
@@ -166,62 +247,40 @@ where
   // host the union API would silently drop every IPv6 route while
   // `route_ipv6_table()` still surfaced them; the BSD path already
   // walks per-family for the same reason. Two dumps is the right
-  // tradeoff for a consistent answer.
+  // tradeoff for a consistent answer. Each dump retries on its own.
   let mut out: SmallVec<IpRoute> = SmallVec::new();
-  netlink_walk_routes(AddressFamily::INET, |fam, oif, dst_len, dst, gw| {
-    if fam as u16 == AddressFamily::INET.as_raw() {
-      if let Some(r) = route_v4_from_raw(oif, dst_len, dst, gw).map(IpRoute::V4) {
-        if f(&r) {
-          out.push(r);
-        }
-      }
-    }
-  })?;
-  netlink_walk_routes(AddressFamily::INET6, |fam, oif, dst_len, dst, gw| {
-    if fam as u16 == AddressFamily::INET6.as_raw() {
-      if let Some(r) = route_v6_from_raw(oif, dst_len, dst, gw).map(IpRoute::V6) {
-        if f(&r) {
-          out.push(r);
-        }
-      }
-    }
-  })?;
+  netlink_routes_into(
+    AddressFamily::INET,
+    |family, oif, dst_len, dst, gw| ipv4_route(family, oif, dst_len, dst, gw).map(IpRoute::V4),
+    &mut f,
+    mode,
+    &mut out,
+  )?;
+  netlink_routes_into(
+    AddressFamily::INET6,
+    |family, oif, dst_len, dst, gw| ipv6_route(family, oif, dst_len, dst, gw).map(IpRoute::V6),
+    &mut f,
+    mode,
+    &mut out,
+  )?;
   Ok(out)
 }
 
-pub(super) fn route_ipv4_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ipv4Route>>
+fn route_ipv4_table_with_mode<F>(f: F, mode: FilterMode) -> io::Result<SmallVec<Ipv4Route>>
 where
   F: FnMut(&Ipv4Route) -> bool,
 {
   let mut out: SmallVec<Ipv4Route> = SmallVec::new();
-  netlink_walk_routes(AddressFamily::INET, |fam, oif, dst_len, dst, gw| {
-    if fam as u16 != AddressFamily::INET.as_raw() {
-      return;
-    }
-    if let Some(r) = route_v4_from_raw(oif, dst_len, dst, gw) {
-      if f(&r) {
-        out.push(r);
-      }
-    }
-  })?;
+  netlink_routes_into(AddressFamily::INET, ipv4_route, f, mode, &mut out)?;
   Ok(out)
 }
 
-pub(super) fn route_ipv6_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ipv6Route>>
+fn route_ipv6_table_with_mode<F>(f: F, mode: FilterMode) -> io::Result<SmallVec<Ipv6Route>>
 where
   F: FnMut(&Ipv6Route) -> bool,
 {
   let mut out: SmallVec<Ipv6Route> = SmallVec::new();
-  netlink_walk_routes(AddressFamily::INET6, |fam, oif, dst_len, dst, gw| {
-    if fam as u16 != AddressFamily::INET6.as_raw() {
-      return;
-    }
-    if let Some(r) = route_v6_from_raw(oif, dst_len, dst, gw) {
-      if f(&r) {
-        out.push(r);
-      }
-    }
-  })?;
+  netlink_routes_into(AddressFamily::INET6, ipv6_route, f, mode, &mut out)?;
   Ok(out)
 }
 
@@ -297,25 +356,42 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   }
 }
 
+// Cross-platform code calls these with arbitrary filters, so they defer them.
+
 pub(super) fn interface_ipv4_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<Ifv4Net>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  netlink_addr(AddressFamily::INET, index, f)
+  netlink_addr(
+    AddressFamily::INET,
+    index,
+    f,
+    FilterMode::Deferred(FILTER_DEFER_LIMIT),
+  )
 }
 
 pub(super) fn interface_ipv6_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<Ifv6Net>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  netlink_addr(AddressFamily::INET6, index, f)
+  netlink_addr(
+    AddressFamily::INET6,
+    index,
+    f,
+    FilterMode::Deferred(FILTER_DEFER_LIMIT),
+  )
 }
 
 pub(super) fn interface_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<IfNet>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  netlink_addr(AddressFamily::UNSPEC, index, f)
+  netlink_addr(
+    AddressFamily::UNSPEC,
+    index,
+    f,
+    FilterMode::Deferred(FILTER_DEFER_LIMIT),
+  )
 }
 
 const IGMP_PATH: &str = "/proc/net/igmp";

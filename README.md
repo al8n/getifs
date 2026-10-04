@@ -120,8 +120,11 @@ Windows | `GetAdaptersAddresses`
   so callers must handle ordinary TOCTOU races.
 - On Linux and Android, a netlink dump that the kernel reports as interrupted
   is attempted up to three times, and persistent interruption returns
-  `ErrorKind::Interrupted`. Address and gateway filters may be invoked again
-  across attempts; route filters run only on the attempt that completes.
+  `ErrorKind::Interrupted`. A filter sees each entry of a successful dump once
+  and never sees the entries of an attempt that is retried, so a dump
+  interrupted after a large number of entries (on the order of ten thousand)
+  have reached the filter returns `ErrorKind::Interrupted` instead of being
+  retried.
 - Result ordering is unspecified. There is no general deduplication guarantee;
   deduplication is promised only where a specific API documents it.
 - `IfAddr` and `IfNet` preserve the local interface index. Their derived

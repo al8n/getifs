@@ -634,6 +634,139 @@ fn retry_interrupted<T>(mut dump: impl FnMut() -> io::Result<T>) -> io::Result<T
   }
 }
 
+/// The most converted candidates a dump with a caller's filter holds back
+/// from the filter: about 640 KiB of `IpRoute`.
+///
+/// It is 4·2^12, so a `SmallVec` growing by doubling from its four inline
+/// slots reaches exactly this capacity.
+pub(super) const FILTER_DEFER_LIMIT: usize = 16384;
+
+/// How a filtered dump walker calls its filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum FilterMode {
+  /// For a filter without side effects that a Linux call site supplies
+  /// itself, such as `local_ip_filter`. The filter runs as each candidate
+  /// arrives, and an interrupted dump is always rerun, because calling such a
+  /// filter again is unobservable.
+  Pure,
+  /// For a caller's filter, which may keep state or have side effects, so it
+  /// must see each entry once and never the entries of an attempt that is
+  /// rerun.
+  ///
+  /// Candidates wait unfiltered until the dump completes or this many are
+  /// pending. The filter then sees each pending candidate once, in order, and
+  /// every later candidate as it arrives. An interrupted dump is rerun only
+  /// while the filter has not been called, and fails with `EINTR` after that.
+  Deferred(usize),
+}
+
+/// Receives the candidates of one filtered dump attempt in `out[start..]` and
+/// calls the filter as [`FilterMode`] directs. [`run_filtered`] owns it across
+/// attempts.
+struct FilterSink<'a, T, F> {
+  out: &'a mut SmallVec<T>,
+  start: usize,
+  filter: F,
+  mode: FilterMode,
+  /// Whether a `Deferred` attempt has called the filter. A `Pure` attempt
+  /// never commits.
+  committed: bool,
+}
+
+impl<T, F> FilterSink<'_, T, F>
+where
+  F: FnMut(&T) -> bool,
+{
+  fn push(&mut self, item: T) {
+    match self.mode {
+      FilterMode::Deferred(limit) if !self.committed => {
+        self.out.push(item);
+        if self.out.len() - self.start >= limit {
+          self.filter_pending();
+          // The rejected candidates may have grown `out` far beyond what the
+          // accepted ones need.
+          self.out.shrink_to_fit();
+          self.committed = true;
+        }
+      }
+      _ => {
+        if (self.filter)(&item) {
+          self.out.push(item);
+        }
+      }
+    }
+  }
+
+  /// Drops every entry of the attempt, whether or not it committed.
+  fn discard(&mut self) {
+    self.out.truncate(self.start);
+  }
+
+  /// Completes a successful attempt.
+  fn finish(&mut self) {
+    if matches!(self.mode, FilterMode::Deferred(_)) && !self.committed {
+      self.filter_pending();
+    }
+  }
+
+  /// Calls the filter once for each pending candidate, in order, and keeps
+  /// the accepted ones in order. Swapping instead of moving out keeps every
+  /// entry owned by `out`, so a panicking filter leaves it well-formed.
+  fn filter_pending(&mut self) {
+    let mut kept = self.start;
+    for index in self.start..self.out.len() {
+      if (self.filter)(&self.out[index]) {
+        self.out.swap(kept, index);
+        kept += 1;
+      }
+    }
+    self.out.truncate(kept);
+  }
+}
+
+/// Runs a filtered dump: `attempt` performs one dump and pushes its
+/// candidates into the sink, which applies `filter` as `mode` directs.
+///
+/// An attempt that fails with `EINTR` is rerun, up to `MAX_DUMP_ATTEMPTS`
+/// attempts in all, unless it committed. Every failed attempt is discarded
+/// first, so on `Err` the length of `out` is what it was on entry.
+fn run_filtered<T, F>(
+  out: &mut SmallVec<T>,
+  filter: F,
+  mode: FilterMode,
+  mut attempt: impl FnMut(&mut FilterSink<'_, T, F>) -> io::Result<()>,
+) -> io::Result<()>
+where
+  F: FnMut(&T) -> bool,
+{
+  let start = out.len();
+  let mut sink = FilterSink {
+    out,
+    start,
+    filter,
+    mode,
+    committed: false,
+  };
+  let mut attempts = 1;
+  loop {
+    match attempt(&mut sink) {
+      Ok(()) => {
+        sink.finish();
+        return Ok(());
+      }
+      Err(error) => {
+        sink.discard();
+        // A committed attempt has shown the filter its entries, and a rerun
+        // would show them again.
+        if sink.committed || !is_interrupted(&error) || attempts >= MAX_DUMP_ATTEMPTS {
+          return Err(error);
+        }
+        attempts += 1;
+      }
+    }
+  }
+}
+
 #[inline]
 fn mac_addr_from_attr(data: &[u8]) -> Option<MacAddr> {
   let bytes: [u8; MAC_ADDRESS_SIZE] = data.try_into().ok()?;
@@ -742,30 +875,37 @@ fn netlink_interface_once<T: Transport>(
   Ok(interfaces)
 }
 
-pub(super) fn netlink_addr<N, F>(family: AddressFamily, ifi: u32, f: F) -> io::Result<SmallVec<N>>
+pub(super) fn netlink_addr<N, F>(
+  family: AddressFamily,
+  ifi: u32,
+  f: F,
+  mode: FilterMode,
+) -> io::Result<SmallVec<N>>
 where
   N: Net,
   F: FnMut(&IpAddr) -> bool,
 {
   let mut out = SmallVec::new();
-  netlink_addr_into(family, ifi, f, &mut out)?;
+  netlink_addr_into(family, ifi, f, mode, &mut out)?;
   Ok(out)
 }
 
 /// Same as `netlink_addr` but pushes results into the caller's buffer
 /// instead of allocating a fresh one. Used by `best_local_addrs()` to
-/// merge per-family walks without three intermediate `SmallVec`s.
+/// merge per-family walks without three intermediate `SmallVec`s. On error,
+/// `addrs` is truncated back to its length on entry.
 pub(super) fn netlink_addr_into<N, F>(
   family: AddressFamily,
   ifi: u32,
   f: F,
+  mode: FilterMode,
   addrs: &mut SmallVec<N>,
 ) -> io::Result<()>
 where
   N: Net,
   F: FnMut(&IpAddr) -> bool,
 {
-  netlink_addr_into_with(&mut Kernel, family, ifi, f, addrs)
+  netlink_addr_into_with(&mut Kernel, family, ifi, f, mode, addrs)
 }
 
 fn netlink_addr_into_with<T, N, F>(
@@ -773,6 +913,7 @@ fn netlink_addr_into_with<T, N, F>(
   family: AddressFamily,
   ifi: u32,
   mut f: F,
+  mode: FilterMode,
   addrs: &mut SmallVec<N>,
 ) -> io::Result<()>
 where
@@ -780,26 +921,24 @@ where
   N: Net,
   F: FnMut(&IpAddr) -> bool,
 {
-  // A retried dump starts over, so drop what an interrupted attempt appended.
-  // `f` can therefore see the same address more than once.
-  let start = addrs.len();
-  retry_interrupted(|| {
-    addrs.truncate(start);
-    netlink_addr_into_once(transport, family, ifi, &mut f, &mut *addrs)
-  })
+  run_filtered(
+    addrs,
+    |addr: &N| f(&addr.addr()),
+    mode,
+    |addrs| netlink_addr_into_once(transport, family, ifi, addrs),
+  )
 }
 
 fn netlink_addr_into_once<T, N, F>(
   transport: &mut T,
   family: AddressFamily,
   ifi: u32,
-  mut f: F,
-  addrs: &mut SmallVec<N>,
+  addrs: &mut FilterSink<'_, N, F>,
 ) -> io::Result<()>
 where
   T: Transport,
   N: Net,
-  F: FnMut(&IpAddr) -> bool,
+  F: FnMut(&N) -> bool,
 {
   let req = NetlinkRouteRequest::new(RTM_GETADDR as u16, 1, family.as_raw() as u8, ifi);
 
@@ -852,9 +991,7 @@ where
             AddressFamily::INET if data.len() >= 4 => {
               let ip: [u8; 4] = data[..4].try_into().unwrap();
               if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
-                if let Some(addr) =
-                  N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| f(addr))
-                {
+                if let Some(addr) = <N as Net>::try_from(ifam.index, ip.into(), ifam.prefix_len) {
                   addrs.push(addr);
                 }
               }
@@ -862,9 +999,7 @@ where
             AddressFamily::INET6 if data.len() >= 16 => {
               let ip: [u8; 16] = data[..16].try_into().unwrap();
               if attr.ty == IFA_ADDRESS as u16 || attr.ty == IFA_LOCAL as u16 {
-                if let Some(addr) =
-                  N::try_from_with_filter(ifam.index, ip.into(), ifam.prefix_len, |addr| f(addr))
-                {
+                if let Some(addr) = <N as Net>::try_from(ifam.index, ip.into(), ifam.prefix_len) {
                   addrs.push(addr);
                 }
               }
@@ -893,6 +1028,7 @@ where
 /// Variant of [`netlink_best_local_addrs`] that pushes into the
 /// caller's buffer. Lets the union `best_local_addrs()` walk both
 /// families without allocating intermediate per-family `SmallVec`s.
+/// On error, `out` is truncated back to its length on entry.
 pub fn netlink_best_local_addrs_into<N>(
   family: AddressFamily,
   out: &mut SmallVec<N>,
@@ -912,12 +1048,17 @@ where
   T: Transport,
   N: Net,
 {
-  // A retried dump starts over, so drop what an interrupted attempt appended.
+  // A retried dump starts over, so drop what an interrupted attempt appended,
+  // and a failure leaves nothing behind.
   let start = out.len();
-  retry_interrupted(|| {
+  let result = retry_interrupted(|| {
     out.truncate(start);
     netlink_best_local_addrs_into_once(transport, family, &mut *out)
-  })
+  });
+  if result.is_err() {
+    out.truncate(start);
+  }
+  result
 }
 
 fn netlink_best_local_addrs_into_once<T, N>(
@@ -935,7 +1076,7 @@ where
   // nexthop`-managed routes (Linux 5.3+ opt-in feature); on those
   // hosts `best_local_*` no longer fails when an unrelated nexthop
   // dump returns `EINTR` / `NLM_F_DUMP_INTR` from concurrent
-  // nexthop-subsystem churn. Same pattern `netlink_walk_routes`
+  // nexthop-subsystem churn. Same pattern `netlink_routes_into`
   // and `rt_generic_addrs` already use; keeping all three
   // consistent.
   //
@@ -983,7 +1124,7 @@ where
         let rtm = &received[NLMSG_HDRLEN..hlen];
         let rtm_header = RtmMessageHeader::parse(rtm)?;
 
-        // Same eligibility checks as `netlink_walk_routes`. Without
+        // Same eligibility checks as `netlink_routes_into`. Without
         // these a low-metric `blackhole default`, an `unreachable
         // default`, or a TOS / source-constrained default could win
         // `best_ifindex` and steer `best_local_*` at an interface
@@ -1043,14 +1184,14 @@ where
         // routes don't carry a top-level `RTA_OIF`. We capture the
         // payload / id here and resolve them after the attribute
         // walk so the best-interface selection covers the same
-        // route encodings `netlink_walk_routes` does — otherwise
+        // route encodings `netlink_routes_into` does — otherwise
         // `best_local_*` returns empty on hosts whose only default
         // is ECMP or `ip nexthop`-based.
         let mut multipath: Option<&[u8]> = None;
         let mut nh_id: Option<u32> = None;
         // Effective table id (RTA_TABLE override for > 255) and
         // source-constraint detection — shared with
-        // `netlink_walk_routes`.
+        // `netlink_routes_into`.
         let mut table_id: u32 = rtm_header.rtm_table as u32;
         let mut has_src_constraint = false;
         // Track whether RTA_DST claimed a non-unspecified address.
@@ -1166,8 +1307,8 @@ where
         //   - `Some(empty)`: id known but kernel-marked unusable
         //     (blackhole / linkdown / ...) — skip silently, no
         //     retry.
-        //   - `None`: id absent from snapshot. Defer to a
-        //     post-walk retry pass so a nexthop installed between
+        //   - `None`: id absent from the nexthop dump. The attempt
+        //     fails with `EINTR` so a nexthop that changed between
         //     our two dumps doesn't silently misroute.
         if !have_top_oif {
           if let Some(mp) = multipath {
@@ -1282,11 +1423,18 @@ where
   best_oifs.dedup();
 
   // Fetch addresses for every selected interface, appending into
-  // the caller-provided buffer. Returns immediately on the first
-  // syscall failure; partial results stay in `out` (consistent with
-  // every other walker that pushes into a sink).
+  // the caller-provided buffer. The first failure ends the walk, and
+  // `netlink_best_local_addrs_into_with` removes what this attempt
+  // appended.
   for idx in best_oifs {
-    netlink_addr_into_with(transport, family, idx, local_ip_filter, out)?;
+    netlink_addr_into_with(
+      transport,
+      family,
+      idx,
+      local_ip_filter,
+      FilterMode::Pure,
+      out,
+    )?;
   }
   Ok(())
 }
@@ -1299,9 +1447,9 @@ where
 /// `RTNH_F_DEAD` / `RTNH_F_LINKDOWN` / `RTNH_F_UNRESOLVED`) are still
 /// inserted into the map with `filtered = true`. The route walker
 /// needs that signal to tell "id present but unusable" (skip silently,
-/// no retry) apart from "id genuinely absent" (deferred for a single
-/// retry pass, then surfaced as EINTR). Without that distinction, one
-/// blackhole route would fail `route_table()` for the whole host.
+/// no retry) apart from "id genuinely absent" (the attempt fails with
+/// EINTR). Without that distinction, one blackhole route would fail
+/// `route_table()` for the whole host.
 #[derive(Debug, Clone)]
 struct NexthopInfo {
   oif: u32,
@@ -1340,7 +1488,7 @@ fn build_nh_dump_request(seq: u32) -> [u8; 24] {
 /// them as a map keyed by nexthop id. Always dumps with
 /// `nh_family = AF_UNSPEC` — see `build_nh_dump_request` for why
 /// per-family dumps are unsafe (they drop group objects). Used by
-/// `netlink_walk_routes` to resolve routes that arrive with an
+/// `netlink_routes_into` to resolve routes that arrive with an
 /// `RTA_NH_ID` reference rather than an inline `RTA_OIF` / `RTA_GATEWAY`.
 fn dump_nexthops<T: Transport>(
   transport: &mut T,
@@ -1489,11 +1637,11 @@ fn dump_nexthops<T: Transport>(
 ///
 /// - `None`: a referenced id is **not** in the map. This is the
 ///   "stale snapshot / race" case — either the top-level id, or a
-///   member id inside a group, was likely added between our nexthop
-///   dump and the route dump. Caller defers for a retry pass; on
-///   the second miss, surfaces `EINTR`. Same return for both
-///   missing-top-level and missing-group-member so a partial group
-///   can't silently lose a leg.
+///   member id inside a group, likely changed between the route dump
+///   and our nexthop dump. The route and best-local walkers fail the
+///   attempt with `EINTR`. Same return for both missing-top-level and
+///   missing-group-member so a partial group can't silently lose a
+///   leg.
 /// - `Some(empty)`: the id **is** in the map but the kernel marked
 ///   it unusable (`NHA_BLACKHOLE`, `RTNH_F_DEAD`, `RTNH_F_LINKDOWN`,
 ///   `RTNH_F_UNRESOLVED`), or it's a group whose members are all
@@ -1532,9 +1680,8 @@ fn resolve_nh_id(
           // route" and `Some(non-empty)` into "emit what we got",
           // both of which lose the missing leg without any retry
           // signal. Mirror the top-level missing-id path (`None`
-          // here) so the caller retries with a fresh dump and either
-          // resolves the member or surfaces `EINTR` if the kernel
-          // state is genuinely flapping.
+          // here), which the route and best-local walkers report as
+          // an interrupted attempt (`EINTR`).
           return None;
         }
       }
@@ -1545,52 +1692,65 @@ fn resolve_nh_id(
   Some(out)
 }
 
-/// Yields one entry per `RTM_NEWROUTE` message: `(family, oif, dst_len, dst,
-/// gateway)`. `dst` is `None` when the kernel omits `RTA_DST` (default
-/// route). `gateway` is `None` when there is no `RTA_GATEWAY` (a directly
-/// attached / link-scope route). All other parsing is the caller's
-/// responsibility — this lets `route_table` / `route_ipv4_table` /
-/// `route_ipv6_table` build different concrete types from the same walk.
-pub(super) fn netlink_walk_routes<F>(family: AddressFamily, on_route: F) -> io::Result<()>
+/// Dumps the `family` routing table into `out`. Every usable route, one per
+/// nexthop, goes to `convert` as `(family, oif, dst_len, dst, gateway)`, and
+/// each route it returns is a candidate for `filter`, applied as `mode`
+/// directs. On error, `out` is truncated back to its length on entry.
+///
+/// `dst` is `None` when the kernel omits `RTA_DST` (default route).
+/// `gateway` is `None` when there is no `RTA_GATEWAY` (a directly attached /
+/// link-scope route). The rest of the conversion is up to `convert`, which
+/// lets `route_table` / `route_ipv4_table` / `route_ipv6_table` build
+/// different concrete types from the same walk.
+pub(super) fn netlink_routes_into<R, C, F>(
+  family: AddressFamily,
+  convert: C,
+  filter: F,
+  mode: FilterMode,
+  out: &mut SmallVec<R>,
+) -> io::Result<()>
 where
-  F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
+  C: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>) -> Option<R>,
+  F: FnMut(&R) -> bool,
 {
-  netlink_walk_routes_with(&mut Kernel, family, on_route)
+  netlink_routes_into_with(&mut Kernel, family, convert, filter, mode, out)
 }
 
-fn netlink_walk_routes_with<T, F>(
+fn netlink_routes_into_with<T, R, C, F>(
   transport: &mut T,
   family: AddressFamily,
-  mut on_route: F,
+  mut convert: C,
+  filter: F,
+  mode: FilterMode,
+  out: &mut SmallVec<R>,
 ) -> io::Result<()>
 where
   T: Transport,
-  F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
+  C: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>) -> Option<R>,
+  F: FnMut(&R) -> bool,
 {
-  // `on_route` must see each route once, so every attempt buffers its routes
-  // and only the attempt that completes is replayed.
-  let routes = retry_interrupted(|| {
-    let mut routes = Vec::new();
-    netlink_walk_routes_once(transport, family, |fam, oif, dst_len, dst, gw| {
-      routes.push((fam, oif, dst_len, dst, gw));
-    })?;
-    Ok(routes)
-  })?;
-  for (fam, oif, dst_len, dst, gw) in routes {
-    on_route(fam, oif, dst_len, dst, gw);
-  }
-  Ok(())
+  run_filtered(out, filter, mode, |routes| {
+    netlink_routes_into_once(transport, family, &mut convert, routes)
+  })
 }
 
-fn netlink_walk_routes_once<T, F>(
+fn netlink_routes_into_once<T, R, C, F>(
   transport: &mut T,
   family: AddressFamily,
-  mut on_route: F,
+  mut convert: C,
+  routes: &mut FilterSink<'_, R, F>,
 ) -> io::Result<()>
 where
   T: Transport,
-  F: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>),
+  C: FnMut(u8, u32, u8, Option<IpAddr>, Option<IpAddr>) -> Option<R>,
+  F: FnMut(&R) -> bool,
 {
+  let mut on_route = |rtm_family, oif, dst_len, dst, gw| {
+    if let Some(route) = convert(rtm_family, oif, dst_len, dst, gw) {
+      routes.push(route);
+    }
+  };
+
   // Lazy nexthop-dump: we collect every `RTA_NH_ID` route we see
   // during the route walk and resolve them in a single post-walk
   // dump. This avoids paying the `RTM_GETNEXTHOP` round-trip when
@@ -2103,12 +2263,13 @@ pub(super) fn rt_generic_addrs<A, F>(
   rta: u16,
   rtn: Option<u8>,
   f: F,
+  mode: FilterMode,
 ) -> io::Result<SmallVec<A>>
 where
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
 {
-  rt_generic_addrs_with(&mut Kernel, family, rta, rtn, f)
+  rt_generic_addrs_with(&mut Kernel, family, rta, rtn, f, mode)
 }
 
 fn rt_generic_addrs_with<T, A, F>(
@@ -2117,14 +2278,21 @@ fn rt_generic_addrs_with<T, A, F>(
   rta: u16,
   rtn: Option<u8>,
   mut f: F,
+  mode: FilterMode,
 ) -> io::Result<SmallVec<A>>
 where
   T: Transport,
   A: Address + Eq,
   F: FnMut(&IpAddr) -> bool,
 {
-  // Every attempt builds a fresh result; `f` can see the same gateway again.
-  retry_interrupted(|| rt_generic_addrs_once(transport, family, rta, rtn, &mut f))
+  let mut gateways = SmallVec::new();
+  run_filtered(
+    &mut gateways,
+    |gateway: &A| f(&gateway.addr()),
+    mode,
+    |gateways| rt_generic_addrs_once(transport, family, rta, rtn, gateways),
+  )?;
+  Ok(gateways)
 }
 
 fn rt_generic_addrs_once<T, A, F>(
@@ -2132,12 +2300,12 @@ fn rt_generic_addrs_once<T, A, F>(
   family: AddressFamily,
   rta: u16,
   rtn: Option<u8>,
-  mut f: F,
-) -> io::Result<SmallVec<A>>
+  gateways: &mut FilterSink<'_, A, F>,
+) -> io::Result<()>
 where
   T: Transport,
   A: Address + Eq,
-  F: FnMut(&IpAddr) -> bool,
+  F: FnMut(&A) -> bool,
 {
   // Lazy nexthop-dump: don't pay the `RTM_GETNEXTHOP` round-trip
   // unless the route walk actually encounters an `RTA_NH_ID`
@@ -2150,11 +2318,12 @@ where
 
   let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
 
-  let mut gateways = SmallVec::new();
   // Policy-routing tables and multipath/ECMP entries can surface the
   // same gateway on multiple route messages. Dedup via a HashSet
   // keyed by `(index, IpAddr)`, matching the pattern already used in
-  // `src/bsd_like/rt_generic.rs` and `src/windows/gateway.rs`.
+  // `src/bsd_like/rt_generic.rs` and `src/windows/gateway.rs`. The
+  // dedup runs before the filter, which sees each gateway once per
+  // interface.
   let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
 
   let request = req.as_bytes();
@@ -2225,11 +2394,7 @@ where
                 // big-endian targets. Match the canonical
                 // `parse_rta_ipaddr` shape.
                 let bytes: [u8; 4] = data[..4].try_into().unwrap();
-                let addr = IpAddr::V4(bytes.into());
-
-                if f(&addr) {
-                  tmp_addrs.push(addr);
-                }
+                tmp_addrs.push(IpAddr::V4(bytes.into()));
               }
               (AddressFamily::INET6, AddressFamily::INET6)
               | (AddressFamily::UNSPEC, AddressFamily::INET6)
@@ -2242,11 +2407,7 @@ where
                 // sticking to the byte-array form keeps both
                 // arms uniform with `parse_rta_ipaddr`.
                 let bytes: [u8; 16] = data[..16].try_into().unwrap();
-                let addr = IpAddr::V6(bytes.into());
-
-                if f(&addr) {
-                  tmp_addrs.push(addr);
-                }
+                tmp_addrs.push(IpAddr::V6(bytes.into()));
               }
               _ => {}
             },
@@ -2300,11 +2461,7 @@ where
         // (u32, IpAddr) inline buffer for them either.
         if rta == RTA_GATEWAY {
           if let Some(mp) = multipath {
-            multipath_gateways_into(rtm_header.rtm_family, mp, &mut |idx, gw| {
-              if f(&gw) {
-                emit(idx, gw);
-              }
-            });
+            multipath_gateways_into(rtm_header.rtm_family, mp, &mut emit);
           }
 
           // Nexthop-object: defer to the post-walk resolution
@@ -2323,7 +2480,8 @@ where
   })?;
 
   if matches!(end, DumpEnd::FamilyUnavailable) {
-    return Ok(SmallVec::new());
+    gateways.discard();
+    return Ok(());
   }
 
   // Resolve any deferred `RTA_NH_ID` references in a single batch.
@@ -2335,11 +2493,9 @@ where
       if let Some(resolved) = resolve_nh_id(&nh_map, id) {
         for (oif, maybe_gw) in resolved {
           if let Some(gw) = maybe_gw {
-            if f(&gw) {
-              if let Some(addr) = A::try_from(oif, gw) {
-                if seen.insert((addr.index(), addr.addr())) {
-                  gateways.push(addr);
-                }
+            if let Some(addr) = A::try_from(oif, gw) {
+              if seen.insert((addr.index(), addr.addr())) {
+                gateways.push(addr);
               }
             }
           }
@@ -2348,12 +2504,12 @@ where
       // `None` (id absent from snapshot) is silently skipped —
       // gateway enumeration is best-effort by design (matches the
       // historical contract of returning `Ok([])` rather than
-      // `Err` on transient races) and there's no per-call retry
-      // pass like `netlink_walk_routes` has.
+      // `Err` on transient races), so unlike the route walker it
+      // does not treat the miss as an interrupted dump.
     }
   }
 
-  Ok(gateways)
+  Ok(())
 }
 
 /// Walk an `RTA_MULTIPATH` payload and call `sink(oif, gateway)` for
@@ -2623,14 +2779,33 @@ pub fn fuzz_netlink_dump(data: &[u8]) {
   let family = AddressFamily::UNSPEC;
 
   let _ = netlink_interface_with(&mut replay(), family, 0);
-  let mut addrs = SmallVec::<crate::IfNet>::new();
-  let _ = netlink_addr_into_with(&mut replay(), family, 0, |_| true, &mut addrs);
   let mut best = SmallVec::<crate::IfNet>::new();
   let _ = netlink_best_local_addrs_into_with(&mut replay(), family, &mut best);
   let _ = dump_nexthops(&mut replay());
-  let _ = netlink_walk_routes_with(&mut replay(), family, |_, _, _, _, _| {});
-  let _: io::Result<SmallVec<crate::IfAddr>> =
-    rt_generic_addrs_with(&mut replay(), family, RTA_GATEWAY, None, |_| true);
+
+  // A small deferral limit lets short inputs reach a commit, and the filters
+  // reject some entries so that the compaction runs.
+  for mode in [FilterMode::Pure, FilterMode::Deferred(2)] {
+    let mut addrs = SmallVec::<crate::IfNet>::new();
+    let _ = netlink_addr_into_with(&mut replay(), family, 0, IpAddr::is_ipv4, mode, &mut addrs);
+    let mut routes = SmallVec::new();
+    let _ = netlink_routes_into_with(
+      &mut replay(),
+      family,
+      |rtm_family, oif, dst_len, dst, gw| Some((rtm_family, oif, dst_len, dst, gw)),
+      |&(_, oif, ..)| oif % 2 == 0,
+      mode,
+      &mut routes,
+    );
+    let _: io::Result<SmallVec<crate::IfAddr>> = rt_generic_addrs_with(
+      &mut replay(),
+      family,
+      RTA_GATEWAY,
+      None,
+      IpAddr::is_ipv4,
+      mode,
+    );
+  }
 }
 
 #[cfg(test)]
@@ -2915,15 +3090,18 @@ mod netlink_tests {
     let mut dump = frame(RTM_NEWROUTE as u16, 0, &route);
     dump.extend(frame(NLMSG_DONE as u16, 0, &[]));
 
-    let mut routes = Vec::new();
-    netlink_walk_routes_with(
+    let mut routes = SmallVec::new();
+    netlink_routes_into_with(
       &mut Replay::new(vec![dump]),
       AddressFamily::INET,
-      |family, oif, dst_len, dst, gw| routes.push((family, oif, dst_len, dst, gw)),
+      raw_route,
+      |_| true,
+      FilterMode::Pure,
+      &mut routes,
     )
     .unwrap();
     assert_eq!(
-      routes,
+      routes.as_slice(),
       [(
         inet,
         3,
@@ -3160,13 +3338,26 @@ mod netlink_tests {
     IfNet::with_prefix_len(index, addr.into(), prefix_len).unwrap()
   }
 
-  /// `on_route` arguments: family, oif, dst_len, dst, gateway.
+  /// A route as the route walker hands it to `convert`: family, oif, dst_len,
+  /// dst, gateway.
   type Route = (u8, u32, u8, Option<IpAddr>, Option<IpAddr>);
   /// A nexthop map entry: id, oif, gateway, group members, filtered.
   type Nexthop = (u32, u32, Option<IpAddr>, Option<Vec<u32>>, bool);
 
+  /// The `convert` of a route walk that keeps each route as it was decoded.
+  fn raw_route(
+    family: u8,
+    oif: u32,
+    dst_len: u8,
+    dst: Option<IpAddr>,
+    gw: Option<IpAddr>,
+  ) -> Option<Route> {
+    Some((family, oif, dst_len, dst, gw))
+  }
+
   // Each `replay_*` runs one walker over `datagrams` and also returns the
-  // number of dumps it opened.
+  // number of dumps it opened. A filtered walker accepts everything, in the
+  // mode of its unfiltered public API.
 
   fn replay_links(datagrams: Vec<Vec<u8>>) -> (io::Result<TinyVec<Interface>>, usize) {
     let mut transport = CountingReplay::new(datagrams);
@@ -3182,6 +3373,7 @@ mod netlink_tests {
       AddressFamily::UNSPEC,
       0,
       |_| true,
+      FilterMode::Deferred(FILTER_DEFER_LIMIT),
       &mut addrs,
     );
     (result.map(|()| addrs), transport.opens)
@@ -3218,13 +3410,16 @@ mod netlink_tests {
 
   fn replay_routes(datagrams: Vec<Vec<u8>>) -> (io::Result<Vec<Route>>, usize) {
     let mut transport = CountingReplay::new(datagrams);
-    let mut routes = Vec::new();
-    let result = netlink_walk_routes_with(
+    let mut routes = SmallVec::new();
+    let result = netlink_routes_into_with(
       &mut transport,
       AddressFamily::INET,
-      |family, oif, dst_len, dst, gw| routes.push((family, oif, dst_len, dst, gw)),
+      raw_route,
+      |_| true,
+      FilterMode::Pure,
+      &mut routes,
     );
-    (result.map(|()| routes), transport.opens)
+    (result.map(|()| routes.into_vec()), transport.opens)
   }
 
   fn replay_gateways(datagrams: Vec<Vec<u8>>) -> (io::Result<SmallVec<IfAddr>>, usize) {
@@ -3235,6 +3430,7 @@ mod netlink_tests {
       RTA_GATEWAY,
       None,
       |_| true,
+      FilterMode::Pure,
     );
     (gateways, transport.opens)
   }
@@ -3301,6 +3497,7 @@ mod netlink_tests {
         seen.push(*addr);
         *addr != IpAddr::from([192, 0, 2, 20])
       },
+      FilterMode::Deferred(FILTER_DEFER_LIMIT),
       &mut addrs,
     )
     .unwrap();
@@ -3673,5 +3870,367 @@ mod netlink_tests {
     // The nexthop dump keeps the id it had read, marked unusable.
     let nexthops = replay_nexthops(replay()).0.unwrap();
     assert_eq!(nexthops, [(7, 0, None, None, true)]);
+  }
+
+  /// `message` with `NLM_F_DUMP_INTR` set, as the kernel flags the first
+  /// message of the batch emitted after the dumped table changed.
+  fn interrupted(mut message: Vec<u8>) -> Vec<u8> {
+    let flags = u16::from_ne_bytes(message[6..8].try_into().unwrap()) | NLM_F_DUMP_INTR as u16;
+    message[6..8].copy_from_slice(&flags.to_ne_bytes());
+    message
+  }
+
+  /// 192.0.2.`last`.
+  fn ip(last: u8) -> IpAddr {
+    IpAddr::from([192, 0, 2, last])
+  }
+
+  /// An `RTM_NEWADDR` message for [`ip`]`(last)`/24 on interface 1.
+  fn addr_message(last: u8) -> Vec<u8> {
+    ipv4_addr(1, [192, 0, 2, last], 24)
+  }
+
+  /// An address dump that reports 192.0.2.1 and 192.0.2.2 and is then
+  /// interrupted, and the dump of the rerun, which reports 192.0.2.1 and
+  /// 192.0.2.3. The first datagram has no `NLMSG_DONE`, so the walker reads on
+  /// and abandons the dump at the flagged message of the second.
+  fn interrupted_then_clean_addr_dumps() -> Vec<Vec<u8>> {
+    vec![
+      [addr_message(1), addr_message(2)].concat(),
+      [interrupted(addr_message(4)), done()].concat(),
+      [addr_message(1), addr_message(3), done()].concat(),
+    ]
+  }
+
+  #[test]
+  fn deferred_address_filter_sees_only_the_completed_dump() {
+    let mut transport = CountingReplay::new(interrupted_then_clean_addr_dumps());
+    let mut calls = Vec::new();
+    let mut addrs = SmallVec::<IfNet>::new();
+    netlink_addr_into_with(
+      &mut transport,
+      AddressFamily::INET,
+      0,
+      |addr| {
+        calls.push(*addr);
+        true
+      },
+      FilterMode::Deferred(FILTER_DEFER_LIMIT),
+      &mut addrs,
+    )
+    .unwrap();
+
+    assert_eq!(calls, [ip(1), ip(3)]);
+    assert_eq!(addrs.as_slice(), &[net(1, ip(1), 24), net(1, ip(3), 24)]);
+    assert_eq!(transport.opens, 2);
+  }
+
+  #[test]
+  fn pure_address_dump_is_rerun_after_an_interruption() {
+    let mut transport = CountingReplay::new(interrupted_then_clean_addr_dumps());
+    let mut addrs = SmallVec::<IfNet>::new();
+    netlink_addr_into_with(
+      &mut transport,
+      AddressFamily::INET,
+      0,
+      local_ip_filter,
+      FilterMode::Pure,
+      &mut addrs,
+    )
+    .unwrap();
+
+    assert_eq!(addrs.as_slice(), &[net(1, ip(1), 24), net(1, ip(3), 24)]);
+    assert_eq!(transport.opens, 2);
+  }
+
+  // The filter deduplicates by address alone, so had it seen the abandoned
+  // attempt, it would reject 192.0.2.1 on interface 2 from the completed one.
+  #[test]
+  fn deferred_gateway_filter_sees_only_the_completed_dump() {
+    let via = |last, oif| {
+      route(
+        0,
+        &[
+          rtattr(RTA_GATEWAY, &[192, 0, 2, last]),
+          u32_attr(RTA_OIF, oif),
+        ],
+      )
+    };
+    let datagrams = vec![
+      [via(1, 2), via(1, 3)].concat(),
+      [interrupted(via(9, 9)), done()].concat(),
+      // The walker reports 192.0.2.1 on interface 2 once, so the filter sees
+      // it once there and once on interface 3.
+      [via(1, 2), via(1, 2), via(1, 3), via(4, 4), done()].concat(),
+    ];
+
+    let mut transport = CountingReplay::new(datagrams);
+    let mut calls = Vec::new();
+    let mut unique = HashSet::new();
+    let gateways: SmallVec<IfAddr> = rt_generic_addrs_with(
+      &mut transport,
+      AddressFamily::INET,
+      RTA_GATEWAY,
+      None,
+      |addr| {
+        calls.push(*addr);
+        unique.insert(*addr)
+      },
+      FilterMode::Deferred(FILTER_DEFER_LIMIT),
+    )
+    .unwrap();
+
+    assert_eq!(calls, [ip(1), ip(1), ip(4)]);
+    assert_eq!(
+      gateways.as_slice(),
+      &[IfAddr::new(2, ip(1)), IfAddr::new(4, ip(4))]
+    );
+    assert_eq!(transport.opens, 2);
+  }
+
+  #[test]
+  fn deferred_route_filter_sees_only_the_completed_dump() {
+    let via = |dst: [u8; 4], oif| {
+      route(
+        24,
+        &[
+          rtattr(RTA_DST, &dst),
+          rtattr(RTA_GATEWAY, &GATEWAY),
+          u32_attr(RTA_OIF, oif),
+        ],
+      )
+    };
+    let multipath = [rtnexthop(2, [192, 0, 2, 2]), rtnexthop(3, [192, 0, 2, 3])].concat();
+    let datagrams = vec![
+      [via([198, 51, 100, 0], 1), via([203, 0, 113, 0], 1)].concat(),
+      [interrupted(via([10, 0, 0, 0], 1)), done()].concat(),
+      [
+        via([198, 51, 100, 0], 1),
+        route(
+          24,
+          &[
+            rtattr(RTA_DST, &[10, 1, 1, 0]),
+            rtattr(RTA_MULTIPATH, &multipath),
+          ],
+        ),
+        done(),
+      ]
+      .concat(),
+    ];
+
+    let mut transport = CountingReplay::new(datagrams);
+    let mut calls = Vec::new();
+    let mut routes = SmallVec::new();
+    netlink_routes_into_with(
+      &mut transport,
+      AddressFamily::INET,
+      raw_route,
+      |entry| {
+        calls.push(*entry);
+        true
+      },
+      FilterMode::Deferred(FILTER_DEFER_LIMIT),
+      &mut routes,
+    )
+    .unwrap();
+
+    let inet = AddressFamily::INET.as_raw() as u8;
+    let dst = |addr: [u8; 4]| Some(IpAddr::from(addr));
+    let expected = [
+      (inet, 1, 24, dst([198, 51, 100, 0]), Some(ip(1))),
+      (inet, 2, 24, dst([10, 1, 1, 0]), Some(ip(2))),
+      (inet, 3, 24, dst([10, 1, 1, 0]), Some(ip(3))),
+    ];
+    assert_eq!(calls, expected);
+    assert_eq!(routes.as_slice(), expected);
+    assert_eq!(transport.opens, 2);
+  }
+
+  // With a limit of three, the third address makes the filter run, so the
+  // interruption after the fourth cannot be retried without showing the
+  // filter those addresses again.
+  #[test]
+  fn interruption_after_the_deferred_filter_ran_is_final() {
+    let datagrams = vec![
+      (1..=4).map(addr_message).collect::<Vec<_>>().concat(),
+      [interrupted(addr_message(5)), done()].concat(),
+      // The clean dump a rerun would read.
+      [addr_message(1), done()].concat(),
+    ];
+    let existing = net(9, [10, 0, 0, 1], 8);
+
+    let mut transport = CountingReplay::new(datagrams);
+    let mut calls = Vec::new();
+    let mut addrs = SmallVec::from(existing);
+    let err = netlink_addr_into_with(
+      &mut transport,
+      AddressFamily::INET,
+      0,
+      |addr| {
+        calls.push(*addr);
+        true
+      },
+      FilterMode::Deferred(3),
+      &mut addrs,
+    )
+    .unwrap_err();
+
+    assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+    assert_eq!(transport.opens, 1);
+    assert_eq!(calls, (1..=4).map(ip).collect::<Vec<_>>());
+    assert_eq!(addrs.as_slice(), &[existing]);
+  }
+
+  // With a limit of three, the filter sees the first three addresses as soon
+  // as the third arrives, before the second datagram is read, and the other
+  // two as they arrive. It rejects one of each group.
+  #[test]
+  fn deferred_filter_runs_at_its_limit_and_then_inline() {
+    let mut replay = Replay::new(vec![
+      [addr_message(1), addr_message(2), addr_message(3)].concat(),
+      [addr_message(4), addr_message(5), done()].concat(),
+    ]);
+    let unread = Rc::clone(&replay.datagrams);
+    let existing = net(9, [10, 0, 0, 1], 8);
+
+    let mut calls = Vec::new();
+    let mut addrs = SmallVec::from(existing);
+    netlink_addr_into_with(
+      &mut replay,
+      AddressFamily::INET,
+      0,
+      |addr| {
+        calls.push((*addr, unread.borrow().len()));
+        *addr != ip(2) && *addr != ip(5)
+      },
+      FilterMode::Deferred(3),
+      &mut addrs,
+    )
+    .unwrap();
+
+    assert_eq!(
+      calls,
+      [(ip(1), 1), (ip(2), 1), (ip(3), 1), (ip(4), 0), (ip(5), 0)]
+    );
+    assert_eq!(
+      addrs.as_slice(),
+      &[
+        existing,
+        net(1, ip(1), 24),
+        net(1, ip(3), 24),
+        net(1, ip(4), 24),
+      ]
+    );
+  }
+
+  #[test]
+  fn failed_dump_leaves_the_caller_buffer_as_it_was() {
+    use rustix::io::Errno;
+
+    let existing = net(9, [10, 0, 0, 1], 8);
+    let mut malformed = done();
+    malformed[..4].copy_from_slice(&((NLMSG_HDRLEN - 1) as u32).to_ne_bytes());
+
+    // Each address dump fails after it has reported an address: on malformed
+    // framing, or on the last of its interrupted attempts.
+    let interrupted_dump = [addr_message(1), interrupted(addr_message(2)), done()].concat();
+    let failures = [
+      (vec![addr_message(1), malformed.clone()], Errno::INVAL),
+      (vec![interrupted_dump; MAX_DUMP_ATTEMPTS], Errno::INTR),
+    ];
+    for mode in [
+      FilterMode::Pure,
+      FilterMode::Deferred(FILTER_DEFER_LIMIT),
+      FilterMode::Deferred(1),
+    ] {
+      for (datagrams, errno) in failures.clone() {
+        let mut addrs = SmallVec::from(existing);
+        let err = netlink_addr_into_with(
+          &mut Replay::new(datagrams),
+          AddressFamily::INET,
+          0,
+          |_| true,
+          mode,
+          &mut addrs,
+        )
+        .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(errno.raw_os_error()));
+        assert_eq!(addrs.as_slice(), &[existing], "{mode:?}");
+      }
+    }
+
+    // Best-local selects interfaces 2 and 3, and the address dump of 3 fails
+    // after the one of 2 has reported an address.
+    let default_via = |oif| route(0, &[rtattr(RTA_GATEWAY, &GATEWAY), u32_attr(RTA_OIF, oif)]);
+    let datagrams = vec![
+      [default_via(2), default_via(3), done()].concat(),
+      [ipv4_addr(2, [192, 0, 2, 10], 24), done()].concat(),
+      malformed,
+    ];
+    let mut addrs = SmallVec::from(existing);
+    let err = netlink_best_local_addrs_into_with(
+      &mut Replay::new(datagrams),
+      AddressFamily::INET,
+      &mut addrs,
+    )
+    .unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(Errno::INVAL.raw_os_error()));
+    assert_eq!(addrs.as_slice(), &[existing]);
+  }
+
+  #[test]
+  fn pure_route_dump_is_rerun_until_the_attempts_run_out() {
+    let replay = |datagrams| {
+      let mut transport = CountingReplay::new(datagrams);
+      let mut routes = SmallVec::new();
+      let result = netlink_routes_into_with(
+        &mut transport,
+        AddressFamily::INET,
+        raw_route,
+        |_| true,
+        FilterMode::Pure,
+        &mut routes,
+      );
+      (result.map(|()| routes.into_vec()), transport.opens)
+    };
+    let route_to = |dst: [u8; 4]| route(24, &[rtattr(RTA_DST, &dst), u32_attr(RTA_OIF, 1)]);
+    let interrupted_dump = [
+      route_to([198, 51, 100, 0]),
+      route_to([203, 0, 113, 0]),
+      route_to([10, 0, 0, 0]),
+      interrupted(route_to([10, 1, 0, 0])),
+      done(),
+    ]
+    .concat();
+    let clean = [route_to([198, 51, 100, 0]), done()].concat();
+    let inet = AddressFamily::INET.as_raw() as u8;
+
+    let (routes, opens) = replay(vec![interrupted_dump.clone(), clean.clone()]);
+    assert_eq!(
+      routes.unwrap(),
+      [(inet, 1, 24, Some(IpAddr::from([198, 51, 100, 0])), None)]
+    );
+    assert_eq!(opens, 2);
+
+    // A clean dump that only a fourth attempt would reach.
+    let mut datagrams = vec![interrupted_dump; MAX_DUMP_ATTEMPTS];
+    datagrams.push(clean);
+    let (routes, opens) = replay(datagrams);
+    assert_eq!(routes.unwrap_err().kind(), io::ErrorKind::Interrupted);
+    assert_eq!(opens, MAX_DUMP_ATTEMPTS);
+
+    // A nexthop id missing from the nexthop dump interrupts the attempt too.
+    let via_nexthop = [route(0, &[u32_attr(RTA_NH_ID, 7)]), done()].concat();
+    let (routes, opens) = replay(vec![
+      via_nexthop.clone(),
+      [nexthop_via(8, 2, GATEWAY), done()].concat(),
+      via_nexthop,
+      [nexthop_via(7, 2, GATEWAY), done()].concat(),
+    ]);
+    assert_eq!(
+      routes.unwrap(),
+      [(inet, 2, 0, None, Some(IpAddr::from(GATEWAY)))]
+    );
+    assert_eq!(opens, 4);
   }
 }
