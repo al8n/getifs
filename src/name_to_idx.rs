@@ -49,12 +49,6 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
 }
 
 #[cfg(windows)]
-#[inline]
-fn win32_status_error(status: u32) -> io::Error {
-  io::Error::from_raw_os_error(status as i32)
-}
-
-#[cfg(windows)]
 fn ifname_to_index_in(name: &str) -> io::Result<u32> {
   use std::ffi::CString;
 
@@ -64,6 +58,8 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
     IpHelper::{if_nametoindex, ConvertInterfaceAliasToLuid, ConvertInterfaceLuidToIndex},
     Ndis::NET_LUID_LH,
   };
+
+  use crate::os::win32_status_error;
 
   fn try_friendly_name(name: &str) -> io::Result<u32> {
     let wide_name =
@@ -139,12 +135,6 @@ mod tests {
     let first = ift.iter().next().unwrap();
     let idx = ifname_to_index(first.name()).unwrap();
     assert_eq!(idx, first.index());
-  }
-
-  #[cfg(windows)]
-  #[test]
-  fn win32_status_error_preserves_the_returned_code() {
-    assert_eq!(win32_status_error(87).raw_os_error(), Some(87));
   }
 
   // An unknown name must surface as the missing-interface status that

@@ -287,13 +287,10 @@ impl<'a> Iterator for AdapterIter<'a> {
 
 /// Resolves an adapter name when its `FriendlyName` is unavailable.
 ///
-/// Calls `if_indextoname` and guards against a null return — feeding a
-/// null pointer straight into `CStr::from_ptr` is UB, which was the
-/// previous behaviour at three call sites (`interface_table`, the
-/// `idx=None` arm of the same loop, and `idx_to_name::ifindex_to_name`
-/// on Windows). If the fallback also fails, the caller skips that adapter:
-/// an empty or lossy name could not be passed back to `ifname_to_index`.
-fn interface_name_fallback(index: u32) -> Option<smol_str::SmolStr> {
+/// Returns `None` when `if_indextoname` fails or yields an empty or
+/// non-UTF-8 name: such a name could not be passed back to
+/// `ifname_to_index`.
+pub(super) fn interface_name_fallback(index: u32) -> Option<smol_str::SmolStr> {
   let mut name_buf = [0u8; IF_MAX_STRING_SIZE as usize + 1];
   // SAFETY: `if_indextoname` writes into `name_buf` (which is >= IF_NAMESIZE)
   // and returns either a pointer into that buffer or null.
@@ -306,6 +303,11 @@ fn interface_name_fallback(index: u32) -> Option<smol_str::SmolStr> {
     .and_then(|name| name.to_str().ok())
     .filter(|name| !name.is_empty())
     .map(smol_str::SmolStr::new)
+}
+
+#[inline]
+pub(super) fn win32_status_error(status: u32) -> io::Error {
+  io::Error::from_raw_os_error(status as i32)
 }
 
 #[inline]
@@ -719,5 +721,10 @@ mod tests {
       adapter_mac_address(&adapter).unwrap().octets(),
       [0, 1, 2, 3, 4, 5]
     );
+  }
+
+  #[test]
+  fn win32_status_error_preserves_the_returned_code() {
+    assert_eq!(win32_status_error(87).raw_os_error(), Some(87));
   }
 }

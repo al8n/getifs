@@ -60,32 +60,6 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
     .map_err(Into::into)
 }
 
-#[cfg(windows)]
-fn raw_interface_name(idx: u32) -> Option<SmolStr> {
-  use windows_sys::Win32::NetworkManagement::{IpHelper::if_indextoname, Ndis::IF_MAX_STRING_SIZE};
-
-  let mut name_buf = [0u8; IF_MAX_STRING_SIZE as usize + 1];
-  // SAFETY: the output buffer is larger than the documented maximum
-  // interface name and remains alive while its contents are parsed.
-  let result = unsafe { if_indextoname(idx, name_buf.as_mut_ptr()) };
-  if result.is_null() {
-    return None;
-  }
-
-  std::ffi::CStr::from_bytes_until_nul(&name_buf)
-    .ok()?
-    .to_str()
-    .ok()
-    .filter(|name| !name.is_empty())
-    .map(SmolStr::new)
-}
-
-#[cfg(windows)]
-#[inline]
-fn win32_status_error(status: u32) -> io::Error {
-  io::Error::from_raw_os_error(status as i32)
-}
-
 /// Returns the name of the interface by the given index.
 #[cfg(windows)]
 fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
@@ -94,6 +68,8 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
     IpHelper::{ConvertInterfaceIndexToLuid, ConvertInterfaceLuidToAlias},
     Ndis::{IF_MAX_STRING_SIZE, NET_LUID_LH},
   };
+
+  use crate::os::{interface_name_fallback, win32_status_error};
 
   let mut luid = NET_LUID_LH { Value: 0 };
 
@@ -112,7 +88,7 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
       return Ok(name);
     }
 
-    return raw_interface_name(idx).ok_or_else(|| {
+    return interface_name_fallback(idx).ok_or_else(|| {
       io::Error::new(
         io::ErrorKind::InvalidData,
         "Windows returned an invalid interface alias and no raw name",
@@ -123,7 +99,7 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
   // `if_indextoname` deliberately exposes no error code. If that fallback
   // also fails, preserve the actionable ConvertInterface status rather than
   // reading unrelated last-error state.
-  raw_interface_name(idx).ok_or_else(|| win32_status_error(result))
+  interface_name_fallback(idx).ok_or_else(|| win32_status_error(result))
 }
 
 #[cfg(test)]
@@ -151,11 +127,5 @@ mod tests {
     let first = ift.iter().next().unwrap();
     let name = ifindex_to_name(first.index()).unwrap();
     assert_eq!(first.name(), &name);
-  }
-
-  #[cfg(windows)]
-  #[test]
-  fn win32_status_error_preserves_the_returned_code() {
-    assert_eq!(win32_status_error(87).raw_os_error(), Some(87));
   }
 }
