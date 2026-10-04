@@ -1,29 +1,21 @@
-// `getifs::interface_multicast_addrs` is only defined on platforms with a
-// kernel-level multicast group enumeration API (see `cfg_multicast!` in
-// src/macros.rs). NetBSD/OpenBSD have no such API, so the symbol is
-// absent there and the example must compile to a stub instead.
+// `getifs::interface_multicast_addrs` exists on every supported platform, but
+// Android, DragonFly, NetBSD, and OpenBSD return `ErrorKind::Unsupported`
+// because they give getifs no way to enumerate multicast group memberships.
 
-#[cfg(any(
-  target_vendor = "apple",
-  target_os = "freebsd",
-  target_os = "dragonfly",
-  target_os = "linux",
-  windows,
-))]
-fn main() {
-  let ift = getifs::interface_multicast_addrs().unwrap();
-  for ifa in ift {
-    println!("{ifa}");
+use std::io;
+
+fn main() -> io::Result<()> {
+  let addrs = match getifs::interface_multicast_addrs() {
+    Ok(addrs) => addrs,
+    Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+      eprintln!("multicast group enumeration is unsupported here: {error}");
+      return Ok(());
+    }
+    Err(error) => return Err(error),
+  };
+
+  for addr in addrs {
+    println!("{addr}");
   }
-}
-
-#[cfg(not(any(
-  target_vendor = "apple",
-  target_os = "freebsd",
-  target_os = "dragonfly",
-  target_os = "linux",
-  windows,
-)))]
-fn main() {
-  eprintln!("interface_multicast_addrs is not available on this platform");
+  Ok(())
 }

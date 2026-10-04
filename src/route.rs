@@ -94,6 +94,11 @@ impl From<Ipv6Route> for IpRoute {
 }
 
 /// An entry from the kernel routing table.
+///
+/// The model intentionally stores only same-family destination and gateway
+/// pairs. In particular, Linux routes encoded with cross-family `RTA_VIA`
+/// gateways are omitted rather than represented as misleading on-link routes.
+#[non_exhaustive]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum IpRoute {
   /// An IPv4 route.
@@ -226,7 +231,7 @@ impl IpRoute {
 /// }
 /// ```
 pub fn route_table() -> io::Result<SmallVec<IpRoute>> {
-  os::route_table_by_filter(|_| true)
+  os::route_table()
 }
 
 /// Returns the IPv4 unicast/local entries from the kernel routing
@@ -243,7 +248,7 @@ pub fn route_table() -> io::Result<SmallVec<IpRoute>> {
 /// }
 /// ```
 pub fn route_ipv4_table() -> io::Result<SmallVec<Ipv4Route>> {
-  os::route_ipv4_table_by_filter(|_| true)
+  os::route_ipv4_table()
 }
 
 /// Returns the IPv6 unicast/local entries from the kernel routing
@@ -260,7 +265,7 @@ pub fn route_ipv4_table() -> io::Result<SmallVec<Ipv4Route>> {
 /// }
 /// ```
 pub fn route_ipv6_table() -> io::Result<SmallVec<Ipv6Route>> {
-  os::route_ipv6_table_by_filter(|_| true)
+  os::route_ipv6_table()
 }
 
 /// Returns routing-table entries that match the given filter. Only
@@ -338,8 +343,7 @@ mod tests {
     assert_eq!(r.destination(), &dst);
     assert_eq!(r.gateway(), gw);
     assert!(!r.is_default());
-    // Don't assert on `r.name()` — the previous version called
-    // `name().is_ok()` with a hard-coded index of 2, which fails on
+    // Don't assert on `r.name()`: a hard-coded index of 2 fails on
     // hosts (Windows runners, some macOS / container CIs) where no
     // interface happens to be at that index. The constructor under
     // test doesn't depend on that lookup; this is a unit test, not
@@ -388,13 +392,6 @@ mod tests {
     );
   }
 
-  // The union `route_table` walks both AF_INET and AF_INET6 on BSD;
-  // NetBSD's CI VM hits the `ENOMEM` v6 dump path documented at
-  // `route_v6_table_returns` below, and `family_unavailable_to_empty`
-  // only collapses unsupported-family errnos (not `ENOMEM`). Gate on
-  // NetBSD for the same reason — propagating the kernel errno is
-  // correct library behavior; the smoke test just gets skipped.
-  #[cfg(not(target_os = "netbsd"))]
   #[test]
   fn route_table_returns() {
     let routes = route_table().unwrap();
@@ -409,7 +406,6 @@ mod tests {
     }
   }
 
-  #[cfg(not(target_os = "netbsd"))]
   #[test]
   fn route_table_filter_default_only() {
     let defaults = route_table_by_filter(|r| r.is_default()).unwrap();
@@ -431,13 +427,6 @@ mod tests {
     }
   }
 
-  // NetBSD's CI VM has a v6 routing stack whose `NET_RT_DUMP` sysctl
-  // can return `ENOMEM` rather than an empty dump (the OS-side
-  // `sysctl_dorouttable` allocator behavior — not a real out-of-memory
-  // condition we can do anything about). Propagating the errno is
-  // correct library behavior, so the smoke test just gets gated off
-  // on the platform.
-  #[cfg(not(target_os = "netbsd"))]
   #[test]
   fn route_v6_table_returns() {
     let routes = route_ipv6_table().unwrap();

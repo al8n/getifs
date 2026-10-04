@@ -14,6 +14,9 @@ use super::{os, IfNet, Ifv4Net, Ifv6Net};
 /// 6890] (regardless of whether or not there is a default route, unlike
 /// [`private_ipv4_addrs`](super::private_ipv4_addrs)).
 ///
+/// Returned [`Ifv4Net`] values retain their local interface index through
+/// [`Ifv4Net::index`].
+///
 /// See also [`public_ipv4_addrs_by_filter`].
 ///
 /// ## Example
@@ -42,6 +45,9 @@ pub fn public_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 /// 6890] (regardless of whether or not there is a default route, unlike
 /// [`private_ipv6_addrs`](super::private_ipv6_addrs)).
 ///
+/// Returned [`Ifv6Net`] values retain their local interface index through
+/// [`Ifv6Net::index`].
+///
 /// See also [`public_ipv6_addrs_by_filter`].
 ///
 /// ## Example
@@ -69,6 +75,10 @@ pub fn public_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// Returns all IP addresses that are NOT part of [RFC
 /// 6890] (regardless of whether or not there is a default route, unlike
 /// [`private_addrs`](super::private_addrs)).
+///
+/// Public and private are the crate's RFC 6890 special-purpose classifications,
+/// not a reachability or remote-path-MTU test. Returned [`IfNet`] values retain
+/// their local interface index through [`IfNet::index`].
 ///
 /// See also [`public_addrs_by_filter`].
 ///
@@ -199,4 +209,41 @@ where
 #[inline]
 fn public_ip_filter(ip: &IpAddr) -> bool {
   !RFC6890.contains(ip)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn public_filter_preserves_rfc6890_classification() {
+    for (addr, expected) in [
+      ("2001:4860:4860::8888", true),
+      ("192.0.2.1", false),
+      ("2001:db8::1", false),
+      ("10.0.0.1", false),
+      ("100.64.0.1", false),
+      ("fd00::1", false),
+      ("127.0.0.1", false),
+      ("::1", false),
+      ("169.254.1.1", false),
+      ("fe80::1", false),
+      // Blocks the IANA registry added after RFC 6890.
+      ("192.31.196.1", false),    // AS112-v4
+      ("192.52.193.1", false),    // AMT
+      ("192.175.48.1", false),    // Direct Delegation AS112 Service
+      ("64:ff9b:1::1", false),    // IPv4-IPv6 translation, local use
+      ("100:0:0:1::1", false),    // Dummy IPv6 Prefix
+      ("2620:4f:8000::1", false), // Direct Delegation AS112 Service
+      ("3fff::1", false),         // Documentation
+      ("5f00::1", false),         // Segment Routing (SRv6) SIDs
+    ] {
+      let ip = addr.parse::<IpAddr>().unwrap();
+      assert_eq!(
+        public_ip_filter(&ip),
+        expected,
+        "unexpected public classification for {addr}"
+      );
+    }
+  }
 }

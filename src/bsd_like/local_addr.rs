@@ -71,8 +71,8 @@ pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
 /// present (`rmx_recvpipe`, `rmx_pksent`, etc.) are TCP-pipe metrics,
 /// not routing priority. Returning `0` for those targets makes every
 /// candidate compare equal, and the caller-side selector then
-/// collects every default-route ifindex (instead of arbitrarily
-/// picking by an irrelevant TCP metric, which the previous code did).
+/// collects every default-route ifindex instead of arbitrarily
+/// picking by an irrelevant TCP metric.
 #[cfg(target_os = "openbsd")]
 #[inline]
 fn route_priority(rtm: &RtMsghdr) -> u8 {
@@ -86,22 +86,35 @@ fn route_priority(_rtm: &RtMsghdr) -> u8 {
 }
 
 fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result<()> {
-  let routes = fetch(family, NET_RT_DUMP, 0)?;
+  let best_oifs = best_route_interfaces(&fetch(family, NET_RT_DUMP, 0)?, family)?;
+
+  // Fetch addresses for every selected interface, appending into the
+  // caller-provided buffer. Returns immediately on the first syscall
+  // failure and leaves the addresses already appended in `out`, unlike
+  // `netlink_best_local_addrs_into`, which truncates `out` on error.
+  for idx in best_oifs {
+    interface_addr_table_into(family, idx as u32, local_ip_filter, out)?;
+  }
+  Ok(())
+}
+
+/// The interfaces of the best usable default routes for `family` in a
+/// `NET_RT_DUMP` buffer, sorted and deduplicated.
+pub(super) fn best_route_interfaces(routes: &[u8], family: i32) -> io::Result<SmallVec<u16>> {
   // Selection key: route priority (lower wins on OpenBSD, all-zero
   // elsewhere). `best_oifs` holds every interface that ties at the
-  // current best priority. The previous code keyed on
-  // `rtm_rmx.rmx_recvpipe` — a TCP receive-pipe metric, not a routing
-  // priority — so on hosts with multiple defaults it could pick an
-  // interface based on irrelevant TCP state instead of the one the
-  // kernel actually uses. On non-OpenBSD BSDs there is no usable
-  // priority field at all, so we collect every default-route oif and
-  // emit addresses for all of them; that's strictly more conservative
-  // than picking arbitrarily.
+  // current best priority. `rtm_rmx.rmx_recvpipe` is not a key: it is
+  // a TCP receive-pipe metric, not a routing priority, so keying on it
+  // would pick an interface based on irrelevant TCP state instead of
+  // the one the kernel actually uses. On non-OpenBSD BSDs there is no
+  // usable priority field at all, so we collect every default-route
+  // oif and emit addresses for all of them; that's strictly more
+  // conservative than picking arbitrarily.
   let mut best_oifs: SmallVec<u16> = SmallVec::new();
   let mut best_priority: u8 = u8::MAX;
 
   unsafe {
-    let mut src = routes.as_slice();
+    let mut src = routes;
     while src.len() > 4 {
       let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
       // `l == 0` is the kernel's normal end-of-stream sentinel for
@@ -123,13 +136,13 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
 
       // SAFETY: `src` is a `Vec<u8>` (u8-aligned); copy the header
       // out via `read_unaligned` before reading fields. Same rationale
-      // as `walk_route_table` / `rt_generic_addrs_in` /
+      // as `parse_route_table` / `parse_rt_generic_addrs` /
       // `parse_inet_addr` — see comments there.
       let header_size = std::mem::size_of::<RtMsghdr>();
       if l < header_size {
         // Message claims a length shorter than its own header type —
         // a kernel-side bug or version skew. Surface it (consistent
-        // with `walk_route_table` / `rt_generic_addrs_in`) rather
+        // with `parse_route_table` / `parse_rt_generic_addrs`) rather
         // than reading past the message into the next entry.
         return Err(message_too_short());
       }
@@ -137,7 +150,7 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
 
       // Same usable-route filter as `bsd_like/route.rs`. A
       // `RTF_REJECT` / `RTF_BLACKHOLE` default route can be `RTF_UP`
-      // with a low metric and would otherwise win `best_ifindex`,
+      // with a low metric and would otherwise win the selection,
       // making `best_local_*` return addresses on an interface the
       // kernel never delivers via. `RTF_BROADCAST` / `RTF_MULTICAST`
       // are housekeeping routes the kernel attaches to interfaces
@@ -153,7 +166,7 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
       // outbound traffic" walk must not pick them — the addresses
       // returned would only be correct for traffic that already has
       // a matching source bound. Same per-platform shape as
-      // `walk_route_table` (NetBSD: `RTF_SRC`; OpenBSD:
+      // `parse_route_table` (NetBSD: `RTF_SRC`; OpenBSD:
       // `RTAX_SRC` / `RTAX_SRCMASK` slots in `rtm_addrs`).
       #[cfg(target_os = "netbsd")]
       {
@@ -178,9 +191,9 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
       //     `RTAX_DST` entirely (one BSD encoding of the default
       //     route is "no destination, only a gateway");
       //   - decodes the compact `sa_family = AF_INET[6]` short
-      //     sockaddrs that NetBSD/OpenBSD emit for netmasks and that
-      //     the previous inline decode here silently dropped, leaving
-      //     `is_default` false for valid default routes.
+      //     sockaddrs that NetBSD/OpenBSD emit for netmasks; a decoder
+      //     that silently dropped them would leave `is_default` false
+      //     for valid default routes.
       let addrs = parse_addrs(rtm.rtm_addrs as u32, &src[header_size..l])?;
       let dst = addrs[RTAX_DST as usize];
       let dst_present = (rtm.rtm_addrs as u32 & libc::RTA_DST as u32) != 0;
@@ -217,14 +230,7 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
   best_oifs.sort_unstable();
   best_oifs.dedup();
 
-  // Fetch addresses for every selected interface, appending into the
-  // caller-provided buffer. Returns immediately on the first syscall
-  // failure; partial results stay in `out` (consistent with Linux's
-  // `netlink_best_local_addrs_into`).
-  for idx in best_oifs {
-    interface_addr_table_into(family, idx as u32, local_ip_filter, out)?;
-  }
-  Ok(())
+  Ok(best_oifs)
 }
 
 pub(crate) fn local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
@@ -260,4 +266,60 @@ where
   F: FnMut(&IpAddr) -> bool,
 {
   interface_addresses(0, |addr| f(addr) && local_ip_filter(addr))
+}
+
+#[cfg(test)]
+mod tests {
+  use libc::{AF_UNSPEC, RTAX_GATEWAY, RTF_GATEWAY};
+
+  use super::{
+    super::tests::{addrs_mask, rt_message, sockaddr_in},
+    *,
+  };
+
+  /// A route via `index` to `dst`, with no `RTAX_DST` slot when `dst` is
+  /// `None`.
+  fn route(index: u16, flags: libc::c_int, dst: Option<Ipv4Addr>) -> Vec<u8> {
+    let gateway = sockaddr_in(Ipv4Addr::new(192, 0, 2, 1));
+    match dst {
+      Some(dst) => {
+        let mut body = sockaddr_in(dst);
+        body.extend(gateway);
+        rt_message(index, flags, addrs_mask(&[RTAX_DST, RTAX_GATEWAY]), &body)
+      }
+      None => rt_message(index, flags, addrs_mask(&[RTAX_GATEWAY]), &gateway),
+    }
+  }
+
+  #[test]
+  fn selects_every_usable_default_route_interface() {
+    let up = RTF_UP | RTF_GATEWAY;
+    let mut buf = route(3, up, Some(Ipv4Addr::UNSPECIFIED));
+    buf.extend(route(9, up, Some(Ipv4Addr::new(10, 0, 0, 0))));
+    buf.extend(route(2, up, Some(Ipv4Addr::UNSPECIFIED)));
+    buf.extend(route(3, up, Some(Ipv4Addr::UNSPECIFIED)));
+    buf.extend(route(8, up | RTF_BLACKHOLE, Some(Ipv4Addr::UNSPECIFIED)));
+    // A family-specific dump encodes a default route by omitting `RTAX_DST`.
+    buf.extend(route(7, up, None));
+
+    let oifs = best_route_interfaces(&buf, AF_INET).unwrap();
+    assert_eq!(oifs.as_slice(), &[2, 3, 7]);
+    // Without a family, a route with no destination is not a default route.
+    let oifs = best_route_interfaces(&buf, AF_UNSPEC).unwrap();
+    assert_eq!(oifs.as_slice(), &[2, 3]);
+  }
+
+  #[test]
+  fn rejects_truncated_messages() {
+    let message = route(3, RTF_UP, Some(Ipv4Addr::UNSPECIFIED));
+    // The message declares more bytes than the buffer holds.
+    let err = best_route_interfaces(&message[..message.len() - 1], AF_INET).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    // The declared length ends inside the header.
+    let mut short = message.clone();
+    short[..2].copy_from_slice(&8u16.to_ne_bytes());
+    let err = best_route_interfaces(&short, AF_INET).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+  }
 }

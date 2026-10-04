@@ -1,19 +1,11 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -ex
+set -euo pipefail
 
-export ASAN_OPTIONS="detect_odr_violation=0 detect_leaks=0"
+# AddressSanitizer enables LeakSanitizer on Linux. Keep leak detection enabled
+# explicitly so the job's label and behavior stay aligned.
+export ASAN_OPTIONS="${ASAN_OPTIONS:+${ASAN_OPTIONS}:}detect_leaks=1"
+export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-Zsanitizer=address"
 
-# Run address sanitizer
-RUSTFLAGS="--cfg all_skl_tests -Z sanitizer=address" \
-cargo test --lib --all-features --target x86_64-unknown-linux-gnu
-
-# # Run leak sanitizer
-# RUSTFLAGS="--cfg all_skl_tests -Zsanitizer=leak" \
-# cargo test -Zbuild-std --release --tests --target x86_64-unknown-linux-gnu --features memmap
-
-# # Run memory sanitizer
-# RUSTFLAGS="--cfg all_skl_tests -Zsanitizer=memory -Zsanitizer-memory-track-origins" \
-# RUSTDOCFLAGS="-Zsanitizer=memory -Zsanitizer-memory-track-origins" \
-# cargo test -Zbuild-std --release --tests --target x86_64-unknown-linux-gnu --all-features 
-
+printf '%s\n' 'Running Linux AddressSanitizer with LeakSanitizer enabled.'
+cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --lib --tests --all-features

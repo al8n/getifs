@@ -58,6 +58,15 @@ fn bench_getifs_interface_addrs(c: &mut Criterion) {
 
 fn bench_getifs_interfaces_and_multicast_addrs(c: &mut Criterion) {
   let ifi = loopback_interface().unwrap();
+  // Android, DragonFly, NetBSD, and OpenBSD report multicast enumeration as
+  // `Unsupported`, so there is nothing to measure there.
+  let unsupported = matches!(
+    ifi.multicast_addrs(),
+    Err(error) if error.kind() == std::io::ErrorKind::Unsupported
+  );
+  if unsupported {
+    return;
+  }
   c.bench_with_input(
     BenchmarkId::new("getifs::interfaces_and_multicast_addrs", ifi.name().clone()),
     &ifi,

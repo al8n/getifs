@@ -33,26 +33,33 @@ use super::{compat::RtMsghdr, fetch, message_too_short, parse_addrs};
 /// `AF_INET` / `AF_INET6` to limit the dump to one family.
 ///
 /// **Per-message parse failures are propagated**, not swallowed.
-/// Earlier revisions tolerated `parse_addrs` errors so NetBSD and
-/// OpenBSD's compact-form netmask sockaddrs (where `sa_family =
-/// AF_INET[6]` but `sa_len < size_of::<sockaddr_in[6]>()`) wouldn't
-/// fail the whole dump — at the cost of returning a successful but
-/// silently incomplete routing table. The decoder now handles those
-/// short forms via `parse_short_inet_addr`, so a `parse_addrs` failure
-/// here is a real malformed message and surfaces to the caller.
+/// NetBSD and OpenBSD's compact-form netmask sockaddrs (where
+/// `sa_family = AF_INET[6]` but `sa_len < size_of::<sockaddr_in[6]>()`)
+/// decode through `parse_short_inet_addr`, so a `parse_addrs` failure
+/// here is a real malformed message. Tolerating it would return a
+/// successful but silently incomplete routing table, so it surfaces to
+/// the caller.
 ///
 /// Length-shorter-than-header (`l < size_of::<RtMsghdr>()`) is *not*
-/// tolerated — that's a real kernel-side bug. Trailing zero padding
-/// (`l == 0` or `src.len() < l`) is the kernel's normal end-of-stream
-/// sentinel and terminates the loop cleanly.
-pub(super) fn walk_route_table<F>(family: i32, mut on_route: F) -> io::Result<()>
+/// tolerated — that's a real kernel-side bug. A message that declares
+/// more bytes than remain (`src.len() < l`) is truncation and fails the
+/// walk too. Trailing zero padding (`l == 0`) is the kernel's normal
+/// end-of-stream sentinel and terminates the loop cleanly.
+pub(super) fn walk_route_table<F>(family: i32, on_route: F) -> io::Result<()>
 where
   F: FnMut(u32, libc::c_int, Option<IpAddr>, Option<IpAddr>, Option<IpAddr>),
 {
-  let buf = fetch(family, NET_RT_DUMP, 0)?;
+  parse_route_table(&fetch(family, NET_RT_DUMP, 0)?, on_route)
+}
 
+/// The message walk of [`walk_route_table`] over an already fetched
+/// `NET_RT_DUMP` buffer.
+pub(super) fn parse_route_table<F>(buf: &[u8], mut on_route: F) -> io::Result<()>
+where
+  F: FnMut(u32, libc::c_int, Option<IpAddr>, Option<IpAddr>, Option<IpAddr>),
+{
   unsafe {
-    let mut src = buf.as_slice();
+    let mut src = buf;
 
     while src.len() > 4 {
       let l = u16::from_ne_bytes(src[..2].try_into().unwrap()) as usize;
@@ -165,4 +172,72 @@ where
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use std::net::Ipv4Addr;
+
+  use libc::{AF_INET, RTF_GATEWAY};
+
+  use super::{
+    super::tests::{addrs_mask, padded_sockaddr, rt_message, sockaddr_in},
+    *,
+  };
+
+  type Route = (
+    u32,
+    libc::c_int,
+    Option<IpAddr>,
+    Option<IpAddr>,
+    Option<IpAddr>,
+  );
+
+  fn routes(buf: &[u8]) -> io::Result<Vec<Route>> {
+    let mut routes = Vec::new();
+    parse_route_table(buf, |index, flags, dst, gateway, netmask| {
+      routes.push((index, flags, dst, gateway, netmask));
+    })?;
+    Ok(routes)
+  }
+
+  #[test]
+  fn reports_usable_route_with_compact_gateway_and_netmask() {
+    let flags = RTF_UP | RTF_GATEWAY;
+    let addrs = addrs_mask(&[RTAX_DST, RTAX_GATEWAY, RTAX_NETMASK]);
+    let mut body = sockaddr_in(Ipv4Addr::new(10, 0, 0, 0));
+    body.extend(padded_sockaddr(&[8, AF_INET as u8, 0, 0, 192, 0, 2, 1]));
+    body.extend(padded_sockaddr(&[5, AF_INET as u8, 0, 0, 255]));
+
+    let mut buf = rt_message(4, flags, addrs, &body);
+    // A reject route is up but never delivers traffic.
+    buf.extend(rt_message(5, RTF_UP | RTF_REJECT, addrs, &body));
+    // Zero padding after the last message ends the dump.
+    buf.extend([0u8; 8]);
+
+    assert_eq!(
+      routes(&buf).unwrap(),
+      [(
+        4,
+        flags,
+        Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 0))),
+        Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))),
+        Some(IpAddr::V4(Ipv4Addr::new(255, 0, 0, 0))),
+      )]
+    );
+  }
+
+  #[test]
+  fn rejects_truncated_messages() {
+    let addrs = addrs_mask(&[RTAX_DST]);
+    let message = rt_message(4, RTF_UP, addrs, &sockaddr_in(Ipv4Addr::new(10, 0, 0, 0)));
+    // The message declares more bytes than the buffer holds.
+    let err = routes(&message[..message.len() - 1]).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    // The header claims a destination that the message does not carry; it
+    // must not become a default route.
+    let err = routes(&rt_message(4, RTF_UP, addrs, &[])).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+  }
 }

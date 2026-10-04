@@ -2,12 +2,11 @@ use smallvec_wrapper::SmallVec;
 use std::collections::HashSet;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use windows_sys::Win32::NetworkManagement::IpHelper::*;
 use windows_sys::Win32::Networking::WinSock::*;
 
 use crate::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter};
 
-use super::{sockaddr_to_ipaddr, Address, IfAddr, Ifv4Addr, Ifv6Addr, NO_ERROR};
+use super::{mib::forward_table, sockaddr_to_ipaddr, Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
 pub(crate) fn gateway_addrs() -> io::Result<SmallVec<IfAddr>> {
   gateway_addrs_in(AF_UNSPEC, |_| true)
@@ -49,109 +48,69 @@ where
 {
   let mut results = SmallVec::new();
   // Multi-homed or multi-path Windows hosts can surface the same
-  // gateway via several routes in the forwarding table. The previous
-  // `!results.contains(&addr)` check was O(n²); dedup via a HashSet
-  // keyed by `(index, IpAddr)` makes it O(1) per candidate, matching
-  // the pattern already used on BSD (`src/bsd_like/rt_generic.rs`).
+  // gateway via several routes in the forwarding table. Dedup via a
+  // HashSet keyed by `(index, IpAddr)` is an O(1) check per candidate,
+  // where scanning `results` would be O(n²). The BSD walker
+  // (`src/bsd_like/rt_generic.rs`) dedups the same way.
   let mut seen: HashSet<(u32, IpAddr)> = HashSet::new();
 
-  unsafe {
-    // Get the forward table for both IPv4 and IPv6
-    let mut table_v4 = std::ptr::null_mut();
-    let mut table_v6 = std::ptr::null_mut();
+  // Query each requested family independently. `forward_table` reports
+  // an empty or absent stack as `None`, so an AF_UNSPEC query can still
+  // return the other stack's gateways.
+  let table_v4 = if family == AF_INET || family == AF_UNSPEC {
+    forward_table(AF_INET)?
+  } else {
+    None
+  };
+  let table_v6 = if family == AF_INET6 || family == AF_UNSPEC {
+    forward_table(AF_INET6)?
+  } else {
+    None
+  };
 
-    // Initialize the tables based on the requested address family
-    if (family == AF_INET || family == AF_UNSPEC)
-      && GetIpForwardTable2(AF_INET as u16, &mut table_v4) != NO_ERROR
-    {
-      return Err(io::Error::last_os_error());
-    }
-
-    if (family == AF_INET6 || family == AF_UNSPEC)
-      && GetIpForwardTable2(AF_INET6 as u16, &mut table_v6) != NO_ERROR
-    {
-      if !table_v4.is_null() {
-        FreeMibTable(table_v4 as _);
-      }
-      return Err(io::Error::last_os_error());
-    }
-
-    // Cleanup guard using defer pattern
-    struct TableGuard(*const MIB_IPFORWARD_TABLE2);
-
-    impl Drop for TableGuard {
-      fn drop(&mut self) {
-        if !self.0.is_null() {
-          unsafe {
-            FreeMibTable(self.0 as *mut _);
-          }
-        }
-      }
-    }
-
-    let _guard_v4 = TableGuard(table_v4);
-    let _guard_v6 = TableGuard(table_v6);
-
-    // Process IPv4 routes
-    if !table_v4.is_null() {
-      let table = &*table_v4;
-      let rows = core::slice::from_raw_parts(
-        &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
-        table.NumEntries as usize,
-      );
-      for route in rows.iter() {
-        // Check if route is up and has a gateway
-        if route.ValidLifetime > 0 && !route.Loopback {
-          if let Some(gateway) =
-            sockaddr_to_ipaddr(family, &route.NextHop as *const _ as *const SOCKADDR)
-          {
-            // Skip default gateway (0.0.0.0)
-            if let IpAddr::V4(addr) = gateway {
-              if addr.octets() == [0, 0, 0, 0] {
-                continue;
-              }
+  if let Some(table) = table_v4.as_ref() {
+    for route in table.rows() {
+      // Check if route is up and has a gateway
+      if route.ValidLifetime > 0 && !route.Loopback {
+        if let Some(gateway) =
+          sockaddr_to_ipaddr(family, &route.NextHop as *const _ as *const SOCKADDR)
+        {
+          // Skip default gateway (0.0.0.0)
+          if let IpAddr::V4(addr) = gateway {
+            if addr.octets() == [0, 0, 0, 0] {
+              continue;
             }
+          }
 
-            // Apply filter and add to results if it passes
-            if let Some(addr) =
-              A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
-            {
-              if seen.insert((addr.index(), addr.addr())) {
-                results.push(addr);
-              }
+          if let Some(addr) = A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
+          {
+            if seen.insert((addr.index(), addr.addr())) {
+              results.push(addr);
             }
           }
         }
       }
     }
+  }
 
-    // Process IPv6 routes
-    if !table_v6.is_null() {
-      let table = &*table_v6;
-      let rows = core::slice::from_raw_parts(
-        &table.Table as *const _ as *const MIB_IPFORWARD_ROW2,
-        table.NumEntries as usize,
-      );
-      for route in rows.iter() {
-        // Check if route is up and has a gateway
-        if route.ValidLifetime > 0 && !route.Loopback {
-          if let Some(gateway) =
-            sockaddr_to_ipaddr(family, &route.NextHop as *const _ as *const SOCKADDR)
-          {
-            // Skip default gateway (::)
-            if let IpAddr::V6(addr) = gateway {
-              if addr.octets() == [0; 16] {
-                continue;
-              }
+  if let Some(table) = table_v6.as_ref() {
+    for route in table.rows() {
+      // Check if route is up and has a gateway
+      if route.ValidLifetime > 0 && !route.Loopback {
+        if let Some(gateway) =
+          sockaddr_to_ipaddr(family, &route.NextHop as *const _ as *const SOCKADDR)
+        {
+          // Skip default gateway (::)
+          if let IpAddr::V6(addr) = gateway {
+            if addr.octets() == [0; 16] {
+              continue;
             }
+          }
 
-            // Apply filter and add to results if it passes
-            if let Some(addr) =
-              A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
-            {
-              if seen.insert((addr.index(), addr.addr())) {
-                results.push(addr);
-              }
+          if let Some(addr) = A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
+          {
+            if seen.insert((addr.index(), addr.addr())) {
+              results.push(addr);
             }
           }
         }

@@ -22,6 +22,9 @@ pub(super) use local_addr::*;
 #[path = "linux/netlink.rs"]
 mod netlink;
 
+#[cfg(fuzzing)]
+pub(crate) use netlink::fuzz_netlink_dump;
+
 #[path = "linux/local_addr.rs"]
 mod local_addr;
 
@@ -29,7 +32,9 @@ mod local_addr;
 #[path = "linux/android.rs"]
 mod android;
 
-use netlink::{netlink_addr, netlink_interface, netlink_walk_routes};
+use netlink::{
+  netlink_addr, netlink_interface, netlink_routes_into, FilterMode, FILTER_DEFER_LIMIT,
+};
 
 macro_rules! rt_generic_mod {
   ($($name:ident($rta:expr, $rtn:expr)), +$(,)?) => {
@@ -49,40 +54,58 @@ macro_rules! rt_generic_mod {
 
           use super::{
             super::{IfAddr, Ifv4Addr, Ifv6Addr},
-            netlink::rt_generic_addrs,
+            netlink::{rt_generic_addrs, FilterMode, FILTER_DEFER_LIMIT},
           };
 
           pub(crate) fn [< $name _addrs >]() -> io::Result<SmallVec<IfAddr>> {
-            rt_generic_addrs(AddressFamily::UNSPEC, $rta, $rtn, |_| true)
+            rt_generic_addrs(AddressFamily::UNSPEC, $rta, $rtn, |_| true, FilterMode::Pure)
           }
 
           pub(crate) fn [< $name _ipv4_addrs >]() -> io::Result<SmallVec<Ifv4Addr>> {
-            rt_generic_addrs(AddressFamily::INET, $rta, $rtn, |_| true)
+            rt_generic_addrs(AddressFamily::INET, $rta, $rtn, |_| true, FilterMode::Pure)
           }
 
           pub(crate) fn [< $name _ipv6_addrs >]() -> io::Result<SmallVec<Ifv6Addr>> {
-            rt_generic_addrs(AddressFamily::INET6, $rta, $rtn, |_| true)
+            rt_generic_addrs(AddressFamily::INET6, $rta, $rtn, |_| true, FilterMode::Pure)
           }
 
           pub(crate) fn [< $name _addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<IfAddr>>
           where
             F: FnMut(&IpAddr) -> bool,
           {
-            rt_generic_addrs(AddressFamily::UNSPEC, $rta, $rtn, f)
+            rt_generic_addrs(
+              AddressFamily::UNSPEC,
+              $rta,
+              $rtn,
+              f,
+              FilterMode::Deferred(FILTER_DEFER_LIMIT),
+            )
           }
 
           pub(crate) fn [< $name _ipv4_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv4Addr>>
           where
             F: FnMut(&Ipv4Addr) -> bool,
           {
-            rt_generic_addrs(AddressFamily::INET, $rta, $rtn, ipv4_filter_to_ip_filter(f))
+            rt_generic_addrs(
+              AddressFamily::INET,
+              $rta,
+              $rtn,
+              ipv4_filter_to_ip_filter(f),
+              FilterMode::Deferred(FILTER_DEFER_LIMIT),
+            )
           }
 
           pub(crate) fn [< $name _ipv6_addrs_by_filter >]<F>(f: F) -> io::Result<SmallVec<Ifv6Addr>>
           where
             F: FnMut(&Ipv6Addr) -> bool,
           {
-            rt_generic_addrs(AddressFamily::INET6, $rta, $rtn, ipv6_filter_to_ip_filter(f))
+            rt_generic_addrs(
+              AddressFamily::INET6,
+              $rta,
+              $rtn,
+              ipv6_filter_to_ip_filter(f),
+              FilterMode::Deferred(FILTER_DEFER_LIMIT),
+            )
           }
         }
       }
@@ -149,7 +172,68 @@ fn route_v6_from_raw(
   Some(Ipv6Route::new(oif, net, gw))
 }
 
-pub(super) fn route_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<IpRoute>>
+/// Converts a route of the `AF_INET` dump, skipping any other family.
+fn ipv4_route(
+  family: u8,
+  oif: u32,
+  dst_len: u8,
+  dst: Option<IpAddr>,
+  gw: Option<IpAddr>,
+) -> Option<Ipv4Route> {
+  if family as u16 != AddressFamily::INET.as_raw() {
+    return None;
+  }
+  route_v4_from_raw(oif, dst_len, dst, gw)
+}
+
+/// Converts a route of the `AF_INET6` dump, skipping any other family.
+fn ipv6_route(
+  family: u8,
+  oif: u32,
+  dst_len: u8,
+  dst: Option<IpAddr>,
+  gw: Option<IpAddr>,
+) -> Option<Ipv6Route> {
+  if family as u16 != AddressFamily::INET6.as_raw() {
+    return None;
+  }
+  route_v6_from_raw(oif, dst_len, dst, gw)
+}
+
+pub(super) fn route_table() -> io::Result<SmallVec<IpRoute>> {
+  route_table_with_mode(|_| true, FilterMode::Pure)
+}
+
+pub(super) fn route_table_by_filter<F>(f: F) -> io::Result<SmallVec<IpRoute>>
+where
+  F: FnMut(&IpRoute) -> bool,
+{
+  route_table_with_mode(f, FilterMode::Deferred(FILTER_DEFER_LIMIT))
+}
+
+pub(super) fn route_ipv4_table() -> io::Result<SmallVec<Ipv4Route>> {
+  route_ipv4_table_with_mode(|_| true, FilterMode::Pure)
+}
+
+pub(super) fn route_ipv4_table_by_filter<F>(f: F) -> io::Result<SmallVec<Ipv4Route>>
+where
+  F: FnMut(&Ipv4Route) -> bool,
+{
+  route_ipv4_table_with_mode(f, FilterMode::Deferred(FILTER_DEFER_LIMIT))
+}
+
+pub(super) fn route_ipv6_table() -> io::Result<SmallVec<Ipv6Route>> {
+  route_ipv6_table_with_mode(|_| true, FilterMode::Pure)
+}
+
+pub(super) fn route_ipv6_table_by_filter<F>(f: F) -> io::Result<SmallVec<Ipv6Route>>
+where
+  F: FnMut(&Ipv6Route) -> bool,
+{
+  route_ipv6_table_with_mode(f, FilterMode::Deferred(FILTER_DEFER_LIMIT))
+}
+
+fn route_table_with_mode<F>(mut f: F, mode: FilterMode) -> io::Result<SmallVec<IpRoute>>
 where
   F: FnMut(&IpRoute) -> bool,
 {
@@ -163,62 +247,40 @@ where
   // host the union API would silently drop every IPv6 route while
   // `route_ipv6_table()` still surfaced them; the BSD path already
   // walks per-family for the same reason. Two dumps is the right
-  // tradeoff for a consistent answer.
+  // tradeoff for a consistent answer. Each dump retries on its own.
   let mut out: SmallVec<IpRoute> = SmallVec::new();
-  netlink_walk_routes(AddressFamily::INET, |fam, oif, dst_len, dst, gw| {
-    if fam as u16 == AddressFamily::INET.as_raw() {
-      if let Some(r) = route_v4_from_raw(oif, dst_len, dst, gw).map(IpRoute::V4) {
-        if f(&r) {
-          out.push(r);
-        }
-      }
-    }
-  })?;
-  netlink_walk_routes(AddressFamily::INET6, |fam, oif, dst_len, dst, gw| {
-    if fam as u16 == AddressFamily::INET6.as_raw() {
-      if let Some(r) = route_v6_from_raw(oif, dst_len, dst, gw).map(IpRoute::V6) {
-        if f(&r) {
-          out.push(r);
-        }
-      }
-    }
-  })?;
+  netlink_routes_into(
+    AddressFamily::INET,
+    |family, oif, dst_len, dst, gw| ipv4_route(family, oif, dst_len, dst, gw).map(IpRoute::V4),
+    &mut f,
+    mode,
+    &mut out,
+  )?;
+  netlink_routes_into(
+    AddressFamily::INET6,
+    |family, oif, dst_len, dst, gw| ipv6_route(family, oif, dst_len, dst, gw).map(IpRoute::V6),
+    &mut f,
+    mode,
+    &mut out,
+  )?;
   Ok(out)
 }
 
-pub(super) fn route_ipv4_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ipv4Route>>
+fn route_ipv4_table_with_mode<F>(f: F, mode: FilterMode) -> io::Result<SmallVec<Ipv4Route>>
 where
   F: FnMut(&Ipv4Route) -> bool,
 {
   let mut out: SmallVec<Ipv4Route> = SmallVec::new();
-  netlink_walk_routes(AddressFamily::INET, |fam, oif, dst_len, dst, gw| {
-    if fam as u16 != AddressFamily::INET.as_raw() {
-      return;
-    }
-    if let Some(r) = route_v4_from_raw(oif, dst_len, dst, gw) {
-      if f(&r) {
-        out.push(r);
-      }
-    }
-  })?;
+  netlink_routes_into(AddressFamily::INET, ipv4_route, f, mode, &mut out)?;
   Ok(out)
 }
 
-pub(super) fn route_ipv6_table_by_filter<F>(mut f: F) -> io::Result<SmallVec<Ipv6Route>>
+fn route_ipv6_table_with_mode<F>(f: F, mode: FilterMode) -> io::Result<SmallVec<Ipv6Route>>
 where
   F: FnMut(&Ipv6Route) -> bool,
 {
   let mut out: SmallVec<Ipv6Route> = SmallVec::new();
-  netlink_walk_routes(AddressFamily::INET6, |fam, oif, dst_len, dst, gw| {
-    if fam as u16 != AddressFamily::INET6.as_raw() {
-      return;
-    }
-    if let Some(r) = route_v6_from_raw(oif, dst_len, dst, gw) {
-      if f(&r) {
-        out.push(r);
-      }
-    }
-  })?;
+  netlink_routes_into(AddressFamily::INET6, ipv6_route, f, mode, &mut out)?;
   Ok(out)
 }
 
@@ -237,7 +299,7 @@ impl Interface {
 
 bitflags::bitflags! {
   /// Flags represents the interface flags.
-  #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+  #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
   pub struct Flags: u32 {
     /// Interface is administratively up
     const UP = 0x1;
@@ -263,13 +325,13 @@ bitflags::bitflags! {
     const MASTER = 0x400;
     /// Can't hear own transmissions
     const SLAVE = 0x800;
-    /// Per link layer defined bit
+    /// Supports multicast access capability
     const MULTICAST = 0x1000;
     /// Per link layer defined bit
     const PORTSEL = 0x2000;
     /// Per link layer defined bit
     const AUTOMEDIA = 0x4000;
-    /// Supports multicast access capability
+    /// Dialup device with changing addresses
     const DYNAMIC = 0x8000;
   }
 }
@@ -284,35 +346,53 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   // Android 11+ untrusted_app is denied RTM_GETLINK (it needs the SELinux
   // `nlmsg_readpriv` permission, neverallowed for apps targeting API >= 30),
   // so the netlink interface dump fails with PermissionDenied even though
-  // the bind is gone. Fall back to the RTM_GETADDR + SIOCGIF* ioctl path
-  // (see linux/android.rs) — the same combination bionic's getifaddrs and
-  // Go's net package use. Older Android / app domains that still permit
-  // RTM_GETLINK keep the richer netlink result (including the MAC address).
+  // the socket is never bound explicitly. Fall back to the RTM_GETADDR +
+  // SIOCGIF* ioctl path (see linux/android.rs) — the same combination
+  // bionic's getifaddrs and Go's net package use. Older Android / app
+  // domains that still permit RTM_GETLINK keep the richer netlink result
+  // (including the MAC address).
   match netlink_interface(AddressFamily::UNSPEC, index) {
     Err(e) if e.kind() == io::ErrorKind::PermissionDenied => android::interface_table(index),
     other => other,
   }
 }
 
+// Cross-platform code calls these with arbitrary filters, so they defer them.
+
 pub(super) fn interface_ipv4_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<Ifv4Net>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  netlink_addr(AddressFamily::INET, index, f)
+  netlink_addr(
+    AddressFamily::INET,
+    index,
+    f,
+    FilterMode::Deferred(FILTER_DEFER_LIMIT),
+  )
 }
 
 pub(super) fn interface_ipv6_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<Ifv6Net>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  netlink_addr(AddressFamily::INET6, index, f)
+  netlink_addr(
+    AddressFamily::INET6,
+    index,
+    f,
+    FilterMode::Deferred(FILTER_DEFER_LIMIT),
+  )
 }
 
 pub(super) fn interface_addresses<F>(index: u32, f: F) -> io::Result<SmallVec<IfNet>>
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  netlink_addr(AddressFamily::UNSPEC, index, f)
+  netlink_addr(
+    AddressFamily::UNSPEC,
+    index,
+    f,
+    FilterMode::Deferred(FILTER_DEFER_LIMIT),
+  )
 }
 
 const IGMP_PATH: &str = "/proc/net/igmp";
@@ -342,10 +422,7 @@ pub(super) fn interface_multicast_addresses<F>(ifi: u32, mut f: F) -> io::Result
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  // Parse IPv4 multicast addrs
   let ifmat4 = parse_proc_net_igmp("/proc/net/igmp", ifi, |addr| f(&(*addr).into()))?;
-
-  // Parse IPv6 multicast addrs
   let ifmat6 = parse_proc_net_igmp6("/proc/net/igmp6", ifi, |addr| f(&(*addr).into()))?;
 
   Ok(
@@ -387,19 +464,15 @@ where
   let mut idx = 0;
   let mut lines = reader.lines();
 
-  // Skip first line
+  // The first line is the column header.
   lines.next();
 
   for line in lines {
     let line = line?;
 
-    // Only `fields[0]` is consulted below and we need ≥4 fields total.
-    // Walking the whitespace-delimited iterator directly avoids the
-    // per-line allocation of the old `split([' ',':','\r','\t','\n'])
-    // .filter(...).collect::<MediumVec<_>>()`. Colons are never in
-    // `fields[0]` (neither in the leading index nor in an 8-char
-    // group-address column), so dropping them from the delimiter set
-    // does not affect parsing.
+    // Both line kinds have at least four whitespace-separated tokens and only
+    // the first is read, so the tokens are iterated instead of collected. That
+    // token never contains a colon, so whitespace alone delimits it.
     let mut it = line.split_ascii_whitespace();
     let field0 = match it.next() {
       Some(s) => s,
@@ -410,32 +483,33 @@ where
       continue;
     }
 
+    // Interface lines start in column 0; the group lines below are indented.
     if !line.starts_with(' ') && !line.starts_with('\t') {
-      // New interface line
       match field0.parse() {
         Ok(res) => idx = res,
         Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
       }
-    } else if field0.len() == 8 {
-      if ifi == 0 || ifi == idx {
-        // The Linux kernel puts the IP address in /proc/net/igmp in
-        // native endianness.
-        let src = field0.as_bytes();
-        let mut b = [0u8; 4];
-        for i in (0..src.len()).step_by(2) {
-          b[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
-        }
-
-        b.reverse();
-        let ip = b.into();
-        if f(&ip) {
-          ifmat.push(Ifv4Addr::new(idx, ip));
-        }
+    } else if field0.len() == 8 && (ifi == 0 || ifi == idx) {
+      let ip = igmp_group(field0);
+      if f(&ip) {
+        ifmat.push(Ifv4Addr::new(idx, ip));
       }
     }
   }
 
   Ok(ifmat)
+}
+
+/// Parses a `/proc/net/igmp` group: the kernel prints the `__be32` with `%08X`,
+/// so 224.0.0.251 is `FB0000E0` on little-endian and `E00000FB` on big-endian.
+#[cfg(not(target_os = "android"))]
+fn igmp_group(field: &str) -> Ipv4Addr {
+  let mut printed = [0u8; 4];
+  for (byte, pair) in printed.iter_mut().zip(field.as_bytes().chunks_exact(2)) {
+    *byte = xtoi2(pair, 0).unwrap_or(0);
+  }
+
+  Ipv4Addr::from(u32::from_be_bytes(printed).to_ne_bytes())
 }
 
 #[cfg(target_os = "android")]
@@ -463,14 +537,15 @@ where
   for line in reader.lines() {
     let line = line?;
 
-    // `split_ascii_whitespace` already handles spaces/tabs/CR/LF without
-    // a collect+filter, and we only use `fields[0]` and `fields[2]`.
+    // A record has six tokens: the interface index and name, the group
+    // address, and the user count, flags and timer. Only the index and the
+    // address are read, so the tokens are iterated instead of collected.
     let mut it = line.split_ascii_whitespace();
     let field0 = match it.next() {
       Some(s) => s,
       None => continue,
     };
-    // skip field1
+    // The interface name is not read.
     if it.next().is_none() {
       continue;
     }
@@ -478,7 +553,7 @@ where
       Some(s) => s,
       None => continue,
     };
-    // need 3 more tokens (fields[3..=5]) for a total of 6+.
+    // The user count, flags and timer must be present but are not read.
     if it.nth(2).is_none() {
       continue;
     }
@@ -489,6 +564,8 @@ where
     };
 
     if ifi == 0 || ifi == idx {
+      // The kernel prints the address with `%pi6`: its 16 bytes in network
+      // order as hex digits, so unlike the IPv4 field it needs no byte swap.
       let mut i = 0;
       let src = field2.as_bytes();
       let mut data = [0u8; 16];
@@ -511,13 +588,17 @@ where
 mod tests {
   use super::*;
 
-  // `route_v4_from_raw` / `route_v6_from_raw` cover every branch of
-  // the family / length / gateway validation matrix. They live on
-  // the hot path between the netlink walker and `IpRoute`, so any
-  // regression silently affects every `route_*_table*()` caller.
-  // Live tarpaulin runs only exercise the success arm; these unit
-  // tests fill in the wrong-family / out-of-range / absent-dst
-  // branches.
+  #[test]
+  fn flags_retain_unknown_bits() {
+    let unknown = 1 << 31;
+    assert_eq!(Flags::from_bits_retain(unknown).bits(), unknown);
+  }
+
+  // `route_v4_from_raw` and `route_v6_from_raw` sit between the netlink
+  // walker and `IpRoute`, so a regression silently affects every
+  // `route_*_table*()` caller. A live dump exercises only the success arm;
+  // these tests cover every branch of the family, length and gateway
+  // validation matrix.
 
   #[test]
   fn route_v4_from_raw_rejects_oversize_prefix() {
@@ -587,5 +668,81 @@ mod tests {
     let dst = Some(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0)));
     let r = route_v6_from_raw(1, 32, dst, None).unwrap();
     assert!(r.gateway().is_none());
+  }
+
+  #[cfg(not(target_os = "android"))]
+  mod igmp {
+    use super::*;
+
+    const GROUPS: [Ipv4Addr; 3] = [
+      Ipv4Addr::new(224, 0, 0, 1),
+      Ipv4Addr::new(224, 0, 0, 251),
+      Ipv4Addr::new(239, 255, 255, 250),
+    ];
+
+    // The field that a kernel with this target's byte order prints for `addr`.
+    fn host_endian_field(addr: Ipv4Addr) -> String {
+      format!("{:08X}", u32::from_ne_bytes(addr.octets()))
+    }
+
+    #[test]
+    fn group_decodes_the_field_the_kernel_prints() {
+      for addr in GROUPS {
+        assert_eq!(igmp_group(&host_endian_field(addr)), addr);
+      }
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn group_decodes_a_little_endian_field() {
+      assert_eq!(igmp_group("FB0000E0"), Ipv4Addr::new(224, 0, 0, 251));
+    }
+
+    #[cfg(target_endian = "big")]
+    #[test]
+    fn group_decodes_a_big_endian_field() {
+      assert_eq!(igmp_group("E00000FB"), Ipv4Addr::new(224, 0, 0, 251));
+    }
+
+    #[test]
+    fn group_decodes_each_malformed_byte_as_zero() {
+      assert_eq!(igmp_group("ZZZZZZZZ"), Ipv4Addr::UNSPECIFIED);
+      // The outer bytes match, so byte order does not change the result.
+      assert_eq!(igmp_group("FF00ZZFF"), Ipv4Addr::new(255, 0, 0, 255));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_proc_net_igmp_reads_host_endian_groups() {
+      use std::io::Write;
+
+      let group_line = |addr| format!("\t\t\t\t{} 1 0:00000000\t\t0\n", host_endian_field(addr));
+      let listing = [
+        "Idx\tDevice    : Count Querier\tGroup    Users Timer\tReporter\n",
+        "1\tlo        :     1      V3\n",
+        &group_line(GROUPS[0]),
+        "2\teth0      :     2      V3\n",
+        &group_line(GROUPS[1]),
+        &group_line(GROUPS[2]),
+      ]
+      .concat();
+
+      let path = std::env::temp_dir().join(format!("getifs-igmp-{}.txt", std::process::id()));
+      let mut file = std::fs::File::create_new(&path).unwrap();
+      scopeguard::defer! {
+        let _ = std::fs::remove_file(&path);
+      }
+      file.write_all(listing.as_bytes()).unwrap();
+
+      let groups = |ifi| {
+        parse_proc_net_igmp(path.to_str().unwrap(), ifi, |_| true)
+          .unwrap()
+          .iter()
+          .map(|group| (group.index(), group.addr()))
+          .collect::<Vec<_>>()
+      };
+      assert_eq!(groups(0), [(1, GROUPS[0]), (2, GROUPS[1]), (2, GROUPS[2])]);
+      assert_eq!(groups(2), [(2, GROUPS[1]), (2, GROUPS[2])]);
+    }
   }
 }

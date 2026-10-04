@@ -1,18 +1,17 @@
 [package]
 name = "getifs"
-version = "0.6.2"
+version = "0.7.0"
 edition = "2021"
 repository = "https://github.com/al8n/getifs"
-homepage = "https://github.com/al8n/getifs"
 documentation = "https://docs.rs/getifs"
 description = "Cross-platform enumeration of network interfaces and their MTU, gateway, multicast, and local/private/public IP addresses."
 license = "MIT OR Apache-2.0"
 rust-version = "1.85.0"
 keywords = ["getifaddrs", "network-interface", "local-ip-address", "gateway", "mtu"]
 categories = ["network-programming"]
-# The Android CI harness and local design docs are not part of the
+# The Android CI harness, local design docs, and fuzz workspace are not part of the
 # published crate.
-exclude = ["/ci", "/docs"]
+exclude = ["/ci", "/docs", "/fuzz"]
 
 [[bench]]
 path = "benches/interfaces.rs"
@@ -36,32 +35,31 @@ harness = false
 
 [features]
 default = []
-# serde = ["dep:serde", "ipnet/serde", "smallvec-wrapper/serde", "hardware-address/serde"]
 
 [dependencies]
 bitflags = "2"
 cfg-if = "1"
-hardware-address = "0.3"
+hardware-address = "1"
 iprobe = "0.1"
 ipnet = "2"
-iprfc = "0.2"
-paste = "1"
-smol_str = "0.3"
+iprfc = "1"
+paste = { package = "pastey", version = "0.2.3" }
+smol_str = "0.3.2"
 smallvec-wrapper = "0.4"
-triomphe = "0.1"
-
-# serde = { version = "1", features = ["derive"], optional = true }
 
 [target.'cfg(all(not(windows), not(any(target_os = "android", target_os = "linux"))))'.dependencies]
 libc = "0.2"
+# `time` works around rustix 1.1.5's `timespec` gate, which breaks iprobe's `net`-only build (bytecodealliance/rustix#1689); getifs does not use it.
 rustix = { version = "1.1", features = ["time"] }
 
 [target.'cfg(all(any(target_os = "android", target_os = "linux")))'.dependencies]
+# `param` provides the page size that sizes the address-dump receive buffer.
+# `time` works around rustix 1.1.5's `timespec` gate, which breaks iprobe's `net`-only build (bytecodealliance/rustix#1689); getifs does not use it.
 rustix = { version = "1.1", features = ["net", "param", "time"] }
 linux-raw-sys = { version = "0.12", features = ["if_arp", "net", "netlink"] }
 
 [target.'cfg(all(any(target_os = "android", target_os = "linux")))'.dev-dependencies]
-rustix = { version = "1.1", features = ["net", "param", "process"] }
+rustix = { version = "1.1", features = ["net", "process"] }
 
 
 [target.'cfg(windows)'.dependencies]
@@ -69,12 +67,7 @@ windows-sys = { version = "0.61", features = ["Win32_Networking_WinSock", "Win32
 widestring = "1"
 
 [dev-dependencies]
-# `>=0.7, <0.9` instead of `^0.8` so the DragonFly CI's
-# `cargo update -p criterion --precise 0.7.0` (driven by the
-# pkg-shipped Rust 1.85.1, while criterion 0.8+ requires 1.86) can
-# satisfy the constraint. Cargo still resolves to the latest
-# matching version (0.8.x) for everyone else.
-criterion = ">=0.7, <0.9"
+criterion = "=0.7.0"
 network-interface = "2"
 local-ip-address = "0.6"
 which = "8"
@@ -97,4 +90,5 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(freebsdlike)',
   'cfg(netbsdlike)',
   'cfg(linux_like)',
+  'cfg(fuzzing)',
 ] }

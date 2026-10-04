@@ -1,5 +1,138 @@
 # RELEASED
 
+## 0.7.0 (Unreleased)
+
+### API contract changes
+
+- Add exact local-MTU queries: `get_interface_mtu(index)` and
+  `get_ifaddr_mtu(addr)`, which read the interface through the same per-index
+  lookup as `interface_by_index`. IP-only MTU lookups now return `NotFound`
+  when no local interface owns the address, `InvalidInput` when distinct
+  interfaces own it, and propagate address-enumeration errors instead of
+  retrying with a partial fallback.
+- `interface_by_index` and `interface_by_name` return `Ok(None)` when the
+  index or name is absent from the interface enumeration (including an
+  interface skipped for an unrepresentable name) or the OS reports a known
+  missing-interface status; permission, parse, and other errors remain errors.
+  The historic `ifname_to_v6_iface` and tuple helper retain their existing
+  `Option` semantics.
+- On Windows, `ifname_to_index` reports a name that matches no interface as
+  `ERROR_FILE_NOT_FOUND` (`ErrorKind::NotFound`) instead of
+  `ERROR_INVALID_PARAMETER`, so `interface_by_name` returns `Ok(None)` for it
+  as on the other platforms.
+- Multicast APIs are present on every supported target. NetBSD and OpenBSD
+  explicitly return `ErrorKind::Unsupported` where multicast enumeration is
+  unavailable.
+- Mark `IpRoute` `#[non_exhaustive]` and explicitly document the intentional
+  same-family destination/gateway model and omission of Linux `RTA_VIA` rows.
+- Explicitly re-export `SmallVec` and `TinyVec`; `ipnet`, `rfc`, `probe`, and
+  `SmolStr` remain supported public re-exports.
+- The `rfc` re-export is now `iprfc` 1.0, so this is part of the release's
+  breaking changes: `rfc` is now the 1.0 API, whose `RFC6890` and
+  `FORWARDING_BLACKLIST` constants are generated from IANA special-purpose
+  registry snapshots instead of the RFC 6890 table.
+- Preserve unknown native interface-flag bits on Linux and BSD, and align
+  `Flags` ordering traits on Windows without remapping target-specific bits.
+- Linux and Windows report `mac_addr` only for a 6-byte (EUI-48) link-layer
+  address and return `None` for any other length. Previously both copied up to
+  6 bytes, truncating longer addresses (such as 20-byte InfiniBand or 8-byte
+  EUI-64) and zero-padding shorter ones.
+
+### Backend hardening
+
+- Linux netlink validates multipart framing, terminal messages, and attributes
+  before decoding interface, address, route, and MAC data.
+- Linux netlink checks every dump message for `NLM_F_DUMP_INTR`: the
+  rtnetlink dumpers flag the first message of the batch emitted after a
+  table-generation change, so `NLMSG_DONE` almost never carries the flag. A
+  flagged dump is attempted up to three times before `ErrorKind::Interrupted`
+  is returned, and a receive interrupted by a signal is re-issued. A filter
+  sees each entry of a successful dump once and never sees the entries of an
+  attempt that is retried: entries wait for the filter until the dump
+  completes or 16384 of them are pending, and a dump interrupted after that
+  point returns `ErrorKind::Interrupted` instead of being retried.
+- Linux netlink link dumps receive into a 32 KiB buffer, as the kernel
+  expects for dumps, so a large `RTM_NEWLINK` message (for example one
+  carrying many alternative names) no longer fails the dump.
+- Linux netlink dumps are received without zero-filling the buffer, and
+  address dumps use a page-sized buffer, so they are no slower than in 0.6.
+- Linux and Android create every netlink and `SIOCGIF*` ioctl socket with
+  `SOCK_CLOEXEC`, so the descriptors are not inherited across `exec`.
+- Linux decodes `/proc/net/igmp` group addresses in host byte order, so IPv4
+  multicast groups are no longer byte-reversed on big-endian targets.
+- BSD parsing handles compact sockaddrs and KAME-scoped IPv6 safely; NetBSD
+  sysctl snapshots handle bounded `ENOMEM` retries and zero-sized results
+  without weakening genuine malformed-data or permission errors.
+- BSD gateway, route, and best-local walks accept a compact `AF_INET` or
+  `AF_INET6` gateway or destination sockaddr whose declared length still
+  holds the whole address (such as a `sockaddr_in` with `sin_len = 8`)
+  instead of failing the whole call. A shorter one is never zero-extended:
+  `gateway_addrs()` skips it, and route and best-local walks keep reporting
+  it as malformed. Netmask short forms are unchanged.
+- Windows validates FFI buffer lengths and alignment before walking adapter
+  records, and interface-name conversion skips unrepresentable Unicode names
+  instead of poisoning a complete enumeration.
+- Windows IP Helper tables (`GetIpForwardTable2`, `GetIpInterfaceTable`, and
+  `GetUnicastIpAddressTable`) are owned by one guard that frees them on every
+  status, including Wine's allocate-then-fail path, where they previously
+  leaked. Their rows are read with whole-allocation provenance instead of
+  through a reference to the SDK's one-element `Table` array, which was
+  undefined behavior for every row after the first.
+- Skip an address whose OS-reported prefix length exceeds 32 (IPv4) or 128
+  (IPv6) instead of panicking; Windows uses 255 in `OnLinkPrefixLength` for an
+  illegal value.
+- Restore NetBSD runtime address and route coverage now that the ABI and
+  bounded-snapshot handling are in place.
+
+### Compatibility and packaging
+
+- Require `iprfc` 1.0; lock the public/private RFC 6890 classification with
+  pure tests, including global IPv6, documentation, RFC1918, CGNAT, ULA,
+  loopback, and link-local addresses. Public/private classification now follows
+  iprfc 1.0's IANA special-purpose registry snapshot:
+  - Newly listed blocks are no longer public: the AS112 and AMT prefixes,
+    `64:ff9b:1::/48`, `100:0:0:1::/64`, `3fff::/20` and `5f00::/16`.
+  - Private classification uses each block's most specific Forwardable value.
+  - So the forwardable new blocks are now private: the AS112 and AMT prefixes,
+    `64:ff9b:1::/48` and `5f00::/16`. The deprecated ORCHID block
+    `2001:10::/28`, which the registry leaves without a Forwardable value, is
+    also private now. So are `192.0.0.0/29`, `192.0.0.9` and `192.0.0.10`.
+  - Most of `2001::/23` outside its forwardable rows is no longer private.
+- Require `smol_str` 0.3.2 or a later 0.3 release. `smol_str` 0.3.4 and later
+  require Rust 1.89, so Rust 1.85–1.88 users should enable Cargo's MSRV-aware
+  resolver (`resolver.incompatible-rust-versions = "fallback"` or
+  `package.resolver = "3"`) or run `cargo update -p smol_str --precise 0.3.2`.
+  Pin the `criterion` dev-dependency to 0.7.0 for Rust 1.85 test builds.
+- Replace the direct unmaintained `paste` dependency with the
+  `pastey` 0.2.3 compatibility alias; RUSTSEC-2024-0436 is an unmaintained
+  advisory, not a known vulnerability, and transitive `paste` remains outside
+  this crate's control. Remove the unused `triomphe` dependency and inactive
+  serde scaffolding.
+- Require `hardware-address` 1.0. `MacAddr` and `ParseMacAddrError` are
+  re-exported, and `MacAddr` is returned by `Interface::mac_addr()`, so this
+  is part of the release's breaking changes: `MacAddr` is now the 1.0 type,
+  and `ParseMacAddrError` is `#[non_exhaustive]` with a new
+  `UnsupportedAddressSize` variant. `hardware-address` 1.0 and `iprfc` 1.0 use
+  `pastey`, so the unmaintained `paste` now enters only through
+  `smallvec-wrapper`.
+- Restrict the Linux backend cfg to Linux and Android. Other unsupported
+  targets now fail with a clear compile-time error instead of compiling a
+  meaningless Linux path.
+- Document snapshot, ordering, deduplication, UTF-8-name, flags, value-order,
+  and platform-capability contracts in the README. Add deterministic
+  Linux/BSD parser fuzz targets and PR, scheduled, and manual CI gates.
+- The BSD fuzz target also drives the production sysctl message walkers for
+  interfaces, addresses, multicast groups, gateways, routes, and best-local
+  route selection, which now parse a buffer separately from fetching it. Miri
+  runs fixtures for each of them under strict provenance.
+- The netlink fuzz target drives the production dump walkers over replayed
+  multi-datagram kernel replies, including interrupted-dump retries, nexthop
+  resolution, and best-local address lookups, instead of a fuzz-only
+  attribute walker. Unit tests cover the same walkers through the replay.
+- Report security vulnerabilities privately through GitHub's private
+  vulnerability reporting instead of the public issue tracker; see
+  `SECURITY.md`.
+
 ## 0.6.2 (October 3rd, 2026)
 
 Patch release; the public API is unchanged.

@@ -30,15 +30,14 @@ impl TestInterface {
   }
 
   fn setup(&mut self) -> std::io::Result<()> {
-    // Run each command exactly once. The previous version invoked
-    // both `cmd.status()` and `cmd.output()` per command, which
-    // re-spawned the same process twice — for setup commands like
-    // `ip link add` or `ifconfig <name> create` the first invocation
-    // succeeds (creating the device) and the second fails with
-    // "RTNETLINK answers: File exists" / "Device or resource busy",
-    // surfacing as a generic error string that the call sites'
-    // skip-on-environmental-failure branch could match. That bypassed
-    // teardown and leaked devices in privileged CI.
+    // Run each command exactly once. Spawning one twice (say, via both
+    // `cmd.status()` and `cmd.output()`) makes a setup command like
+    // `ip link add` or `ifconfig <name> create` succeed the first time
+    // (creating the device) and fail the second time with "RTNETLINK
+    // answers: File exists" / "Device or resource busy". The call
+    // sites' skip-on-environmental-failure branch could match that
+    // generic error string, which would bypass teardown and leak
+    // devices in privileged CI.
     for cmd in &mut self.setup_cmds {
       run_once(cmd)?;
     }
@@ -97,12 +96,11 @@ fn is_environmental_skip(msg: &str) -> bool {
 #[test]
 // NetBSD's CI VMs emit a non-canonical `RTAX_NETMASK` for the kind of
 // TUN/P2P interface this test creates (the mask slot carries
-// peer-address bytes instead of a contiguous prefix mask), which made
-// the test flaky there even after `interface_addr_table_into` was
-// taught to skip such addresses gracefully — the test then has no
-// addresses left to assert against. Skip on NetBSD rather than dilute
-// the assertion. Apple is excluded because `tuntaposx` isn't shipped
-// with macOS by default.
+// peer-address bytes instead of a contiguous prefix mask).
+// `interface_addr_table_into` skips such addresses gracefully, which
+// leaves the test no addresses to assert against. Skip on NetBSD
+// rather than dilute the assertion. Apple is excluded because
+// `tuntaposx` isn't shipped with macOS by default.
 #[cfg(all(not(apple), not(target_os = "netbsd"), unix))]
 fn point_to_point_interface() {
   #[cfg(bsd_like)]
@@ -238,13 +236,13 @@ fn test_interface_arrival_and_departure() {
       }
     };
 
-    // Check by name rather than total interface count. The previous
-    // `ift2.len() > ift1.len()` form raced with any other test (or
-    // any other process on the box) creating an unrelated interface
-    // between the `ift1` snapshot and our setup — `cargo test` runs
-    // tests in parallel by default, so the BSD CI VM hit this
-    // routinely. Asserting "the specific name we created is now
-    // present" is what we actually care about.
+    // Check by name rather than total interface count. A count
+    // comparison (`ift2.len() > ift1.len()`) races with any other test
+    // (or any other process on the box) creating an unrelated
+    // interface between the `ift1` snapshot and our setup, and
+    // `cargo test` runs tests in parallel by default, so the BSD CI VM
+    // hits that race routinely. Asserting "the specific name we
+    // created is now present" is what we actually care about.
     let _ = ift1;
     if !ift2.iter().any(|ifi| ifi.name == ti.name) {
       for ifi in &ift2 {

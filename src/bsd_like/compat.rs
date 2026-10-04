@@ -1,7 +1,7 @@
 //! Cross-BSD kernel-struct compatibility.
 //!
 //! The `libc` crate exports `rt_msghdr` **only** on Apple targets and
-//! `ifa_msghdr` only on Apple/FreeBSD/DragonFly. For the remaining
+//! `ifa_msghdr` only on Apple/FreeBSD. For the remaining
 //! BSDs we define the structs ourselves, using the layout from each
 //! OS's `<net/route.h>` and `<net/if.h>`. Only the fields we actually
 //! consult need to be named by hand; the remaining fields are filled
@@ -152,7 +152,7 @@ const _: () = {
 // `rtm_index` as `c_int` would interpret the kernel-zeroed padding
 // bytes as the high half of the index value, mangling the result on
 // big-endian. The total size and the offsets of every other field are
-// the same as before — only the read of `rtm_index` differs.
+// the same either way — only the read of `rtm_index` differs.
 
 #[cfg(target_os = "netbsd")]
 #[repr(C)]
@@ -198,9 +198,7 @@ pub(super) struct RtMetricsU64 {
 // Also assert the offset of every field we read at runtime: a
 // reorder that happens to keep the total size constant but moves a
 // field would otherwise pass the size check while still corrupting
-// the read. This catches the previous `rtm_index: c_int` mistake
-// (where the size was right but the field was 4 bytes wide instead
-// of 2 + 2-byte pad).
+// the read.
 #[cfg(target_os = "netbsd")]
 const _: () = assert!(core::mem::size_of::<RtMetricsU64>() == 80);
 #[cfg(target_os = "netbsd")]
@@ -263,12 +261,10 @@ pub(super) struct RtMsghdr {
 //         u_int     rmx_pad;
 //     };
 //
-// 2 × u64 + 10 × u_int = 16 + 40 = 56 bytes. Previous revision had
-// the u64 fields and u_int fields in the wrong order (e.g. claimed
-// `rmx_locks` was u64; it's actually u_int); the kernel's
-// `rmx_recvpipe` ended up at offset 88 in the Rust struct vs 32 in
-// the kernel struct, so `best_local_addrs_in` read garbage as the
-// metric.
+// 2 × u64 + 10 × u_int = 16 + 40 = 56 bytes. The u64 fields come first
+// and `rmx_locks` onward are u_int, which puts `rmx_recvpipe` at offset
+// 32; the offset assertions below keep the field order and widths from
+// drifting from the kernel's.
 #[cfg(target_os = "openbsd")]
 #[repr(C)]
 pub(super) struct RtMetricsOpenBsd {
@@ -308,14 +304,17 @@ const _: () = {
 // ifma_msghdr (multicast group membership)
 // =====================================================================
 //
-// Apple / FreeBSD: `libc` exports the struct + `NET_RT_IFMALIST`
-// directly.
+// FreeBSD: `libc` exports the struct and `NET_RT_IFMALIST`, which are
+// re-exported below.
 //
-// DragonFly: the kernel does not expose multicast group enumeration
-// via sysctl at all — `<sys/socket.h>` only defines four selectors
-// (`NET_RT_DUMP`, `NET_RT_FLAGS`, `NET_RT_IFLIST`, `NET_RT_MAXID`),
-// no `NET_RT_IFMALIST`. The DragonFly impl of
-// `interface_multiaddr_table` therefore returns
+// Apple: `bsd_like.rs` uses `libc::ifma_msghdr2` and `NET_RT_IFLIST2`
+// directly, so nothing is defined here.
+//
+// DragonFly / NetBSD / OpenBSD: the kernels do not expose multicast
+// group enumeration via sysctl at all — none of them defines
+// `NET_RT_IFMALIST` (DragonFly's `<sys/socket.h>` only defines
+// `NET_RT_DUMP`, `NET_RT_FLAGS`, `NET_RT_IFLIST` and `NET_RT_MAXID`).
+// Their shared impl of `interface_multiaddr_table` therefore returns
 // `Err(ErrorKind::Unsupported)` (see `bsd_like.rs`). It does not need
 // an `IfmaMsghdr` or a sysctl selector, so we don't define them here.
 
@@ -330,38 +329,62 @@ pub(super) use libc::NET_RT_IFMALIST;
 // =====================================================================
 //
 // Apple / FreeBSD: `libc` exports the struct directly.
-// DragonFly: the kernel's `struct ifa_msghdr` matches FreeBSD's (the
-//   two share most of the route socket ABI since DragonFly forked
-//   from FreeBSD 4.x), but the libc crate's DragonFly bindings don't
-//   expose the type — define it locally with the FreeBSD layout.
+// DragonFly: the libc crate's DragonFly bindings don't expose the type,
+//   and the kernel's RTM_VERSION 7 layout differs from FreeBSD's — define
+//   it locally below.
 // NetBSD / OpenBSD: absent from libc, define locally further down.
 
 #[cfg(any(apple, target_os = "freebsd"))]
 pub(super) use libc::ifa_msghdr as IfaMsghdr;
 
-// DragonFly `<net/if.h>` `struct ifa_msghdr` (matches FreeBSD):
+// DragonFly `<net/if.h>` `struct ifa_msghdr` for RTM_VERSION 7:
 //
 //     struct ifa_msghdr {
 //         u_short ifam_msglen;
 //         u_char  ifam_version;
 //         u_char  ifam_type;
-//         int     ifam_addrs;
-//         int     ifam_flags;
 //         u_short ifam_index;
+//         int     ifam_flags;
+//         int     ifam_addrs;
+//         int     ifam_addrflags;
 //         int     ifam_metric;
 //     };
+//
+// DragonFly commit 43a373152df2d405c9940983e584e6a25e76632d
+// reordered this header, added address flags, and bumped RTM_VERSION to 7;
+// follow-up c7700f286d46231166dfc96646ac83506147ae97 removed the short-lived
+// `ifam_pid` field. Go's DragonFly route parser uses this resulting 24-byte
+// body offset for kernels at the 500705 OS-version boundary and newer. The
+// message walker already rejects records whose version differs from
+// libc::RTM_VERSION, so retaining the pre-v7 20-byte layout here would not
+// provide compatibility with old kernels; it only misdecodes current v7
+// messages.
 #[cfg(target_os = "dragonfly")]
 #[repr(C)]
 pub(super) struct IfaMsghdr {
   pub ifam_msglen: u16,
   pub ifam_version: u8,
   pub ifam_type: u8,
-  pub ifam_addrs: libc::c_int,
-  pub ifam_flags: libc::c_int,
   pub ifam_index: u16,
-  _pad: u16,
+  _pad_to_flags: u16,
+  pub ifam_flags: libc::c_int,
+  pub ifam_addrs: libc::c_int,
+  pub ifam_addrflags: libc::c_int,
   pub ifam_metric: libc::c_int,
 }
+
+#[cfg(target_os = "dragonfly")]
+const _: () = assert!(core::mem::size_of::<IfaMsghdr>() == 24);
+#[cfg(target_os = "dragonfly")]
+const _: () = {
+  use core::mem::offset_of;
+  assert!(offset_of!(IfaMsghdr, ifam_msglen) == 0);
+  assert!(offset_of!(IfaMsghdr, ifam_index) == 4);
+  assert!(offset_of!(IfaMsghdr, ifam_flags) == 8);
+  assert!(offset_of!(IfaMsghdr, ifam_addrs) == 12);
+  assert!(offset_of!(IfaMsghdr, ifam_addrflags) == 16);
+  assert!(offset_of!(IfaMsghdr, ifam_metric) == 20);
+};
 
 // NetBSD `<net/if.h>` (modern — NetBSD 8+):
 //
@@ -380,7 +403,7 @@ pub(super) struct IfaMsghdr {
 // The 2-byte gap after `ifam_index` is implicit C alignment for the
 // following `int`.
 #[cfg(target_os = "netbsd")]
-#[repr(C)]
+#[repr(C, align(8))]
 pub(super) struct IfaMsghdr {
   pub ifam_msglen: u16,
   pub ifam_version: u8,
@@ -393,6 +416,26 @@ pub(super) struct IfaMsghdr {
   pub ifam_addrflags: libc::c_int,
   pub ifam_metric: libc::c_int,
 }
+
+// NetBSD applies `__aligned(sizeof(uint64_t))` to `ifam_msglen` in
+// `<net/if.h>`. Because that field starts at offset zero, the observable
+// effect is an 8-byte-aligned, 32-byte structure (the fields themselves end
+// at byte 28). The trailing four bytes are part of the header, not the first
+// sockaddr. Getting this size wrong shifts every RTM_NEWADDR sockaddr and can
+// also make the caller read a header across a message boundary.
+#[cfg(target_os = "netbsd")]
+const _: () = assert!(core::mem::size_of::<IfaMsghdr>() == 32);
+#[cfg(target_os = "netbsd")]
+const _: () = {
+  use core::mem::offset_of;
+  assert!(offset_of!(IfaMsghdr, ifam_msglen) == 0);
+  assert!(offset_of!(IfaMsghdr, ifam_index) == 4);
+  assert!(offset_of!(IfaMsghdr, ifam_flags) == 8);
+  assert!(offset_of!(IfaMsghdr, ifam_addrs) == 12);
+  assert!(offset_of!(IfaMsghdr, ifam_pid) == 16);
+  assert!(offset_of!(IfaMsghdr, ifam_addrflags) == 20);
+  assert!(offset_of!(IfaMsghdr, ifam_metric) == 24);
+};
 
 // OpenBSD `<net/if.h>`:
 //
@@ -424,3 +467,16 @@ pub(super) struct IfaMsghdr {
   pub ifam_flags: libc::c_int,
   pub ifam_metric: libc::c_int,
 }
+
+#[cfg(target_os = "openbsd")]
+const _: () = assert!(core::mem::size_of::<IfaMsghdr>() == 24);
+#[cfg(target_os = "openbsd")]
+const _: () = {
+  use core::mem::offset_of;
+  assert!(offset_of!(IfaMsghdr, ifam_msglen) == 0);
+  assert!(offset_of!(IfaMsghdr, ifam_hdrlen) == 4);
+  assert!(offset_of!(IfaMsghdr, ifam_index) == 6);
+  assert!(offset_of!(IfaMsghdr, ifam_addrs) == 12);
+  assert!(offset_of!(IfaMsghdr, ifam_flags) == 16);
+  assert!(offset_of!(IfaMsghdr, ifam_metric) == 20);
+};

@@ -61,7 +61,7 @@ jobs:
         # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
         run: rustup update stable --no-self-update && rustup default stable
       - name: Install cargo-hack
-        run: cargo install cargo-hack
+        run: cargo install cargo-hack --locked
       - name: Apply clippy lints
         run: cargo hack clippy --each-feature --exclude-no-default-features
 
@@ -129,6 +129,23 @@ jobs:
       - name: Run test
         run: cargo test --all-features -- --nocapture
 
+  test-windows-i686:
+    name: test (windows i686)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Configure the MSVC x86 environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x86
+      - name: Install stable Rust and the 32-bit target
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        with:
+          toolchain: stable
+          targets: i686-pc-windows-msvc
+      - name: Run 32-bit library and integration tests
+        run: cargo test --target i686-pc-windows-msvc --all-features --lib --tests
+
   sanitizer:
     name: sanitizer
     strategy:
@@ -148,14 +165,13 @@ jobs:
           key: ${{ runner.os }}-sanitizer-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-sanitizer-
-      - name: Install Rust
-        run: rustup update $nightly && rustup default $nightly
-      - name: Install rust-src
-        run: rustup component add rust-src
-      - name: Install cargo-hack
-        run: cargo install cargo-hack
-      - name: ASAN / LSAN / TSAN (Linux)
-        run: ci/sanitizer.sh
+      - name: Install nightly Rust with sources
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        with:
+          toolchain: nightly
+          components: rust-src
+      - name: ASan and LSan (Linux)
+        run: bash ci/sanitizer.sh
 
   # Verify the library compiles cleanly across every supported target
   # triple. Platform-specific code (`linux_like` / `bsd_like` /
@@ -253,18 +269,6 @@ jobs:
             cargo build --all-features
             cargo test --all-features -- --nocapture
 
-  # NetBSD only runs lib tests (`--lib`) — both doctests and the
-  # `tests/` integration suite are skipped. Doctests in
-  # `src/public_ip_addrs.rs` and the route APIs assume a populated
-  # network stack the vmactions VM doesn't provide, and the
-  # integration tests in `tests/interfaces.rs` /
-  # `tests/filter_variants.rs` hit a `parse_addrs` "invalid address"
-  # gap on NetBSD's `RTM_NEWADDR` slot encoding that we can't debug
-  # without a real NetBSD shell. The per-test cfg gates in those
-  # files stay in place as defensive coverage — if someone later
-  # re-enables `--tests` here, the failing tests still skip
-  # cleanly. Lib tests give us routine API-shape coverage; deeper
-  # NetBSD-specific runtime testing should be done on a real host.
   test-netbsd:
     name: test (netbsd)
     runs-on: ubuntu-latest
@@ -280,26 +284,9 @@ jobs:
             /usr/sbin/pkg_add rust
           run: |
             cargo build --all-features
-            cargo test --all-features --lib -- --nocapture
+            cargo test --all-features --lib --tests -- --nocapture
+            cargo doc --no-deps --all-features
 
-  # DragonFlyBSD's `pkg` ships rust 1.85.x (as of 2026-05). Two
-  # dev/dep crates require >1.85, so `cargo update --precise` pulls
-  # both back to MSRV-compatible versions in this CI run only — the
-  # Cargo.toml deps stay clean for real DragonFly users on a newer
-  # toolchain (rustup, source build, etc.).
-  #   - `smol_str` 0.3.6 (default `^0.3` resolution) declares
-  #     `rust-version = 1.89`. Pin to 0.3.2 (last 0.3.x without a
-  #     rust-version field).
-  #   - `criterion` 0.8.x declares `rust-version = 1.86`. Pin to
-  #     0.7.0 (last release supporting 1.80+).
-  # Drop these `cargo update` lines once DragonFly's pkg catches up.
-  #
-  # DragonFly's `multicast_addrs()` returns
-  # `Err(ErrorKind::Unsupported)` because the kernel doesn't expose
-  # multicast-group enumeration via sysctl (no `NET_RT_IFMALIST`).
-  # The `if_multicast_addrs` test compiles and runs on DragonFly,
-  # treating the documented `Unsupported` error as a per-platform
-  # skip — see tests/interfaces.rs.
   test-dragonflybsd:
     name: test (dragonflybsd)
     runs-on: ubuntu-latest
@@ -313,20 +300,12 @@ jobs:
           copyback: false
           prepare: |
             pkg install -y rust
+          # pkg's Rust can trail dependencies' rust-version; resolve compatible versions.
           run: |
-            cargo generate-lockfile
-            cargo update -p smol_str --precise 0.3.2
-            cargo update -p criterion --precise 0.7.0
+            export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback
             cargo build --all-features
-            # Lib-only — same rationale as the NetBSD job above.
-            # The vmactions DragonFly VM has too sparse a network
-            # configuration (loopback + one non-loopback interface
-            # with no IPv4 unicast address) to satisfy
-            # `tests/interfaces.rs`'s `check_unicast_stats`
-            # assertions, and the `interface_by_index` re-lookup in
-            # `ifis` flakes due to interface churn during test runs.
-            # The per-test cfg gates stay in place defensively.
-            cargo test --all-features --lib -- --nocapture
+            cargo test --all-features --lib --tests -- --nocapture
+            cargo doc --no-deps --all-features
 
   # Run the public API inside a real Android app process (the
   # `untrusted_app` SELinux domain) on an x86_64 emulator — the only
@@ -340,18 +319,22 @@ jobs:
   # `interfaces()` / `interface_by_index()` / `interface_addrs()` /
   # `gateway_addrs()` inside the app sandbox and asserts they succeed.
   test-android:
-    name: test (android)
+    name: test (android API ${{ matrix.api-level }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [30, 34]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
         with:
           distribution: temurin
           java-version: "17"
@@ -368,10 +351,103 @@ jobs:
         working-directory: ci/android
         run: gradle wrapper --gradle-version 8.9
       - name: Run instrumented test on emulator
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.0.0
         with:
-          api-level: 34
+          api-level: ${{ matrix.api-level }}
           target: google_apis
           arch: x86_64
           working-directory: ci/android
           script: ./gradlew connectedAndroidTest
+
+  msrv:
+    name: MSRV (Rust 1.85.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust 1.85.0
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        with:
+          toolchain: 1.85.0
+      - name: Resolve and test a fresh MSRV checkout
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/getifs-msrv-target
+          TMPDIR: ${{ runner.temp }}/getifs-msrv-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          bash .github/scripts/check-msrv.sh "$GITHUB_WORKSPACE"
+
+  semver:
+    name: SemVer compatibility
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: baseline
+        name: Resolve the repository baseline
+        env:
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: bash .github/scripts/check-semver-baseline.sh
+      - name: Check public API compatibility
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        with:
+          baseline-rev: ${{ steps.baseline.outputs.rev }}
+          package: getifs
+
+  advisory:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        with:
+          toolchain: stable
+      - name: Generate the library lockfile for the audit
+        run: cargo generate-lockfile
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@92d7dcc5cea95573766c2776ceb1967a467bc919 # cargo-audit on 2026-10-03
+      - name: Check dependency advisories
+        # RUSTSEC-2024-0436 reports the transitive original `paste` crate as
+        # unmaintained. It is not an assertion of an exploitable vulnerability;
+        # every other advisory remains a hard failure.
+        run: cargo audit --ignore RUSTSEC-2024-0436
+
+  miri:
+    name: Miri parser fixtures (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install nightly Miri
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        with:
+          toolchain: nightly
+          components: miri
+      - name: Prepare Miri
+        run: cargo +nightly miri setup
+      # Libtest runs the union of these filters. Keep them to tests of pure
+      # parse functions: Miri has no sysctl shim.
+      - name: Run strict-provenance BSD parser and walker fixtures
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: cargo +nightly miri test --lib -- os::tests::parse_ os::rt_generic::tests os::route::tests os::local_addr::tests
+
+  release-verification:
+    name: Release package verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        with:
+          toolchain: stable
+      - name: Verify the publishable archive
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/getifs-release-target
+          TMPDIR: ${{ runner.temp }}/getifs-release-tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          bash .github/scripts/verify-package.sh

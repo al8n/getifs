@@ -42,13 +42,16 @@ use rustix::{
   ioctl::{self, Opcode, Updater},
   net::{
     netdevice::{index_to_name_inlined, name_to_index},
-    socket, AddressFamily, SocketType,
+    socket_with, AddressFamily, SocketFlags, SocketType,
   },
 };
 use smallvec_wrapper::TinyVec;
 use smol_str::SmolStr;
 
-use super::{netlink::netlink_addr, Flags};
+use super::{
+  netlink::{netlink_addr, FilterMode},
+  Flags,
+};
 use crate::{IfNet, Interface};
 
 const IF_NAMESIZE: usize = 16;
@@ -87,7 +90,12 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
   // permitted for untrusted_app (unlike RTM_GETLINK). AF_INET creation
   // requires android.permission.INTERNET — see the module-level permission
   // note.
-  let sock = socket(AddressFamily::INET, SocketType::DGRAM, None)?;
+  let sock = socket_with(
+    AddressFamily::INET,
+    SocketType::DGRAM,
+    SocketFlags::CLOEXEC,
+    None,
+  )?;
 
   let mut out = TinyVec::new();
 
@@ -100,7 +108,7 @@ pub(super) fn interface_table(index: u32) -> io::Result<TinyVec<Interface>> {
 
   // `RTM_GETADDR` is permitted even when `RTM_GETLINK` is not; use it to
   // discover the interface indices that currently have an address.
-  let addrs = netlink_addr::<IfNet, _>(AddressFamily::UNSPEC, 0, |_| true)?;
+  let addrs = netlink_addr::<IfNet, _>(AddressFamily::UNSPEC, 0, |_| true, FilterMode::Pure)?;
   let mut seen = BTreeSet::new();
   for net in &addrs {
     let idx = net.index();
@@ -128,10 +136,8 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> io::Result<Option<Interf
     Err(e) if vanished(e) => return Ok(None),
     // rustix returns ILSEQ for a non-UTF8 interface name. Linux names are
     // arbitrary bytes, so rather than abort the whole enumeration for one
-    // exotic/vendor name, skip just this interface. (The netlink path keeps
-    // such names via lossy conversion; re-implementing SIOCGIFNAME to
-    // preserve raw bytes isn't worth the unverifiable complexity for this
-    // rare case.)
+    // exotic/vendor name, skip just this interface, as the netlink path
+    // does: getifs exposes only UTF-8 interface names.
     Err(e) if e == rustix::io::Errno::ILSEQ => return Ok(None),
     Err(e) => return Err(e.into()),
   };
@@ -184,5 +190,5 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> io::Result<Option<Interf
 /// as `ENODEV` / `ENXIO`; only those are treated as "skip this index". Every
 /// other errno is a real failure that must propagate.
 fn vanished(e: rustix::io::Errno) -> bool {
-  e == rustix::io::Errno::NODEV || e == rustix::io::Errno::NXIO
+  crate::interfaces::is_missing_interface_errno(e.raw_os_error())
 }

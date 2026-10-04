@@ -1,0 +1,31 @@
+[package]
+name = "getifs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.85.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+getifs = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "netlink"
+path = "fuzz_targets/netlink.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bsd"
+path = "fuzz_targets/bsd.rs"
+test = false
+doc = false
+bench = false
+
+# Keep cargo-fuzz's manifest detached from the library workspace.
+[workspace]
+members = ["."]

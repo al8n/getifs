@@ -1,49 +1,55 @@
 //! Smoke tests for every public `*_by_filter` variant.
 //!
-//! Each `*_by_filter` function is a generic wrapper around an
-//! `os::*`-dispatched implementation. Without an explicit caller, the
-//! only coverage they get is through doctests — and tarpaulin's
-//! attribution for monomorphized generic functions is unreliable, so
-//! that coverage doesn't show up in the CI report. These tests invoke
-//! every variant with a trivial `|_| true` closure so the CI tarpaulin
-//! run can record real instrumented line-hits against them.
-//!
-//! The tests don't assert on *what* the filter saw — the address set
-//! of a GitHub-Actions runner isn't fixed — only that:
-//!   1. the outer call returned `Ok`, and
-//!   2. the filter closure was reachable (the function actually
-//!      entered the per-address loop).
-//!
-//! Point (2) is tracked via an invocation counter. We deliberately do
-//! not assert `counter > 0` because a minimally-configured sandbox
-//! could legitimately have zero addresses of a given family.
-//!
-//! **NetBSD note:** the address-walker tests (everything except the
-//! gateway variants) are skipped on NetBSD. The pkgsrc `rust` we test
-//! against emits an `RTM_NEWADDR` slot for some interface that
-//! `parse_addrs` rejects as "invalid address" — possibly a
-//! `sockaddr_dl` or kernel-form sockaddr that needs additional
-//! handling our parser doesn't have yet. The same code path works on
-//! macOS / FreeBSD / OpenBSD / DragonFly, so this is a NetBSD-specific
-//! gap rather than a regression. Tracked separately; gate kept narrow
-//! (gateway tests still run, since they go through `rt_generic_addrs`
-//! and aren't affected).
+//! The functions are generic wrappers around an `os::*` implementation. These
+//! tests exercise the call and closure paths without assuming a public IP,
+//! default route, or any particular address family is configured on the host.
 
-use getifs::{gateway_addrs_by_filter, gateway_ipv4_addrs_by_filter, gateway_ipv6_addrs_by_filter};
-#[cfg(not(target_os = "netbsd"))]
+use std::io;
+
+use common::interface_disappeared;
 use getifs::{
+  gateway_addrs_by_filter, gateway_ipv4_addrs_by_filter, gateway_ipv6_addrs_by_filter,
   interface_addrs_by_filter, interface_ipv4_addrs_by_filter, interface_ipv6_addrs_by_filter,
   interfaces, local_addrs_by_filter, local_ipv4_addrs_by_filter, local_ipv6_addrs_by_filter,
   private_addrs_by_filter, private_ipv4_addrs_by_filter, private_ipv6_addrs_by_filter,
   public_addrs_by_filter, public_ipv4_addrs_by_filter, public_ipv6_addrs_by_filter,
 };
 
-// ---------------------------------------------------------------------
-// Free `*_by_filter` functions — private / public / local / gateway /
-// interface address enumeration.
-// ---------------------------------------------------------------------
+mod common;
 
-#[cfg(not(target_os = "netbsd"))]
+#[cfg(any(
+  target_vendor = "apple",
+  target_os = "freebsd",
+  target_os = "dragonfly",
+  target_os = "netbsd",
+  target_os = "openbsd",
+  target_os = "linux",
+  target_os = "android",
+  windows,
+))]
+fn assert_multicast_result<T>(result: io::Result<T>) {
+  #[cfg(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd",
+  ))]
+  match result {
+    Err(error) => assert_eq!(error.kind(), io::ErrorKind::Unsupported),
+    Ok(_) => panic!("multicast enumeration unexpectedly succeeded"),
+  }
+
+  #[cfg(not(any(
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd",
+  )))]
+  if let Err(error) = result {
+    panic!("multicast enumeration failed: {error}");
+  }
+}
+
 #[test]
 fn private_ipv4_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -55,7 +61,6 @@ fn private_ipv4_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn private_ipv6_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -67,7 +72,6 @@ fn private_ipv6_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn private_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -79,7 +83,6 @@ fn private_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn public_ipv4_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -91,7 +94,6 @@ fn public_ipv4_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn public_ipv6_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -103,7 +105,6 @@ fn public_ipv6_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn public_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -115,7 +116,6 @@ fn public_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn local_ipv4_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -127,7 +127,6 @@ fn local_ipv4_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn local_ipv6_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -139,7 +138,6 @@ fn local_ipv6_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn local_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -184,7 +182,6 @@ fn gateway_ipv6_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn interface_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -196,7 +193,6 @@ fn interface_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn interface_ipv4_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -208,7 +204,6 @@ fn interface_ipv4_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn interface_ipv6_addrs_by_filter_runs() {
   let mut seen = 0usize;
@@ -220,18 +215,18 @@ fn interface_ipv6_addrs_by_filter_runs() {
   let _ = seen;
 }
 
-// ---------------------------------------------------------------------
-// Multicast free functions — gated to the same platforms as the
-// `cfg_multicast!` macro (Apple, FreeBSD, Linux, Windows).
-// ---------------------------------------------------------------------
-
 #[cfg(any(
   target_vendor = "apple",
   target_os = "freebsd",
+  target_os = "dragonfly",
+  target_os = "netbsd",
+  target_os = "openbsd",
   target_os = "linux",
-  windows
+  target_os = "android",
+  windows,
 ))]
 mod multicast {
+  use super::assert_multicast_result;
   use getifs::{
     interface_multicast_addrs_by_filter, interface_multicast_ipv4_addrs_by_filter,
     interface_multicast_ipv6_addrs_by_filter,
@@ -239,87 +234,73 @@ mod multicast {
 
   #[test]
   fn interface_multicast_addrs_by_filter_runs() {
-    let mut seen = 0usize;
-    interface_multicast_addrs_by_filter(|_| {
-      seen += 1;
-      true
-    })
-    .expect("interface_multicast_addrs_by_filter");
-    let _ = seen;
+    assert_multicast_result(interface_multicast_addrs_by_filter(|_| true));
   }
 
   #[test]
   fn interface_multicast_ipv4_addrs_by_filter_runs() {
-    let mut seen = 0usize;
-    interface_multicast_ipv4_addrs_by_filter(|_| {
-      seen += 1;
-      true
-    })
-    .expect("interface_multicast_ipv4_addrs_by_filter");
-    let _ = seen;
+    assert_multicast_result(interface_multicast_ipv4_addrs_by_filter(|_| true));
   }
 
   #[test]
   fn interface_multicast_ipv6_addrs_by_filter_runs() {
-    let mut seen = 0usize;
-    interface_multicast_ipv6_addrs_by_filter(|_| {
-      seen += 1;
-      true
-    })
-    .expect("interface_multicast_ipv6_addrs_by_filter");
-    let _ = seen;
+    assert_multicast_result(interface_multicast_ipv6_addrs_by_filter(|_| true));
   }
 }
 
-// ---------------------------------------------------------------------
-// Methods on `Interface`. These are generic too, and are only reached
-// when the caller iterates `interfaces()` and invokes them per-entry.
-// The loopback interface is guaranteed to exist on every reasonable
-// runner, so these tests will always have at least one Interface to
-// exercise.
-// ---------------------------------------------------------------------
-
-#[cfg(not(target_os = "netbsd"))]
 #[test]
 fn interface_method_addrs_by_filter_runs() {
-  let ift = interfaces().expect("interfaces()");
+  let snapshot = interfaces().expect("interfaces()");
   assert!(
-    !ift.is_empty(),
+    !snapshot.is_empty(),
     "at least the loopback interface should exist"
   );
-  for ifi in ift {
-    let _ = ifi.addrs_by_filter(|_| true).expect("addrs_by_filter");
-    let _ = ifi
-      .ipv4_addrs_by_filter(|_| true)
-      .expect("ipv4_addrs_by_filter");
-    let _ = ifi
-      .ipv6_addrs_by_filter(|_| true)
-      .expect("ipv6_addrs_by_filter");
+
+  for interface in snapshot {
+    let index = interface.index();
+    let name = interface.name().to_string();
+    if let Err(error) = interface.addrs_by_filter(|_| true) {
+      if interface_disappeared(index, &name) {
+        continue;
+      }
+      panic!("{name} addrs_by_filter failed: {error}");
+    }
+    if let Err(error) = interface.ipv4_addrs_by_filter(|_| true) {
+      if interface_disappeared(index, &name) {
+        continue;
+      }
+      panic!("{name} ipv4_addrs_by_filter failed: {error}");
+    }
+    if let Err(error) = interface.ipv6_addrs_by_filter(|_| true) {
+      if interface_disappeared(index, &name) {
+        continue;
+      }
+      panic!("{name} ipv6_addrs_by_filter failed: {error}");
+    }
   }
 }
 
 #[cfg(any(
   target_vendor = "apple",
   target_os = "freebsd",
+  target_os = "dragonfly",
+  target_os = "netbsd",
+  target_os = "openbsd",
   target_os = "linux",
-  windows
+  target_os = "android",
+  windows,
 ))]
 #[test]
 fn interface_method_multicast_addrs_by_filter_runs() {
-  let ift = interfaces().expect("interfaces()");
+  let snapshot = interfaces().expect("interfaces()");
   assert!(
-    !ift.is_empty(),
+    !snapshot.is_empty(),
     "at least the loopback interface should exist"
   );
-  for ifi in ift {
-    let _ = ifi
-      .multicast_addrs_by_filter(|_| true)
-      .expect("multicast_addrs_by_filter");
-    let _ = ifi
-      .ipv4_multicast_addrs_by_filter(|_| true)
-      .expect("ipv4_multicast_addrs_by_filter");
-    let _ = ifi
-      .ipv6_multicast_addrs_by_filter(|_| true)
-      .expect("ipv6_multicast_addrs_by_filter");
+
+  for interface in snapshot {
+    assert_multicast_result(interface.multicast_addrs_by_filter(|_| true));
+    assert_multicast_result(interface.ipv4_multicast_addrs_by_filter(|_| true));
+    assert_multicast_result(interface.ipv6_multicast_addrs_by_filter(|_| true));
   }
 }
