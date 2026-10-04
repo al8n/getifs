@@ -25,15 +25,6 @@ use super::{
   IfNet, Ifv4Net, Ifv6Net, Interface, IpRoute, Ipv4Route, Ipv6Route, MacAddr, Net, MAC_ADDRESS_SIZE,
 };
 
-// `Address` / `IfAddr` / `Ifv4Addr` / `Ifv6Addr` are only referenced
-// inside the `cfg_bsd_multicast!`-gated `interface_multiaddr_table`
-// impls. Keep this gate in lock-step with `cfg_bsd_multicast!`
-// (src/macros.rs) so NetBSD / OpenBSD builds stay warning-free.
-#[cfg(any(
-  target_vendor = "apple",
-  target_os = "freebsd",
-  target_os = "dragonfly"
-))]
 use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
 macro_rules! rt_generic_mod {
@@ -1028,40 +1019,38 @@ where
   }
 }
 
-cfg_bsd_multicast!(
-  pub(super) fn interface_multicast_ipv4_addresses<F>(
-    idx: u32,
-    mut f: F,
-  ) -> io::Result<SmallVec<Ifv4Addr>>
-  where
-    F: FnMut(&std::net::Ipv4Addr) -> bool,
-  {
-    interface_multiaddr_table(AF_INET, idx, |addr| match addr {
-      IpAddr::V4(ip) => f(ip),
-      _ => false,
-    })
-  }
+pub(super) fn interface_multicast_ipv4_addresses<F>(
+  idx: u32,
+  mut f: F,
+) -> io::Result<SmallVec<Ifv4Addr>>
+where
+  F: FnMut(&std::net::Ipv4Addr) -> bool,
+{
+  interface_multiaddr_table(AF_INET, idx, |addr| match addr {
+    IpAddr::V4(ip) => f(ip),
+    _ => false,
+  })
+}
 
-  pub(super) fn interface_multicast_ipv6_addresses<F>(
-    idx: u32,
-    mut f: F,
-  ) -> io::Result<SmallVec<Ifv6Addr>>
-  where
-    F: FnMut(&Ipv6Addr) -> bool,
-  {
-    interface_multiaddr_table(AF_INET6, idx, |addr| match addr {
-      IpAddr::V6(ip) => f(ip),
-      _ => false,
-    })
-  }
+pub(super) fn interface_multicast_ipv6_addresses<F>(
+  idx: u32,
+  mut f: F,
+) -> io::Result<SmallVec<Ifv6Addr>>
+where
+  F: FnMut(&Ipv6Addr) -> bool,
+{
+  interface_multiaddr_table(AF_INET6, idx, |addr| match addr {
+    IpAddr::V6(ip) => f(ip),
+    _ => false,
+  })
+}
 
-  pub(super) fn interface_multicast_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfAddr>>
-  where
-    F: FnMut(&IpAddr) -> bool,
-  {
-    interface_multiaddr_table(AF_UNSPEC, idx, f)
-  }
-);
+pub(super) fn interface_multicast_addresses<F>(idx: u32, f: F) -> io::Result<SmallVec<IfAddr>>
+where
+  F: FnMut(&IpAddr) -> bool,
+{
+  interface_multiaddr_table(AF_UNSPEC, idx, f)
+}
 
 cfg_apple!(
   pub(super) fn interface_multiaddr_table<T, F>(
@@ -1123,8 +1112,8 @@ cfg_apple!(
 );
 
 // FreeBSD has both `NET_RT_IFMALIST` and the `ifma_msghdr` struct
-// exported via libc, so this is the real walker. DragonFly has a
-// separate stub below — its kernel doesn't expose multicast group
+// exported via libc, so this is the real walker. DragonFly, NetBSD and
+// OpenBSD share a stub below — their kernels don't expose multicast group
 // enumeration via sysctl at all.
 #[cfg(target_os = "freebsd")]
 pub(super) fn interface_multiaddr_table<T, F>(
@@ -1187,21 +1176,22 @@ where
   }
 }
 
-// DragonFly stub: the kernel does not expose multicast group
-// enumeration via sysctl. `<sys/socket.h>` defines only four route
-// selectors (`NET_RT_DUMP` / `NET_RT_FLAGS` / `NET_RT_IFLIST` /
-// `NET_RT_MAXID = 4`); there is no `NET_RT_IFMALIST` to call.
+// DragonFly, NetBSD and OpenBSD stub: none of these kernels exposes
+// multicast group enumeration via sysctl, because none of them defines a
+// `NET_RT_IFMALIST` route selector to call. DragonFly's `<sys/socket.h>`,
+// for example, defines only `NET_RT_DUMP` / `NET_RT_FLAGS` /
+// `NET_RT_IFLIST` (`NET_RT_MAXID = 4`).
 //
-// The public API still surfaces on DragonFly so cross-platform
+// The public API still surfaces on these targets so cross-platform
 // callers compile and link without target-specific cfgs, but a real
 // call returns `ErrorKind::Unsupported` rather than a misleading
 // empty `Ok` — `Ok(SmallVec::new())` would be indistinguishable from
 // a host with multicast enumeration available but no current
 // memberships, which is wrong-by-default semantics for everyone
 // reading the result. Callers can match on `ErrorKind::Unsupported`
-// when they want to treat DragonFly the same way as platforms with
+// when they want to treat these targets the same way as platforms with
 // the kernel API absent.
-#[cfg(target_os = "dragonfly")]
+#[cfg(any(target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))]
 pub(super) fn interface_multiaddr_table<T, F>(
   _family: i32,
   _idx: u32,
@@ -1213,7 +1203,7 @@ where
 {
   Err(io::Error::new(
     io::ErrorKind::Unsupported,
-    "multicast group enumeration is not supported on DragonFly \
+    "multicast group enumeration is not supported on this platform \
      (no NET_RT_IFMALIST sysctl selector)",
   ))
 }

@@ -311,11 +311,11 @@ const _: () = {
 // Apple / FreeBSD: `libc` exports the struct + `NET_RT_IFMALIST`
 // directly.
 //
-// DragonFly: the kernel does not expose multicast group enumeration
-// via sysctl at all — `<sys/socket.h>` only defines four selectors
-// (`NET_RT_DUMP`, `NET_RT_FLAGS`, `NET_RT_IFLIST`, `NET_RT_MAXID`),
-// no `NET_RT_IFMALIST`. The DragonFly impl of
-// `interface_multiaddr_table` therefore returns
+// DragonFly / NetBSD / OpenBSD: the kernels do not expose multicast
+// group enumeration via sysctl at all — none of them defines
+// `NET_RT_IFMALIST` (DragonFly's `<sys/socket.h>` only defines
+// `NET_RT_DUMP`, `NET_RT_FLAGS`, `NET_RT_IFLIST` and `NET_RT_MAXID`).
+// Their shared impl of `interface_multiaddr_table` therefore returns
 // `Err(ErrorKind::Unsupported)` (see `bsd_like.rs`). It does not need
 // an `IfmaMsghdr` or a sysctl selector, so we don't define them here.
 

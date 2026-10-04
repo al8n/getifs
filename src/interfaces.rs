@@ -27,14 +27,6 @@ use super::{
 ))]
 use super::{IfAddr, Ifv4Addr, Ifv6Addr};
 
-#[cfg(any(target_os = "netbsd", target_os = "openbsd"))]
-fn multicast_unsupported<T>() -> io::Result<SmallVec<T>> {
-  Err(io::Error::new(
-    io::ErrorKind::Unsupported,
-    "multicast group enumeration is not supported on this platform",
-  ))
-}
-
 /// The interface struct
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Interface {
@@ -271,9 +263,7 @@ impl Interface {
     /// ```
     pub fn multicast_addrs(&self) -> io::Result<SmallVec<IfAddr>> {
       cfg_if::cfg_if! {
-        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-          multicast_unsupported()
-        } else if #[cfg(windows)] {
+        if #[cfg(windows)] {
           os::interface_multicast_addresses(Some(self.index), |_| true)
         } else {
           os::interface_multicast_addresses(self.index, |_| true)
@@ -314,10 +304,7 @@ impl Interface {
       F: FnMut(&IpAddr) -> bool,
     {
       cfg_if::cfg_if! {
-        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-          let _ = f;
-          multicast_unsupported()
-        } else if #[cfg(windows)] {
+        if #[cfg(windows)] {
           os::interface_multicast_addresses(Some(self.index), f)
         } else {
           os::interface_multicast_addresses(self.index, f)
@@ -352,9 +339,7 @@ impl Interface {
     /// ```
     pub fn ipv4_multicast_addrs(&self) -> io::Result<SmallVec<Ifv4Addr>> {
       cfg_if::cfg_if! {
-        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-          multicast_unsupported()
-        } else if #[cfg(windows)] {
+        if #[cfg(windows)] {
           os::interface_multicast_ipv4_addresses(Some(self.index), |_| true)
         } else {
           os::interface_multicast_ipv4_addresses(self.index, |_| true)
@@ -395,10 +380,7 @@ impl Interface {
       F: FnMut(&Ipv4Addr) -> bool,
     {
       cfg_if::cfg_if! {
-        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-          let _ = f;
-          multicast_unsupported()
-        } else if #[cfg(windows)] {
+        if #[cfg(windows)] {
           os::interface_multicast_ipv4_addresses(Some(self.index), f)
         } else {
           os::interface_multicast_ipv4_addresses(self.index, f)
@@ -433,9 +415,7 @@ impl Interface {
     /// ```
     pub fn ipv6_multicast_addrs(&self) -> io::Result<SmallVec<Ifv6Addr>> {
       cfg_if::cfg_if! {
-        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-          multicast_unsupported()
-        } else if #[cfg(windows)] {
+        if #[cfg(windows)] {
           os::interface_multicast_ipv6_addresses(Some(self.index), |_| true)
         } else {
           os::interface_multicast_ipv6_addresses(self.index, |_| true)
@@ -476,10 +456,7 @@ impl Interface {
       F: FnMut(&Ipv6Addr) -> bool,
     {
       cfg_if::cfg_if! {
-        if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-          let _ = f;
-          multicast_unsupported()
-        } else if #[cfg(windows)] {
+        if #[cfg(windows)] {
           os::interface_multicast_ipv6_addresses(Some(self.index), f)
         } else {
           os::interface_multicast_ipv6_addresses(self.index, f)
@@ -840,9 +817,7 @@ cfg_multicast!(
   /// ```
   pub fn interface_multicast_addrs() -> io::Result<SmallVec<IfAddr>> {
     cfg_if::cfg_if! {
-      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-        multicast_unsupported()
-      } else if #[cfg(windows)] {
+      if #[cfg(windows)] {
         os::interface_multicast_addresses(None, |_| true)
       } else {
         os::interface_multicast_addresses(0, |_| true)
@@ -878,10 +853,7 @@ cfg_multicast!(
     F: FnMut(&IpAddr) -> bool,
   {
     cfg_if::cfg_if! {
-      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-        let _ = f;
-        multicast_unsupported()
-      } else if #[cfg(windows)] {
+      if #[cfg(windows)] {
         os::interface_multicast_addresses(None, f)
       } else {
         os::interface_multicast_addresses(0, f)
@@ -915,9 +887,7 @@ cfg_multicast!(
   /// ```
   pub fn interface_multicast_ipv4_addrs() -> io::Result<SmallVec<Ifv4Addr>> {
     cfg_if::cfg_if! {
-      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-        multicast_unsupported()
-      } else if #[cfg(windows)] {
+      if #[cfg(windows)] {
         os::interface_multicast_ipv4_addresses(None, |_| true)
       } else {
         os::interface_multicast_ipv4_addresses(0, |_| true)
@@ -953,10 +923,7 @@ cfg_multicast!(
     F: FnMut(&Ipv4Addr) -> bool,
   {
     cfg_if::cfg_if! {
-      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-        let _ = f;
-        multicast_unsupported()
-      } else if #[cfg(windows)] {
+      if #[cfg(windows)] {
         os::interface_multicast_ipv4_addresses(None, f)
       } else {
         os::interface_multicast_ipv4_addresses(0, f)
@@ -990,9 +957,7 @@ cfg_multicast!(
   /// ```
   pub fn interface_multicast_ipv6_addrs() -> io::Result<SmallVec<Ifv6Addr>> {
     cfg_if::cfg_if! {
-      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-        multicast_unsupported()
-      } else if #[cfg(windows)] {
+      if #[cfg(windows)] {
         os::interface_multicast_ipv6_addresses(None, |_| true)
       } else {
         os::interface_multicast_ipv6_addresses(0, |_| true)
@@ -1028,10 +993,7 @@ cfg_multicast!(
     F: FnMut(&Ipv6Addr) -> bool,
   {
     cfg_if::cfg_if! {
-      if #[cfg(any(target_os = "netbsd", target_os = "openbsd"))] {
-        let _ = f;
-        multicast_unsupported()
-      } else if #[cfg(windows)] {
+      if #[cfg(windows)] {
         os::interface_multicast_ipv6_addresses(None, f)
       } else {
         os::interface_multicast_ipv6_addresses(0, f)
