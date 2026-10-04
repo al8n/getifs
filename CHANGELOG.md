@@ -58,6 +58,8 @@
   address dumps use a page-sized buffer, so they are no slower than in 0.6.
 - Linux and Android create every netlink and `SIOCGIF*` ioctl socket with
   `SOCK_CLOEXEC`, so the descriptors are not inherited across `exec`.
+- Linux decodes `/proc/net/igmp` group addresses in host byte order, so IPv4
+  multicast groups are no longer byte-reversed on big-endian targets.
 - BSD parsing handles compact sockaddrs and KAME-scoped IPv6 safely; NetBSD
   sysctl snapshots handle bounded `ENOMEM` retries and zero-sized results
   without weakening genuine malformed-data or permission errors.

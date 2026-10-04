@@ -422,10 +422,7 @@ pub(super) fn interface_multicast_addresses<F>(ifi: u32, mut f: F) -> io::Result
 where
   F: FnMut(&IpAddr) -> bool,
 {
-  // Parse IPv4 multicast addrs
   let ifmat4 = parse_proc_net_igmp("/proc/net/igmp", ifi, |addr| f(&(*addr).into()))?;
-
-  // Parse IPv6 multicast addrs
   let ifmat6 = parse_proc_net_igmp6("/proc/net/igmp6", ifi, |addr| f(&(*addr).into()))?;
 
   Ok(
@@ -467,19 +464,15 @@ where
   let mut idx = 0;
   let mut lines = reader.lines();
 
-  // Skip first line
+  // The first line is the column header.
   lines.next();
 
   for line in lines {
     let line = line?;
 
-    // Only `fields[0]` is consulted below and we need ≥4 fields total.
-    // Walking the whitespace-delimited iterator directly avoids the
-    // per-line allocation of the old `split([' ',':','\r','\t','\n'])
-    // .filter(...).collect::<MediumVec<_>>()`. Colons are never in
-    // `fields[0]` (neither in the leading index nor in an 8-char
-    // group-address column), so dropping them from the delimiter set
-    // does not affect parsing.
+    // Both line kinds have at least four whitespace-separated tokens and only
+    // the first is read, so the tokens are iterated instead of collected. That
+    // token never contains a colon, so whitespace alone delimits it.
     let mut it = line.split_ascii_whitespace();
     let field0 = match it.next() {
       Some(s) => s,
@@ -490,23 +483,14 @@ where
       continue;
     }
 
+    // Interface lines start in column 0; the group lines below are indented.
     if !line.starts_with(' ') && !line.starts_with('\t') {
-      // New interface line
       match field0.parse() {
         Ok(res) => idx = res,
         Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidData, e)),
       }
     } else if field0.len() == 8 && (ifi == 0 || ifi == idx) {
-      // The Linux kernel puts the IP address in /proc/net/igmp in
-      // native endianness.
-      let src = field0.as_bytes();
-      let mut b = [0u8; 4];
-      for i in (0..src.len()).step_by(2) {
-        b[i / 2] = xtoi2(&src[i..i + 2], 0).unwrap_or(0);
-      }
-
-      b.reverse();
-      let ip = b.into();
+      let ip = igmp_group(field0);
       if f(&ip) {
         ifmat.push(Ifv4Addr::new(idx, ip));
       }
@@ -514,6 +498,18 @@ where
   }
 
   Ok(ifmat)
+}
+
+/// Parses a `/proc/net/igmp` group: the kernel prints the `__be32` with `%08X`,
+/// so 224.0.0.251 is `FB0000E0` on little-endian and `E00000FB` on big-endian.
+#[cfg(not(target_os = "android"))]
+fn igmp_group(field: &str) -> Ipv4Addr {
+  let mut printed = [0u8; 4];
+  for (byte, pair) in printed.iter_mut().zip(field.as_bytes().chunks_exact(2)) {
+    *byte = xtoi2(pair, 0).unwrap_or(0);
+  }
+
+  Ipv4Addr::from(u32::from_be_bytes(printed).to_ne_bytes())
 }
 
 #[cfg(target_os = "android")]
@@ -541,14 +537,15 @@ where
   for line in reader.lines() {
     let line = line?;
 
-    // `split_ascii_whitespace` already handles spaces/tabs/CR/LF without
-    // a collect+filter, and we only use `fields[0]` and `fields[2]`.
+    // A record has six tokens: the interface index and name, the group
+    // address, and the user count, flags and timer. Only the index and the
+    // address are read, so the tokens are iterated instead of collected.
     let mut it = line.split_ascii_whitespace();
     let field0 = match it.next() {
       Some(s) => s,
       None => continue,
     };
-    // skip field1
+    // The interface name is not read.
     if it.next().is_none() {
       continue;
     }
@@ -556,7 +553,7 @@ where
       Some(s) => s,
       None => continue,
     };
-    // need 3 more tokens (fields[3..=5]) for a total of 6+.
+    // The user count, flags and timer must be present but are not read.
     if it.nth(2).is_none() {
       continue;
     }
@@ -567,6 +564,8 @@ where
     };
 
     if ifi == 0 || ifi == idx {
+      // The kernel prints the address with `%pi6`: its 16 bytes in network
+      // order as hex digits, so unlike the IPv4 field it needs no byte swap.
       let mut i = 0;
       let src = field2.as_bytes();
       let mut data = [0u8; 16];
@@ -589,19 +588,17 @@ where
 mod tests {
   use super::*;
 
-  // `route_v4_from_raw` / `route_v6_from_raw` cover every branch of
-  // the family / length / gateway validation matrix. They live on
-  // the hot path between the netlink walker and `IpRoute`, so any
-  // regression silently affects every `route_*_table*()` caller.
-  // Live tarpaulin runs only exercise the success arm; these unit
-  // tests fill in the wrong-family / out-of-range / absent-dst
-  // branches.
-
   #[test]
   fn flags_retain_unknown_bits() {
     let unknown = 1 << 31;
     assert_eq!(Flags::from_bits_retain(unknown).bits(), unknown);
   }
+
+  // `route_v4_from_raw` and `route_v6_from_raw` sit between the netlink
+  // walker and `IpRoute`, so a regression silently affects every
+  // `route_*_table*()` caller. A live dump exercises only the success arm;
+  // these tests cover every branch of the family, length and gateway
+  // validation matrix.
 
   #[test]
   fn route_v4_from_raw_rejects_oversize_prefix() {
@@ -671,5 +668,81 @@ mod tests {
     let dst = Some(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0)));
     let r = route_v6_from_raw(1, 32, dst, None).unwrap();
     assert!(r.gateway().is_none());
+  }
+
+  #[cfg(not(target_os = "android"))]
+  mod igmp {
+    use super::*;
+
+    const GROUPS: [Ipv4Addr; 3] = [
+      Ipv4Addr::new(224, 0, 0, 1),
+      Ipv4Addr::new(224, 0, 0, 251),
+      Ipv4Addr::new(239, 255, 255, 250),
+    ];
+
+    // The field that a kernel with this target's byte order prints for `addr`.
+    fn host_endian_field(addr: Ipv4Addr) -> String {
+      format!("{:08X}", u32::from_ne_bytes(addr.octets()))
+    }
+
+    #[test]
+    fn group_decodes_the_field_the_kernel_prints() {
+      for addr in GROUPS {
+        assert_eq!(igmp_group(&host_endian_field(addr)), addr);
+      }
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn group_decodes_a_little_endian_field() {
+      assert_eq!(igmp_group("FB0000E0"), Ipv4Addr::new(224, 0, 0, 251));
+    }
+
+    #[cfg(target_endian = "big")]
+    #[test]
+    fn group_decodes_a_big_endian_field() {
+      assert_eq!(igmp_group("E00000FB"), Ipv4Addr::new(224, 0, 0, 251));
+    }
+
+    #[test]
+    fn group_decodes_each_malformed_byte_as_zero() {
+      assert_eq!(igmp_group("ZZZZZZZZ"), Ipv4Addr::UNSPECIFIED);
+      // The outer bytes match, so byte order does not change the result.
+      assert_eq!(igmp_group("FF00ZZFF"), Ipv4Addr::new(255, 0, 0, 255));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_proc_net_igmp_reads_host_endian_groups() {
+      use std::io::Write;
+
+      let group_line = |addr| format!("\t\t\t\t{} 1 0:00000000\t\t0\n", host_endian_field(addr));
+      let listing = [
+        "Idx\tDevice    : Count Querier\tGroup    Users Timer\tReporter\n",
+        "1\tlo        :     1      V3\n",
+        &group_line(GROUPS[0]),
+        "2\teth0      :     2      V3\n",
+        &group_line(GROUPS[1]),
+        &group_line(GROUPS[2]),
+      ]
+      .concat();
+
+      let path = std::env::temp_dir().join(format!("getifs-igmp-{}.txt", std::process::id()));
+      let mut file = std::fs::File::create_new(&path).unwrap();
+      scopeguard::defer! {
+        let _ = std::fs::remove_file(&path);
+      }
+      file.write_all(listing.as_bytes()).unwrap();
+
+      let groups = |ifi| {
+        parse_proc_net_igmp(path.to_str().unwrap(), ifi, |_| true)
+          .unwrap()
+          .iter()
+          .map(|group| (group.index(), group.addr()))
+          .collect::<Vec<_>>()
+      };
+      assert_eq!(groups(0), [(1, GROUPS[0]), (2, GROUPS[1]), (2, GROUPS[2])]);
+      assert_eq!(groups(2), [(2, GROUPS[1]), (2, GROUPS[2])]);
+    }
   }
 }
