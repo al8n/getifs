@@ -661,8 +661,9 @@ pub(super) enum FilterMode {
 }
 
 /// Receives the candidates of one filtered dump attempt in `out[start..]` and
-/// calls the filter as [`FilterMode`] directs. [`run_filtered`] owns it across
-/// attempts.
+/// calls the filter as [`FilterMode`] directs. Walkers only push to it: an
+/// entry the filter may have accepted is dropped only with a failed attempt,
+/// by [`run_filtered`], which owns the sink across attempts.
 struct FilterSink<'a, T, F> {
   out: &'a mut SmallVec<T>,
   start: usize,
@@ -695,11 +696,6 @@ where
         }
       }
     }
-  }
-
-  /// Drops every entry of the attempt, whether or not it committed.
-  fn discard(&mut self) {
-    self.out.truncate(self.start);
   }
 
   /// Completes a successful attempt.
@@ -755,7 +751,8 @@ where
         return Ok(());
       }
       Err(error) => {
-        sink.discard();
+        // A failed attempt leaves no entries behind, committed or not.
+        sink.out.truncate(sink.start);
         // A committed attempt has shown the filter its entries, and a rerun
         // would show them again.
         if sink.committed || !is_interrupted(&error) || attempts >= MAX_DUMP_ATTEMPTS {
@@ -2479,8 +2476,9 @@ where
     Ok(())
   })?;
 
+  // Keep the gateways collected so far, as the route walker keeps its
+  // routes: a deferred filter may already have accepted them.
   if matches!(end, DumpEnd::FamilyUnavailable) {
-    gateways.discard();
     return Ok(());
   }
 
@@ -3716,10 +3714,102 @@ mod netlink_tests {
     assert!(addrs.unwrap().is_empty());
     assert_eq!(opens, 1);
 
-    // The gateway walk drops the gateway it had collected.
+    // The gateway walk likewise keeps the gateway it had collected and opens
+    // no dump for nexthop 7.
     let (gateways, opens) = replay_gateways(replay());
-    assert!(gateways.unwrap().is_empty());
+    assert_eq!(gateways.unwrap().as_slice(), &[IfAddr::new(1, gateway)]);
     assert_eq!(opens, 1);
+  }
+
+  // A family-unavailable reply ends a dump without error, so the result holds
+  // what the filter accepted: with a limit of one the filter has seen each
+  // entry as it arrived, and with the default limit it sees the pending
+  // entries when the dump ends.
+  #[test]
+  fn family_unavailable_reply_keeps_what_the_deferred_filter_accepted() {
+    let unavailable = nlmsgerr(rustix::io::Errno::AFNOSUPPORT);
+    let via = |last, oif| {
+      route(
+        0,
+        &[
+          rtattr(RTA_GATEWAY, &[192, 0, 2, last]),
+          u32_attr(RTA_OIF, oif),
+        ],
+      )
+    };
+    let route_to = |dst: [u8; 4]| route(24, &[rtattr(RTA_DST, &dst), u32_attr(RTA_OIF, 1)]);
+    let inet = AddressFamily::INET.as_raw() as u8;
+    let kept_route = (inet, 1, 24, Some(IpAddr::from([198, 51, 100, 0])), None);
+    let rejected_route = (inet, 1, 24, Some(IpAddr::from([203, 0, 113, 0])), None);
+
+    for mode in [
+      FilterMode::Deferred(1),
+      FilterMode::Deferred(FILTER_DEFER_LIMIT),
+    ] {
+      let datagram = [via(1, 2), via(4, 4), unavailable.clone()].concat();
+      let mut transport = CountingReplay::new(vec![datagram]);
+      let mut calls = Vec::new();
+      let gateways: SmallVec<IfAddr> = rt_generic_addrs_with(
+        &mut transport,
+        AddressFamily::INET,
+        RTA_GATEWAY,
+        None,
+        |addr| {
+          calls.push(*addr);
+          *addr != ip(4)
+        },
+        mode,
+      )
+      .unwrap();
+      assert_eq!(gateways.as_slice(), &[IfAddr::new(2, ip(1))], "{mode:?}");
+      assert_eq!(calls, [ip(1), ip(4)], "{mode:?}");
+      assert_eq!(transport.opens, 1, "{mode:?}");
+
+      let datagram = [
+        route_to([198, 51, 100, 0]),
+        route_to([203, 0, 113, 0]),
+        unavailable.clone(),
+      ]
+      .concat();
+      let mut transport = CountingReplay::new(vec![datagram]);
+      let mut calls = Vec::new();
+      let mut routes = SmallVec::new();
+      netlink_routes_into_with(
+        &mut transport,
+        AddressFamily::INET,
+        raw_route,
+        |entry| {
+          calls.push(*entry);
+          *entry != rejected_route
+        },
+        mode,
+        &mut routes,
+      )
+      .unwrap();
+      assert_eq!(routes.as_slice(), [kept_route], "{mode:?}");
+      assert_eq!(calls, [kept_route, rejected_route], "{mode:?}");
+      assert_eq!(transport.opens, 1, "{mode:?}");
+
+      let datagram = [addr_message(1), addr_message(2), unavailable.clone()].concat();
+      let mut transport = CountingReplay::new(vec![datagram]);
+      let mut calls = Vec::new();
+      let mut addrs = SmallVec::<IfNet>::new();
+      netlink_addr_into_with(
+        &mut transport,
+        AddressFamily::INET,
+        0,
+        |addr| {
+          calls.push(*addr);
+          *addr != ip(2)
+        },
+        mode,
+        &mut addrs,
+      )
+      .unwrap();
+      assert_eq!(addrs.as_slice(), &[net(1, ip(1), 24)], "{mode:?}");
+      assert_eq!(calls, [ip(1), ip(2)], "{mode:?}");
+      assert_eq!(transport.opens, 1, "{mode:?}");
+    }
   }
 
   #[test]
