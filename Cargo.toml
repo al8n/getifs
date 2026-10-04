@@ -42,7 +42,7 @@ cfg-if = "1"
 hardware-address = "1"
 iprobe = "0.1"
 ipnet = "2"
-iprfc = ">=0.2.3, <0.3"
+iprfc = "1"
 paste = { package = "pastey", version = "0.2.3" }
 smol_str = "0.3.2"
 smallvec-wrapper = "0.4"

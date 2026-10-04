@@ -27,6 +27,10 @@
   same-family destination/gateway model and omission of Linux `RTA_VIA` rows.
 - Explicitly re-export `SmallVec` and `TinyVec`; `ipnet`, `rfc`, `probe`, and
   `SmolStr` remain supported public re-exports.
+- The `rfc` re-export is now `iprfc` 1.0, so this is part of the release's
+  breaking changes: `rfc` is now the 1.0 API, whose `RFC6890` and
+  `FORWARDING_BLACKLIST` constants are generated from IANA special-purpose
+  registry snapshots instead of the RFC 6890 table.
 - Preserve unknown native interface-flag bits on Linux and BSD, and align
   `Flags` ordering traits on Windows without remapping target-specific bits.
 - Linux and Windows report `mac_addr` only for a 6-byte (EUI-48) link-layer
@@ -80,9 +84,18 @@
 
 ### Compatibility and packaging
 
-- Require `iprfc >=0.2.3, <0.3`; lock the public/private RFC 6890
-  classification with pure tests, including global IPv6, documentation,
-  RFC1918, CGNAT, ULA, loopback, and link-local addresses.
+- Require `iprfc` 1.0; lock the public/private RFC 6890 classification with
+  pure tests, including global IPv6, documentation, RFC1918, CGNAT, ULA,
+  loopback, and link-local addresses. Public/private classification now follows
+  iprfc 1.0's IANA special-purpose registry snapshot:
+  - Newly listed blocks are no longer public: the AS112 and AMT prefixes,
+    `64:ff9b:1::/48`, `100:0:0:1::/64`, `3fff::/20` and `5f00::/16`.
+  - Private classification uses each block's most specific Forwardable value.
+  - So the forwardable new blocks are now private: the AS112 and AMT prefixes,
+    `64:ff9b:1::/48` and `5f00::/16`. The deprecated ORCHID block
+    `2001:10::/28`, which the registry leaves without a Forwardable value, is
+    also private now. So are `192.0.0.0/29`, `192.0.0.9` and `192.0.0.10`.
+  - Most of `2001::/23` outside its forwardable rows is no longer private.
 - Require `smol_str` 0.3.2 or a later 0.3 release. `smol_str` 0.3.4 and later
   require Rust 1.89, so Rust 1.85–1.88 users should enable Cargo's MSRV-aware
   resolver (`resolver.incompatible-rust-versions = "fallback"` or
@@ -97,8 +110,8 @@
   re-exported, and `MacAddr` is returned by `Interface::mac_addr()`, so this
   is part of the release's breaking changes: `MacAddr` is now the 1.0 type,
   and `ParseMacAddrError` is `#[non_exhaustive]` with a new
-  `UnsupportedAddressSize` variant. `hardware-address` 1.0 uses `pastey`, so
-  the unmaintained `paste` now enters only through `iprfc` and
+  `UnsupportedAddressSize` variant. `hardware-address` 1.0 and `iprfc` 1.0 use
+  `pastey`, so the unmaintained `paste` now enters only through
   `smallvec-wrapper`.
 - Restrict the Linux backend cfg to Linux and Android. Other unsupported
   targets now fail with a clear compile-time error instead of compiling a

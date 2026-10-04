@@ -231,6 +231,26 @@ mod tests {
       ("::1", false),
       ("169.254.1.1", false),
       ("fe80::1", false),
+      // Blocks the IANA registry added after RFC 6890: private only when Forwardable.
+      ("192.31.196.1", true),    // AS112-v4
+      ("192.52.193.1", true),    // AMT
+      ("192.175.48.1", true),    // Direct Delegation AS112 Service
+      ("64:ff9b:1::1", true),    // IPv4-IPv6 translation, local use
+      ("100:0:0:1::1", false),   // Dummy IPv6 Prefix
+      ("2620:4f:8000::1", true), // Direct Delegation AS112 Service
+      ("3fff::1", false),        // Documentation
+      ("5f00::1", true),         // Segment Routing (SRv6) SIDs
+      // The most specific Forwardable value wins over the enclosing block's.
+      ("192.0.0.1", true),    // IPv4 Service Continuity Prefix
+      ("192.0.0.8", false),   // IPv4 dummy address
+      ("192.0.0.9", true),    // Port Control Protocol Anycast
+      ("192.0.0.10", true),   // Traversal Using Relays around NAT Anycast
+      ("192.0.0.170", false), // NAT64/DNS64 Discovery
+      ("192.0.0.171", false), // NAT64/DNS64 Discovery
+      ("2001::1", true),      // TEREDO
+      ("2001:1::1", true),    // Port Control Protocol Anycast
+      ("2001:1::4", false),   // IETF Protocol Assignments
+      ("2001:2::1", true),    // Benchmarking
     ] {
       let ip = addr.parse::<IpAddr>().unwrap();
       assert_eq!(

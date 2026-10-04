@@ -228,6 +228,15 @@ mod tests {
       ("::1", false),
       ("169.254.1.1", false),
       ("fe80::1", false),
+      // Blocks the IANA registry added after RFC 6890.
+      ("192.31.196.1", false),    // AS112-v4
+      ("192.52.193.1", false),    // AMT
+      ("192.175.48.1", false),    // Direct Delegation AS112 Service
+      ("64:ff9b:1::1", false),    // IPv4-IPv6 translation, local use
+      ("100:0:0:1::1", false),    // Dummy IPv6 Prefix
+      ("2620:4f:8000::1", false), // Direct Delegation AS112 Service
+      ("3fff::1", false),         // Documentation
+      ("5f00::1", false),         // Segment Routing (SRv6) SIDs
     ] {
       let ip = addr.parse::<IpAddr>().unwrap();
       assert_eq!(

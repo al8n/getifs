@@ -17,7 +17,7 @@ it first.
 
 The public dependency name `paste` is an alias for the maintained `pastey`
 0.2.3 crate. The original `paste` crate can still appear transitively through
-sister crates. RUSTSEC-2024-0436 identifies that original crate as
+`smallvec-wrapper`. RUSTSEC-2024-0436 identifies that original crate as
 unmaintained only; it is not evidence of an exploitable vulnerability. The
 advisory CI job ignores only this advisory and continues to fail on every other
 reported advisory.

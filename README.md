@@ -163,9 +163,8 @@ Rust 1.85–1.88 enable Cargo's MSRV-aware resolver
 The direct macro dependency is the maintained `pastey`
 crate, aliased as `paste` so existing macro invocations remain compatible.
 RUSTSEC-2024-0436 identifies the older `paste` crate as unmaintained, not as a
-known vulnerability. Transitive uses can still be selected by `iprfc` or
-`smallvec-wrapper`; this crate does not modify those upstream dependency
-graphs.
+known vulnerability. Transitive uses can still be selected by
+`smallvec-wrapper`; this crate does not modify that upstream dependency graph.
 
 ## Android
 
