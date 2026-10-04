@@ -82,7 +82,6 @@ where
             }
           }
 
-          // Apply filter and add to results if it passes
           if let Some(addr) = A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
           {
             if seen.insert((addr.index(), addr.addr())) {
@@ -108,7 +107,6 @@ where
             }
           }
 
-          // Apply filter and add to results if it passes
           if let Some(addr) = A::try_from_with_filter(route.InterfaceIndex, gateway, |addr| f(addr))
           {
             if seen.insert((addr.index(), addr.addr())) {

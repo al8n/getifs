@@ -452,14 +452,6 @@ where
       }
 
       // TODO(al8n): Should we include anycast addresses?
-      // let mut anycast = adapter.FirstAnycastAddress;
-      // while let Some(addr) = anycast.as_ref() {
-      //   if let Some(ip) = sockaddr_to_ipaddr(addr.Address.lpSockaddr) {
-      //     let ip = IfNet::new(index, ip);
-      //     addresses.push(ip);
-      //   }
-      //   anycast = addr.Next;
-      // }
     }
   }
 

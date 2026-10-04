@@ -888,9 +888,8 @@ where
 }
 
 /// Same as `netlink_addr` but pushes results into the caller's buffer
-/// instead of allocating a fresh one. Used by `best_local_addrs()` to
-/// merge per-family walks without three intermediate `SmallVec`s. On error,
-/// `addrs` is truncated back to its length on entry.
+/// instead of allocating a fresh one. On error, `addrs` is truncated back to
+/// its length on entry.
 pub(super) fn netlink_addr_into<N, F>(
   family: AddressFamily,
   ifi: u32,
@@ -1071,10 +1070,10 @@ where
   // unless the route walk actually encounters an `RTA_NH_ID`
   // attribute on a default route. Most Linux hosts have no `ip
   // nexthop`-managed routes (Linux 5.3+ opt-in feature); on those
-  // hosts `best_local_*` no longer fails when an unrelated nexthop
-  // dump returns `EINTR` / `NLM_F_DUMP_INTR` from concurrent
-  // nexthop-subsystem churn. Same pattern `netlink_routes_into`
-  // and `rt_generic_addrs` already use; keeping all three
+  // hosts `best_local_*` cannot fail on an unrelated nexthop dump
+  // returning `EINTR` / `NLM_F_DUMP_INTR` from concurrent
+  // nexthop-subsystem churn. `netlink_routes_into` and
+  // `rt_generic_addrs` use the same pattern; keep the three
   // consistent.
   //
   // Selection key for deferred candidates:
@@ -1082,7 +1081,7 @@ where
   // Linux RPDB precedence (`local` < `main` < `default`); within
   // the same table, lower metric wins; within the same metric,
   // lower pref_rank wins (HIGH < MEDIUM < LOW per RFC 4191). See
-  // `table_rank_for` and `pref_rank_for` below.
+  // `table_rank_for` and `pref_rank_for`.
   let mut deferred_best: Vec<(u8, u32, u8, u32)> = Vec::new();
 
   let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
@@ -1090,20 +1089,20 @@ where
   // Set of interfaces tied at `best_metric`. ECMP / nexthop-object
   // groups can list multiple usable nexthops behind a single route,
   // and equal-metric default routes on different interfaces are
-  // also valid; both should contribute their addresses. The
-  // previous `Option<u32>` form silently dropped every nexthop
-  // past the first, returning an order-dependent partial address
-  // set on multi-WAN hosts.
+  // also valid; both should contribute their addresses. Keeping a
+  // single interface would drop every nexthop past the first and
+  // return an order-dependent partial address set on multi-WAN
+  // hosts.
   let mut best_oifs: SmallVec<u32> = SmallVec::new();
   // Lex key for "best default": `(table_rank, metric)`. The kernel
   // walks the RPDB rule chain in order — `0: lookup local`,
   // `32766: lookup main`, `32767: lookup default` — so a
   // higher-ranked table is queried first and any route there will
   // be picked before the kernel ever consults a lower-ranked
-  // table, *regardless of metric*. Comparing on metric alone made
-  // a low-metric `RT_TABLE_DEFAULT` fallback beat a higher-metric
-  // `RT_TABLE_MAIN` default — even though the kernel would never
-  // do that. The lex key matches kernel selection exactly.
+  // table, *regardless of metric*. Comparing on metric alone would
+  // let a low-metric `RT_TABLE_DEFAULT` fallback beat a
+  // higher-metric `RT_TABLE_MAIN` default, which the kernel never
+  // does. The lex key matches kernel selection exactly.
   let mut best_rank: u8 = u8::MAX;
   let mut best_metric: u32 = u32::MAX;
   // Lex tier: RFC 4191 router preference rank. See `pref_rank_for`.
@@ -1124,7 +1123,7 @@ where
         // Same eligibility checks as `netlink_routes_into`. Without
         // these a low-metric `blackhole default`, an `unreachable
         // default`, or a TOS / source-constrained default could win
-        // `best_ifindex` and steer `best_local_*` at an interface
+        // the selection and steer `best_local_*` at an interface
         // the kernel would never use for ordinary traffic.
         //
         //   - rtm_type ∈ {RTN_UNICAST, RTN_LOCAL}: filters
@@ -1200,9 +1199,9 @@ where
         let mut dst_specific = false;
         // Separately track "RTA_DST present but failed to parse"
         // (truncated payload, wrong-family). Without this, a
-        // malformed RTA_DST returned `None` from
-        // `parse_rta_ipaddr`, which left `dst_specific = false`
-        // and the row stayed eligible for best-local selection.
+        // malformed RTA_DST would yield `None` from
+        // `parse_rta_ipaddr`, leave `dst_specific = false`, and
+        // keep the row eligible for best-local selection.
         // The full route walker has the same `dst_malformed`
         // guard — keep the two paths consistent so a malformed
         // default route is suppressed from `best_local_*` for
@@ -1223,8 +1222,8 @@ where
           let attrlen = attr.len as usize;
           if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
             // A malformed attribute must not be silently used to
-            // select `best_ifindex`: if we `break`ed here and then
-            // applied partial `current_metric` / `current_oif`,
+            // select the best interface: if we `break`ed here and
+            // then applied partial `current_metric` / `current_oifs`,
             // corrupted kernel output could steer us to the wrong
             // interface. Bail out in the same way the interface
             // and address parsers above do.
@@ -1296,8 +1295,7 @@ where
         // top-level RTA_OIF is absent. Both encodings can list
         // multiple usable nexthops on different interfaces — for
         // a multi-WAN ECMP default we want addresses from *all*
-        // of them, not just the first. The previous "first only"
-        // form silently dropped the rest.
+        // of them, not just the first.
         //
         // For RTA_NH_ID:
         //   - `Some(non-empty)`: collect every resolved oif.
@@ -1313,11 +1311,9 @@ where
           } else if let Some(id) = nh_id {
             // Lazy resolution: defer every `RTA_NH_ID` default
             // candidate to the post-walk pass. The pass dumps
-            // nexthops once and resolves the entire batch — same
-            // correctness as the previous "try inline, defer to
-            // retry" two-dump pattern, but we skip the dump
-            // entirely when no default route uses nexthop
-            // objects.
+            // nexthops once and resolves the entire batch, and
+            // the dump is skipped entirely when no default route
+            // uses nexthop objects.
             let metric = current_metric.unwrap_or(0);
             let rank = table_rank_for(table_id);
             let pref_rank = pref_rank_for(current_pref);
@@ -1326,19 +1322,18 @@ where
           }
         }
 
-        // Update the candidate set on `(table_rank, metric)` lex
-        // order. A strictly better key resets the set (the new
+        // Update the candidate set on `(table_rank, metric, pref_rank)`
+        // lex order. A strictly better key resets the set (the new
         // route supersedes everything collected so far); an
         // equal key extends it (equal-cost ECMP across separate
         // route entries, including the same destination listed
         // in two route messages).
         //
-        // Comparing on metric alone made a low-metric
-        // `RT_TABLE_DEFAULT` fallback beat a higher-metric
-        // `RT_TABLE_MAIN` default — kernel-incorrect. Lex
-        // comparison matches the kernel's rule-chain semantics:
-        // `local < main < default`, with metric only as a
-        // tie-breaker within the same table.
+        // The lex comparison matches the kernel's rule-chain
+        // semantics: `local < main < default`, with metric only as
+        // a tie-breaker within the same table. Comparing on metric
+        // alone would let a low-metric `RT_TABLE_DEFAULT` fallback
+        // beat a higher-metric `RT_TABLE_MAIN` default.
         //
         // A missing `RTA_PRIORITY` is the kernel's convention
         // for "metric 0"; collapse missing/explicit into one
@@ -1485,7 +1480,8 @@ fn build_nh_dump_request(seq: u32) -> [u8; 24] {
 /// them as a map keyed by nexthop id. Always dumps with
 /// `nh_family = AF_UNSPEC` — see `build_nh_dump_request` for why
 /// per-family dumps are unsafe (they drop group objects). Used by
-/// `netlink_routes_into` to resolve routes that arrive with an
+/// `netlink_routes_into`, `netlink_best_local_addrs_into` and
+/// `rt_generic_addrs` to resolve routes that arrive with an
 /// `RTA_NH_ID` reference rather than an inline `RTA_OIF` / `RTA_GATEWAY`.
 fn dump_nexthops<T: Transport>(
   transport: &mut T,
@@ -1755,12 +1751,13 @@ where
   // since `ip nexthop`-managed routes are a 5.3+ opt-in feature).
   // It also decouples ordinary route enumeration from nexthop-
   // subsystem availability — a transient `NLM_F_DUMP_INTR` or
-  // unrelated nexthop churn during the upfront dump used to fail
+  // unrelated nexthop churn during an upfront dump would fail
   // `route_table()` even on hosts whose route table contains no
   // `RTA_NH_ID` references.
   //
-  // Same pattern `rt_generic_addrs` (the gateway walker) already
-  // uses; matching it here keeps the two paths consistent.
+  // `rt_generic_addrs` (the gateway walker) and
+  // `netlink_best_local_addrs_into` use the same pattern; keep the
+  // three consistent.
   let mut deferred_nh: Vec<(u8, u8, Option<IpAddr>, u32)> = Vec::new();
 
   let req = NetlinkRouteRequest::new(RTM_GETROUTE as u16, 1, family.as_raw() as u8, 0);
@@ -1818,10 +1815,10 @@ where
         let mut gw: Option<IpAddr> = None;
         let mut has_src_constraint = false;
         // Track present-but-malformed for RTA_DST / RTA_GATEWAY.
-        // `parse_rta_ipaddr` returns `None` for either "the
+        // The parsed `Option` is `None` for either "the
         // attribute had a wrong-family / too-short payload" *or*
         // "the attribute wasn't there." Keeping a separate
-        // present-flag lets us reject a malformed attribute
+        // flag lets us reject a malformed attribute
         // outright without conflating it with the legitimate
         // "default-route" / "on-link" encodings (`dst` absent
         // with `rtm_dst_len == 0`, `gw` absent for direct
@@ -1844,7 +1841,7 @@ where
         let mut table_id: u32 = rtm_header.rtm_table as u32;
         // Routes installed via `ip nexthop` carry only an
         // RTA_NH_ID and no top-level RTA_OIF / RTA_MULTIPATH. We
-        // capture the id and resolve it against the up-front
+        // capture the id and resolve it against the post-walk
         // RTM_GETNEXTHOP dump (`nh_map`) — this lets `route_table`
         // surface default routes installed through nexthop objects
         // (Linux 5.3+) that would otherwise be silently dropped by
@@ -1938,7 +1935,6 @@ where
         // about.
         let _ = dst_present;
 
-        // Skip if a source constraint snuck in via RTA_SRC.
         if has_src_constraint {
           return Ok(());
         }
@@ -1966,9 +1962,8 @@ where
         //
         // Lazy resolution: defer every `RTA_NH_ID` route to the
         // post-walk pass. The pass dumps `RTM_GETNEXTHOP` once
-        // and resolves the entire batch — same correctness as
-        // dump-up-front, lower cost when no route uses nexthop
-        // objects.
+        // and resolves the entire batch, and the dump is skipped
+        // when no route uses nexthop objects.
         //
         // `resolve_nh_id` outcomes (handled by the post-walk
         // block):
@@ -1990,11 +1985,11 @@ where
         // route per nexthop. The wire format of each nexthop is
         // `struct rtnexthop { u16 rtnh_len; u8 rtnh_flags; u8
         // rtnh_hops; s32 rtnh_ifindex; }` followed by RTA-encoded
-        // sub-attributes (typically RTA_GATEWAY). On a multi-WAN
-        // host where the kernel installs only `default nexthop
-        // via A dev e0 nexthop via B dev e1`, the previous "skip
-        // ECMP" behaviour caused `route_table_by_filter(|r|
-        // r.is_default())` to return *no* default route.
+        // sub-attributes (typically RTA_GATEWAY). Skipping ECMP
+        // routes would make `route_table_by_filter(|r|
+        // r.is_default())` return *no* default route on a
+        // multi-WAN host where the kernel installs only `default
+        // nexthop via A dev e0 nexthop via B dev e1`.
         if let Some(mp) = multipath {
           walk_multipath(
             rtm_header.rtm_family,
@@ -2307,8 +2302,8 @@ where
   // Lazy nexthop-dump: don't pay the `RTM_GETNEXTHOP` round-trip
   // unless the route walk actually encounters an `RTA_NH_ID`
   // attribute. The vast majority of Linux hosts have no `ip
-  // nexthop`-managed routes, so a typical `gateway_addrs()` call
-  // benchmarked ~12 µs faster after this change vs. always-dump.
+  // nexthop`-managed routes, so skipping the dump makes a typical
+  // `gateway_addrs()` call ~12 µs faster (benchmarked).
   // Routes that *do* reference a nexthop object collect into
   // `deferred_nh` here and resolve in a single post-walk pass.
   let mut deferred_nh: SmallVec<u32> = SmallVec::new();
@@ -2333,7 +2328,6 @@ where
         let rtm = &received[NLMSG_HDRLEN..hlen];
         let rtm_header = RtmMessageHeader::parse(rtm)?;
 
-        // Ensure it's a address we want
         if let Some(rtn) = rtn {
           if rtm_header.rtm_type != rtn {
             return Ok(());
@@ -2382,14 +2376,10 @@ where
                 // Netlink address payloads are already in network
                 // byte order; `Ipv4Addr::from([u8; 4])` is
                 // network-order-by-contract and host-endian-
-                // independent. The previous
-                // `u32::from_ne_bytes(...).swap_bytes()` decode
-                // happened to work on little-endian Linux
-                // (LE-load + swap = BE-load) but produced
-                // byte-reversed addresses on big-endian Linux —
-                // matters now that CI explicitly covers
-                // big-endian targets. Match the canonical
-                // `parse_rta_ipaddr` shape.
+                // independent. A `u32::from_ne_bytes(...).swap_bytes()`
+                // decode is only right on little-endian and would
+                // byte-reverse the address on big-endian Linux.
+                // Match the canonical `parse_rta_ipaddr` shape.
                 let bytes: [u8; 4] = data[..4].try_into().unwrap();
                 tmp_addrs.push(IpAddr::V4(bytes.into()));
               }
@@ -2399,10 +2389,8 @@ where
               {
                 // `Ipv6Addr::from([u8; 16])` is also
                 // network-order-by-contract — same rationale as
-                // the v4 branch above. The `u128::from_be_bytes`
-                // chain it replaced was already correct, but
-                // sticking to the byte-array form keeps both
-                // arms uniform with `parse_rta_ipaddr`.
+                // the v4 branch above — and keeps both arms
+                // uniform with `parse_rta_ipaddr`.
                 let bytes: [u8; 16] = data[..16].try_into().unwrap();
                 tmp_addrs.push(IpAddr::V6(bytes.into()));
               }
@@ -2427,9 +2415,8 @@ where
         }
 
         // Inline closure for the dedup + try_from + push step.
-        // Avoids three duplicate copies across the top-level /
-        // multipath / nh_id paths and keeps the per-path code
-        // tight.
+        // Avoids duplicate copies across the top-level and
+        // multipath paths and keeps the per-path code tight.
         //
         // It's a normal local closure — no boxing — so the borrow
         // checker requires we drop the `gateways` / `seen`

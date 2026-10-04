@@ -67,12 +67,11 @@ fn ifname_to_index_in(name: &str) -> io::Result<u32> {
 
     let mut luid = NET_LUID_LH { Value: 0 };
 
-    // Convert friendly name to LUID. Both pointers are valid (the alias is
-    // NUL-terminated and the LUID is a live local), so the only documented
-    // failure, ERROR_INVALID_PARAMETER, means that no interface has this
-    // alias. Report it as ERROR_FILE_NOT_FOUND, the status
-    // ConvertInterfaceIndexToLuid documents for an unknown interface, which
-    // std maps to `ErrorKind::NotFound`.
+    // Both pointers are valid (the alias is NUL-terminated and the LUID is a
+    // live local), so the only documented failure, ERROR_INVALID_PARAMETER,
+    // means that no interface has this alias. Report it as
+    // ERROR_FILE_NOT_FOUND, the status ConvertInterfaceIndexToLuid documents
+    // for an unknown interface, which std maps to `ErrorKind::NotFound`.
     let result = unsafe { ConvertInterfaceAliasToLuid(wide_name.as_ptr(), &mut luid) };
     match result {
       NO_ERROR => {}

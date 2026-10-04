@@ -58,10 +58,6 @@ fn best_default_route_interface(family: u16) -> io::Result<SmallVec<u32>> {
     Err(status) => return classify_table_error(status),
   };
 
-  // Build (InterfaceIndex -> Metric) for `family` so we can fold
-  // the per-interface metric into each candidate row's effective
-  // metric. Missing rows fall back to 0 — that matches what the
-  // kernel does on interfaces without an explicit metric.
   // SAFETY: `GetIpInterfaceTable` is an IP Helper table getter.
   let interfaces = match unsafe { OwnedMibTable::fetch(|table| GetIpInterfaceTable(family, table)) }
   {
@@ -120,10 +116,9 @@ fn best_default_route_interface(family: u16) -> io::Result<SmallVec<u32>> {
     }
   }
 
-  // Sort + dedup so two route rows that share an interface index
-  // (e.g. one v4 and one v6 default both pinned to the same
-  // adapter, or duplicate kernel rows during a churn window) don't
-  // make us walk the address table twice for the same ifindex.
+  // Sort + dedup so two default routes on one interface (equal-cost next
+  // hops, or duplicate kernel rows during a churn window) don't make us walk
+  // the address table twice for the same ifindex.
   best_oifs.sort_unstable();
   best_oifs.dedup();
 

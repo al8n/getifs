@@ -90,8 +90,8 @@ fn best_local_addrs_in<T: Net>(family: i32, out: &mut SmallVec<T>) -> io::Result
 
   // Fetch addresses for every selected interface, appending into the
   // caller-provided buffer. Returns immediately on the first syscall
-  // failure; partial results stay in `out` (consistent with Linux's
-  // `netlink_best_local_addrs_into`).
+  // failure and leaves the addresses already appended in `out`, unlike
+  // `netlink_best_local_addrs_into`, which truncates `out` on error.
   for idx in best_oifs {
     interface_addr_table_into(family, idx as u32, local_ip_filter, out)?;
   }

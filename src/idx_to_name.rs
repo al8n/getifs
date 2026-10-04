@@ -73,8 +73,8 @@ fn ifindex_to_name_in(idx: u32) -> io::Result<SmolStr> {
 
   let mut luid = NET_LUID_LH { Value: 0 };
 
-  // Convert index to LUID. ConvertInterface* returns the error code
-  // directly and does not promise to update the thread's last error.
+  // `ConvertInterface*` returns the error code directly and does not promise
+  // to update the thread's last error.
   let result = unsafe { ConvertInterfaceIndexToLuid(idx, &mut luid) };
   if result != NO_ERROR {
     return Err(win32_status_error(result));

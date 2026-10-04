@@ -95,9 +95,7 @@ mod tests {
   // `Some(iface) => ...` match arm of each entry point.
   //
   // Skipped on DragonFly: vmactions interface churn means `interface_by_index`
-  //     intermittently returns `None` for an interface
-  //     `interfaces()` just listed (same root cause as the cfg-gate
-  //     on `tests/interfaces.rs::ifis`).
+  // intermittently returns `None` for an interface `interfaces()` just listed.
   #[cfg(not(target_os = "dragonfly"))]
   #[test]
   fn ifname_to_v4_iface_first_interface() {
