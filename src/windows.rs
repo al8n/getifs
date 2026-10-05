@@ -1,4 +1,5 @@
 use std::{
+  collections::HashMap,
   io::{self, Error, Result},
   marker::PhantomData,
   mem::MaybeUninit,
@@ -87,6 +88,8 @@ const _: () = assert!(
 const SLOT_SIZE: usize = core::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>();
 const INITIAL_BUFFER_SIZE: u32 = 15_000;
 const MAX_TRIES: usize = 3;
+const ADAPTER_QUERY_FLAGS: GET_ADAPTERS_ADDRESSES_FLAGS =
+  GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_INCLUDE_ALL_INTERFACES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterQueryStatus {
@@ -181,7 +184,7 @@ impl Information {
       let result = unsafe {
         GetAdaptersAddresses(
           AF_UNSPEC as u32,
-          GAA_FLAG_INCLUDE_PREFIX,
+          ADAPTER_QUERY_FLAGS,
           std::ptr::null() as _,
           buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
           &mut size,
@@ -336,8 +339,77 @@ fn adapter_index(adapter: &IP_ADAPTER_ADDRESSES_LH) -> u32 {
   index
 }
 
+#[inline]
+fn interface_luid(luid: &NET_LUID_LH) -> u64 {
+  // SAFETY: `NET_LUID_LH` is a 64-bit union and every bit pattern is a valid
+  // `u64`. Windows initializes the complete LUID field in both snapshots.
+  unsafe { luid.Value }
+}
+
+fn interface_admin_statuses() -> io::Result<HashMap<u64, NET_IF_ADMIN_STATUS>> {
+  let table = mib::interface_table()?;
+  let mut statuses = HashMap::with_capacity(table.rows().len());
+  for row in table.rows() {
+    statuses.insert(interface_luid(&row.InterfaceLuid), row.AdminStatus);
+  }
+  Ok(statuses)
+}
+
+fn adapter_flags(
+  adapter: &IP_ADAPTER_ADDRESSES_LH,
+  admin_status: Option<NET_IF_ADMIN_STATUS>,
+) -> Flags {
+  let mut flags = Flags::empty();
+  if admin_status == Some(NET_IF_ADMIN_STATUS_UP) {
+    flags |= Flags::UP;
+  }
+  if adapter.OperStatus == IfOperStatusUp {
+    flags |= Flags::RUNNING;
+  }
+
+  match adapter.IfType {
+    IF_TYPE_ETHERNET_CSMACD | IF_TYPE_IEEE80211 | IF_TYPE_IEEE1394 | IF_TYPE_ISO88025_TOKENRING => {
+      flags |= Flags::BROADCAST | Flags::MULTICAST;
+    }
+    IF_TYPE_PPP | IF_TYPE_TUNNEL => {
+      flags |= Flags::POINTOPOINT | Flags::MULTICAST;
+    }
+    IF_TYPE_SOFTWARE_LOOPBACK => {
+      flags |= Flags::LOOPBACK | Flags::MULTICAST;
+    }
+    IF_TYPE_ATM => {
+      flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
+    }
+    _ => {}
+  }
+
+  flags
+}
+
+fn interface_from_adapter(
+  adapter: &IP_ADAPTER_ADDRESSES_LH,
+  index: u32,
+  name: smol_str::SmolStr,
+  admin_status: Option<NET_IF_ADMIN_STATUS>,
+) -> Interface {
+  let mtu = if adapter.Mtu == 0xffffffff {
+    0
+  } else {
+    adapter.Mtu
+  };
+
+  Interface {
+    index,
+    name,
+    flags: adapter_flags(adapter, admin_status),
+    mtu,
+    mac_addr: adapter_mac_address(adapter),
+  }
+}
+
 pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>> {
   let info = Information::fetch()?;
+  let admin_statuses = interface_admin_statuses()?;
   let mut interfaces = TinyVec::new();
 
   for adapter in info.iter() {
@@ -353,45 +425,12 @@ pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>
       continue;
     };
 
-    let mut flags = Flags::empty();
-    if adapter.OperStatus == IfOperStatusUp {
-      flags |= Flags::UP | Flags::RUNNING;
-    }
-
-    match adapter.IfType {
-      IF_TYPE_ETHERNET_CSMACD
-      | IF_TYPE_IEEE80211
-      | IF_TYPE_IEEE1394
-      | IF_TYPE_ISO88025_TOKENRING => {
-        flags |= Flags::BROADCAST | Flags::MULTICAST;
-      }
-      IF_TYPE_PPP | IF_TYPE_TUNNEL => {
-        flags |= Flags::POINTOPOINT | Flags::MULTICAST;
-      }
-      IF_TYPE_SOFTWARE_LOOPBACK => {
-        flags |= Flags::LOOPBACK | Flags::MULTICAST;
-      }
-      IF_TYPE_ATM => {
-        flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
-      }
-      _ => {}
-    }
-
-    let mtu = if adapter.Mtu == 0xffffffff {
-      0
-    } else {
-      adapter.Mtu
-    };
-
-    let hardware_addr = adapter_mac_address(adapter);
-
-    interfaces.push(Interface {
-      index,
-      name,
-      flags,
-      mtu,
-      mac_addr: hardware_addr,
-    });
+    // `GetAdaptersAddresses` and `GetIfTable2` are separate weak snapshots.
+    // A missing LUID can be an ordinary removal race; return the adapter
+    // without manufacturing administrative state. Operational state still
+    // comes directly from this adapter's own snapshot.
+    let admin_status = admin_statuses.get(&interface_luid(&adapter.Luid)).copied();
+    interfaces.push(interface_from_adapter(adapter, index, name, admin_status));
 
     if idx.is_some() {
       break;
@@ -559,6 +598,82 @@ fn sockaddr_to_ipaddr(family: u16, sockaddr: *const SOCKADDR) -> Option<IpAddr> 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn flags_for(admin_status: Option<NET_IF_ADMIN_STATUS>, oper_status: IF_OPER_STATUS) -> Flags {
+    let adapter = IP_ADAPTER_ADDRESSES_LH {
+      OperStatus: oper_status,
+      ..Default::default()
+    };
+    adapter_flags(&adapter, admin_status)
+  }
+
+  #[test]
+  fn adapter_query_requests_prefixes_and_all_interfaces() {
+    assert_eq!(
+      ADAPTER_QUERY_FLAGS,
+      GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_INCLUDE_ALL_INTERFACES
+    );
+  }
+
+  #[test]
+  fn administrative_and_operational_flags_are_independent() {
+    assert_eq!(
+      flags_for(Some(NET_IF_ADMIN_STATUS_UP), IfOperStatusUp),
+      Flags::UP | Flags::RUNNING
+    );
+    assert_eq!(
+      flags_for(Some(NET_IF_ADMIN_STATUS_UP), IfOperStatusDown),
+      Flags::UP
+    );
+    assert_eq!(
+      flags_for(Some(NET_IF_ADMIN_STATUS_DOWN), IfOperStatusUp),
+      Flags::RUNNING
+    );
+    assert_eq!(
+      flags_for(Some(NET_IF_ADMIN_STATUS_DOWN), IfOperStatusDown),
+      Flags::empty()
+    );
+  }
+
+  #[test]
+  fn unknown_testing_and_missing_states_do_not_suppress_known_state() {
+    assert_eq!(
+      flags_for(Some(NET_IF_ADMIN_STATUS_UP), IfOperStatusUnknown),
+      Flags::UP
+    );
+    assert_eq!(
+      flags_for(Some(NET_IF_ADMIN_STATUS_TESTING), IfOperStatusUp),
+      Flags::RUNNING
+    );
+    assert_eq!(flags_for(Some(99), IfOperStatusTesting), Flags::empty());
+    assert_eq!(flags_for(None, IfOperStatusUp), Flags::RUNNING);
+  }
+
+  #[test]
+  fn unbound_adapter_retains_interface_metadata_and_capabilities() {
+    let adapter = IP_ADAPTER_ADDRESSES_LH {
+      Mtu: 9_000,
+      IfType: IF_TYPE_ETHERNET_CSMACD,
+      OperStatus: IfOperStatusDown,
+      ..Default::default()
+    };
+    assert!(adapter.FirstUnicastAddress.is_null());
+
+    let interface = interface_from_adapter(
+      &adapter,
+      42,
+      smol_str::SmolStr::new("unbound"),
+      Some(NET_IF_ADMIN_STATUS_UP),
+    );
+    assert_eq!(interface.index(), 42);
+    assert_eq!(interface.name(), "unbound");
+    assert_eq!(interface.mtu(), 9_000);
+    assert_eq!(interface.mac_addr(), None);
+    assert_eq!(
+      interface.flags(),
+      Flags::UP | Flags::BROADCAST | Flags::MULTICAST
+    );
+  }
 
   #[test]
   fn adapter_status_preserves_empty_and_error_outcomes() {

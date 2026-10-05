@@ -40,6 +40,12 @@
 
 ### Backend hardening
 
+- Decode compact `AF_UNSPEC` BSD netmasks using the destination, gateway,
+  or interface-address family so IPv6 network-prefix routes are not silently
+  omitted. Retain declared sockaddr bounds and IPv4 compatibility.
+- Windows interface enumeration includes NDIS adapters not bound to IPv4
+  or IPv6. Read administrative status from a bulk IP Helper interface table
+  so `UP` and operational `RUNNING` are reported independently.
 - Linux netlink validates multipart framing, terminal messages, and attributes
   before decoding interface, address, route, and MAC data.
 - Linux netlink checks every dump message for `NLM_F_DUMP_INTR`: the

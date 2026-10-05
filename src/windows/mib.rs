@@ -6,8 +6,8 @@ use std::io;
 use windows_sys::Win32::{
   Foundation::{ERROR_NOT_FOUND, ERROR_NOT_SUPPORTED, NO_ERROR},
   NetworkManagement::IpHelper::{
-    FreeMibTable, GetIpForwardTable2, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
-    MIB_IPINTERFACE_ROW, MIB_IPINTERFACE_TABLE, MIB_UNICASTIPADDRESS_ROW,
+    FreeMibTable, GetIfTable2, GetIpForwardTable2, MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2,
+    MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_IPINTERFACE_TABLE, MIB_UNICASTIPADDRESS_ROW,
     MIB_UNICASTIPADDRESS_TABLE,
   },
 };
@@ -59,6 +59,7 @@ macro_rules! mib_table {
 }
 
 mib_table! {
+  MIB_IF_TABLE2 => MIB_IF_ROW2,
   MIB_IPFORWARD_TABLE2 => MIB_IPFORWARD_ROW2,
   MIB_IPINTERFACE_TABLE => MIB_IPINTERFACE_ROW,
   MIB_UNICASTIPADDRESS_TABLE => MIB_UNICASTIPADDRESS_ROW,
@@ -130,6 +131,17 @@ unsafe fn rows_of<'a, T: MibTable>(table: *const T) -> &'a [T::Row] {
   unsafe { core::slice::from_raw_parts(T::first_row(table), T::num_entries(table)) }
 }
 
+/// Fetches the MIB-II table containing administrative interface state.
+///
+/// The returned status is the Win32 error code itself; `GetIfTable2` does not
+/// report failures through the thread's last-error slot.
+pub(super) fn interface_table() -> io::Result<OwnedMibTable<MIB_IF_TABLE2>> {
+  // SAFETY: `GetIfTable2` allocates a `MIB_IF_TABLE2` that must be released
+  // with `FreeMibTable`, exactly matching `OwnedMibTable::fetch`'s contract.
+  unsafe { OwnedMibTable::fetch(|table| GetIfTable2(table)) }
+    .map_err(|status| io::Error::from_raw_os_error(status as i32))
+}
+
 /// Fetches the forwarding table for one address family.
 ///
 /// Returns `Ok(None)` when that family has no table: `ERROR_NOT_FOUND` means
@@ -162,6 +174,7 @@ fn empty_family(status: u32) -> io::Result<()> {
 mod tests {
   use super::*;
   use core::mem::offset_of;
+  use windows_sys::Win32::NetworkManagement::Ndis::NET_IF_ADMIN_STATUS_UP;
 
   /// The layout IP Helper allocates for a three-row forwarding table.
   #[repr(C)]
@@ -173,6 +186,18 @@ mod tests {
   const _: () = {
     assert!(offset_of!(Fixture, num_entries) == offset_of!(MIB_IPFORWARD_TABLE2, NumEntries));
     assert!(offset_of!(Fixture, rows) == offset_of!(MIB_IPFORWARD_TABLE2, Table));
+  };
+
+  /// The layout IP Helper allocates for a three-row interface table.
+  #[repr(C)]
+  struct InterfaceFixture {
+    num_entries: u32,
+    rows: [MIB_IF_ROW2; 3],
+  }
+
+  const _: () = {
+    assert!(offset_of!(InterfaceFixture, num_entries) == offset_of!(MIB_IF_TABLE2, NumEntries));
+    assert!(offset_of!(InterfaceFixture, rows) == offset_of!(MIB_IF_TABLE2, Table));
   };
 
   #[test]
@@ -191,6 +216,32 @@ mod tests {
     let rows = unsafe { rows_of(table) };
     let indices: Vec<u32> = rows.iter().map(|row| row.InterfaceIndex).collect();
     assert_eq!(indices, [10, 11, 12]);
+  }
+
+  #[test]
+  fn interface_rows_cover_the_whole_allocation() {
+    let mut fixture = InterfaceFixture {
+      num_entries: 3,
+      rows: [MIB_IF_ROW2::default(); 3],
+    };
+    for (i, row) in fixture.rows.iter_mut().enumerate() {
+      row.InterfaceIndex = 20 + i as u32;
+      row.AdminStatus = if i == 1 {
+        NET_IF_ADMIN_STATUS_UP
+      } else {
+        i as i32
+      };
+    }
+
+    let table = core::ptr::addr_of!(fixture).cast::<MIB_IF_TABLE2>();
+    // SAFETY: `InterfaceFixture` has the SDK table layout with three
+    // initialized rows, and it outlives the returned slice.
+    let rows = unsafe { rows_of(table) };
+    let metadata: Vec<_> = rows
+      .iter()
+      .map(|row| (row.InterfaceIndex, row.AdminStatus))
+      .collect();
+    assert_eq!(metadata, [(20, 0), (21, NET_IF_ADMIN_STATUS_UP), (22, 2),]);
   }
 
   #[test]

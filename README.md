@@ -105,6 +105,8 @@ Windows | `GetAdaptersAddresses`
   RFC 6890 ranges that are not in its forwarding blacklist. It includes RFC
   1918, CGNAT, and IPv6 ULA, and excludes documentation, loopback, and
   link-local ranges; it is not a synonym for RFC 1918 alone.
+  Classification follows the IANA snapshot in the resolved compatible
+  `iprfc` 1.x release, not an immutable snapshot tied to a getifs release.
 - `get_interface_mtu` and `get_ifaddr_mtu` return a local link MTU, not a
   remote path MTU. IP-only MTU lookup returns `NotFound` for no local match
   and `InvalidInput` for an address assigned to distinct interfaces. IPv6
