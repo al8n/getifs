@@ -43,9 +43,18 @@
 - Decode compact `AF_UNSPEC` BSD netmasks using the destination, gateway,
   or interface-address family so IPv6 network-prefix routes are not silently
   omitted. Retain declared sockaddr bounds and IPv4 compatibility.
-- Windows interface enumeration includes NDIS adapters not bound to IPv4
-  or IPv6. Read administrative status from a bulk IP Helper interface table
-  so `UP` and operational `RUNNING` are reported independently.
+- Windows lists interfaces from the IP Helper interface table
+  (`GetIfTable2Ex` without per-interface statistics, or `GetIfEntry2` for a
+  lookup by index or name) instead of `GetAdaptersAddresses`:
+  - Every NDIS interface except filter modules is listed (filter modules are
+    the QoS and WFP lightweight filters and Hyper-V switch extensions, which
+    repeat their adapter's MAC). Adapters not bound to IPv4 or IPv6, WAN
+    miniports and tunnel pseudo-interfaces are therefore listed too.
+  - `UP` follows the administrative status and `RUNNING` the operational
+    status, so an enabled adapter without a link is `UP` but not `RUNNING`.
+  - `Interface::mtu` is the link MTU; a lower per-family IP MTU set with
+    `netsh` is no longer reflected.
+  - Address queries still request only IP-bound adapters.
 - Linux netlink validates multipart framing, terminal messages, and attributes
   before decoding interface, address, route, and MAC data.
 - Linux netlink checks every dump message for `NLM_F_DUMP_INTR`: the

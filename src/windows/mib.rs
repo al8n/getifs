@@ -4,9 +4,10 @@
 use std::io;
 
 use windows_sys::Win32::{
-  Foundation::{ERROR_NOT_FOUND, ERROR_NOT_SUPPORTED, NO_ERROR},
+  Foundation::{ERROR_INVALID_PARAMETER, ERROR_NOT_FOUND, ERROR_NOT_SUPPORTED, NO_ERROR},
   NetworkManagement::IpHelper::{
-    FreeMibTable, GetIfTable2, GetIpForwardTable2, MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2,
+    FreeMibTable, GetIfEntry2, GetIfTable2, GetIfTable2Ex, GetIpForwardTable2,
+    MibIfTableNormalWithoutStatistics, MIB_IF_ROW2, MIB_IF_TABLE2, MIB_IPFORWARD_ROW2,
     MIB_IPFORWARD_TABLE2, MIB_IPINTERFACE_ROW, MIB_IPINTERFACE_TABLE, MIB_UNICASTIPADDRESS_ROW,
     MIB_UNICASTIPADDRESS_TABLE,
   },
@@ -131,15 +132,74 @@ unsafe fn rows_of<'a, T: MibTable>(table: *const T) -> &'a [T::Row] {
   unsafe { core::slice::from_raw_parts(T::first_row(table), T::num_entries(table)) }
 }
 
-/// Fetches the MIB-II table containing administrative interface state.
+/// Fetches the interface table, one row per NDIS interface.
 ///
-/// The returned status is the Win32 error code itself; `GetIfTable2` does not
-/// report failures through the thread's last-error slot.
+/// The rows are requested at `MibIfTableNormalWithoutStatistics`, which skips
+/// the statistics query that a plain `GetIfTable2` makes of every interface;
+/// no caller reads statistics, and some drivers answer that query slowly. The
+/// level exists from Windows 10 version 1703; earlier releases reject it with
+/// `ERROR_INVALID_PARAMETER`, and the plain call is made instead. The status
+/// is the Win32 error code the getter returns; it is not reported through the
+/// thread's last-error slot.
 pub(super) fn interface_table() -> io::Result<OwnedMibTable<MIB_IF_TABLE2>> {
-  // SAFETY: `GetIfTable2` allocates a `MIB_IF_TABLE2` that must be released
-  // with `FreeMibTable`, exactly matching `OwnedMibTable::fetch`'s contract.
-  unsafe { OwnedMibTable::fetch(|table| GetIfTable2(table)) }
-    .map_err(|status| io::Error::from_raw_os_error(status as i32))
+  // SAFETY: `GetIfTable2Ex` and `GetIfTable2` allocate a `MIB_IF_TABLE2` that
+  // must be released with `FreeMibTable`, matching `OwnedMibTable::fetch`.
+  unsafe {
+    fetch_with_level_fallback(
+      |table| GetIfTable2Ex(MibIfTableNormalWithoutStatistics, table),
+      |table| GetIfTable2(table),
+    )
+  }
+  .map_err(|status| io::Error::from_raw_os_error(status as i32))
+}
+
+/// Fetches a table with `get`, and with `fallback` when `get` rejects its
+/// level with `ERROR_INVALID_PARAMETER`. A table stored by the rejected call
+/// is freed before the fallback runs.
+///
+/// # Safety
+///
+/// Both getters must meet the contract of [`OwnedMibTable::fetch`].
+unsafe fn fetch_with_level_fallback<T: MibTable>(
+  get: impl FnOnce(*mut *mut T) -> u32,
+  fallback: impl FnOnce(*mut *mut T) -> u32,
+) -> Result<OwnedMibTable<T>, u32> {
+  // SAFETY: guaranteed by the caller.
+  match unsafe { OwnedMibTable::fetch(get) } {
+    // SAFETY: guaranteed by the caller.
+    Err(ERROR_INVALID_PARAMETER) => unsafe { OwnedMibTable::fetch(fallback) },
+    result => result,
+  }
+}
+
+/// Fetches the interface-table row of one interface index.
+///
+/// Returns `Ok(None)` for index 0, which names no interface; the lookup would
+/// reject a row that carries neither a LUID nor an index as an invalid
+/// parameter. An index the system does not know fails with
+/// `ERROR_FILE_NOT_FOUND`.
+///
+/// The plain `GetIfEntry2` reads this one interface's statistics as well.
+/// `GetIfEntry2Ex` could skip them, but it exists only from Windows 10 version
+/// 1703, and importing it would keep the crate from loading on earlier
+/// releases.
+pub(super) fn interface_row(index: u32) -> io::Result<Option<MIB_IF_ROW2>> {
+  if index == 0 {
+    return Ok(None);
+  }
+
+  // A zero LUID asks for the lookup by `InterfaceIndex`.
+  let mut row = MIB_IF_ROW2 {
+    InterfaceIndex: index,
+    ..Default::default()
+  };
+  // SAFETY: `row` is a valid, writable `MIB_IF_ROW2`, and the call writes
+  // only into it.
+  let status = unsafe { GetIfEntry2(&mut row) };
+  if status != NO_ERROR {
+    return Err(io::Error::from_raw_os_error(status as i32));
+  }
+  Ok(Some(row))
 }
 
 /// Fetches the forwarding table for one address family.
@@ -256,6 +316,37 @@ mod tests {
     // SAFETY: the stand-in getter never stores a pointer.
     let result = unsafe { OwnedMibTable::<MIB_IPFORWARD_TABLE2>::fetch(|_| ERROR_NOT_FOUND) };
     assert_eq!(result.err(), Some(ERROR_NOT_FOUND));
+  }
+
+  #[test]
+  fn a_rejected_level_falls_back_once() {
+    let fallbacks = core::cell::Cell::new(0);
+    // SAFETY: neither stand-in getter stores a pointer.
+    let result = unsafe {
+      fetch_with_level_fallback::<MIB_IF_TABLE2>(
+        |_| ERROR_INVALID_PARAMETER,
+        |_| {
+          fallbacks.set(fallbacks.get() + 1);
+          ERROR_NOT_FOUND
+        },
+      )
+    };
+    assert_eq!(result.err(), Some(ERROR_NOT_FOUND));
+    assert_eq!(fallbacks.get(), 1);
+  }
+
+  #[test]
+  fn other_failures_do_not_fall_back() {
+    // SAFETY: neither stand-in getter stores a pointer.
+    let result = unsafe {
+      fetch_with_level_fallback::<MIB_IF_TABLE2>(|_| ERROR_NOT_FOUND, |_| unreachable!())
+    };
+    assert_eq!(result.err(), Some(ERROR_NOT_FOUND));
+  }
+
+  #[test]
+  fn interface_index_zero_names_no_interface() {
+    assert!(interface_row(0).unwrap().is_none());
   }
 
   #[test]

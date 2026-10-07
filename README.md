@@ -96,7 +96,7 @@ OS | Approach
 Linux (no `libc`) | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
 Android (no `libc`) | netlink with kernel auto-bind + `SIOCGIF*` ioctl fallback — see [Android](#android)
 BSD-like | `sysctl`
-Windows | `GetAdaptersAddresses`
+Windows | IP Helper: `GetIfTable2Ex` / `GetIfEntry2` (interfaces), `GetAdaptersAddresses` (addresses), routing tables (routes, gateways)
 
 ## API contract
 
