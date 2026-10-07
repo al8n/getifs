@@ -1,7 +1,8 @@
 use ipnet::{ip_mask_to_prefix, Ipv4Net, Ipv6Net};
 use libc::{
   c_void, if_msghdr, size_t, sysctl, AF_INET, AF_INET6, AF_LINK, AF_ROUTE, AF_UNSPEC, CTL_NET,
-  NET_RT_IFLIST, RTAX_BRD, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO, RTM_NEWADDR, RTM_VERSION,
+  NET_RT_IFLIST, RTAX_BRD, RTAX_DST, RTAX_GATEWAY, RTAX_IFA, RTAX_MAX, RTAX_NETMASK, RTM_IFINFO,
+  RTM_NEWADDR, RTM_VERSION,
 };
 // `NET_RT_IFLIST2` is an Apple-only sysctl target. Keep it out of the
 // cross-BSD top-level import — the libc crate does not expose it on
@@ -121,10 +122,9 @@ fn build_routev4(
   //
   // - `Some(IpAddr::V4(m))` with a v4 dst: real netmask, decode it.
   // - Anything else (`None`, or family-mismatched `Some(IpAddr::V6(_))`
-  //   from `parse_kernel_inet_addr`'s AF_UNSPEC fallback when the
-  //   kernel sent the mask in short kernel-form): the kernel didn't
-  //   give us a decodable explicit mask, so fall back to the
-  //   per-route default below.
+  //   from an ambiguous family-less mask): the kernel didn't give us a
+  //   decodable same-family mask, so fall back to the per-route default
+  //   below.
   //
   // Default rules when the explicit mask is unavailable:
   // - `dst.is_unspecified()`: BSD encodes the default route's mask
@@ -167,10 +167,9 @@ fn build_routev6(
   }
   // See `build_routev4` for the full per-arm rationale; the v6 case
   // reads identically, with `/128` for host routes and `/0` for the
-  // unspecified destination. The `_` arm catches both `None` and the
-  // family-mismatched `Some(IpAddr::V4(_))` that
-  // `parse_kernel_inet_addr` produces when it can't decode the v6
-  // mask's short kernel-form encoding.
+  // unspecified destination. The `_` arm catches both `None` and a
+  // family-mismatched `Some(IpAddr::V4(_))` from an ambiguous,
+  // family-less compact mask.
   let prefix_len = match netmask {
     Some(IpAddr::V6(m)) => ip_mask_to_prefix(IpAddr::V6(m)).ok()?,
     _ if dst_v6.is_unspecified() => 0,
@@ -441,6 +440,7 @@ fn parse(mut b: &[u8]) -> io::Result<Option<(SmolStr, Option<MacAddr>)>> {
   Ok(Some((name, addr)))
 }
 
+#[cfg(fuzzing)]
 fn parse_kernel_inet_addr(b: &[u8]) -> io::Result<(usize, IpAddr)> {
   if b.is_empty() {
     return Err(invalid_address());
@@ -522,6 +522,7 @@ const fn roundup(l: usize) -> usize {
   (l + KERNAL_ALIGN - 1) & !(KERNAL_ALIGN - 1)
 }
 
+#[cfg(any(test, fuzzing))]
 const SOCK4: usize = size_of::<libc::sockaddr_in>();
 const SOCK6: usize = size_of::<libc::sockaddr_in6>();
 
@@ -602,6 +603,7 @@ fn strip_kame_scope(mut ip: [u8; 16]) -> Ipv6Addr {
   ip.into()
 }
 
+#[cfg(any(test, fuzzing))]
 pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> {
   // Sysctl returns a `Vec<u8>`, which only formally guarantees u8
   // alignment for its data pointer. The kernel pads each routing
@@ -613,8 +615,9 @@ pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> 
   // target type. `read_unaligned` copies into an aligned local
   // without that assumption; the resulting load is the same on x86 /
   // ARM, but defined behaviour everywhere (including strict-alignment
-  // targets like SPARC). The address, route, and multicast walkers
-  // decode every full-size sockaddr through this function.
+  // targets like SPARC). Production routing parsing decodes bounded frames
+  // with `decode_full_inet_addr` and `parse_short_inet_addr`, so this helper
+  // is compiled only for tests and fuzzing.
   match af {
     AF_INET => {
       if b.len() < SOCK4 {
@@ -646,11 +649,11 @@ pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> 
   }
 }
 
-pub(super) fn parse_addrs(
-  addrs: u32,
-  mut b: &[u8],
-) -> io::Result<[Option<IpAddr>; RTAX_MAX as usize]> {
-  let mut as_ = [None; RTAX_MAX as usize];
+/// Split the advertised routing-message sockaddrs into exact declared-length
+/// frames before decoding any of them. In particular, do not let a compact
+/// address read padding or the beginning of the next sockaddr.
+fn sockaddr_frames(addrs: u32, mut b: &[u8]) -> io::Result<[Option<&[u8]>; RTAX_MAX as usize]> {
+  let mut frames = [None; RTAX_MAX as usize];
 
   #[allow(clippy::needless_range_loop)]
   for i in 0..RTAX_MAX as usize {
@@ -658,95 +661,114 @@ pub(super) fn parse_addrs(
       continue;
     }
 
-    // The kernel claimed slot `i` is present, so a sockaddr is
-    // expected. Breaking out of the loop on `b.len() < KERNAL_ALIGN`
-    // would silently turn a truncated message — for instance a route
-    // record advertising `RTAX_DST` with no body — into
-    // `as_[RTAX_DST] = None`, which the route_table builder folds into
-    // a synthetic `0.0.0.0/0` / `::/0` default route. Surface it as a
-    // malformed message instead of fabricating data.
+    // An advertised slot needs at least one alignment unit, the size of the
+    // all-zero filler of an empty sockaddr. A shorter remainder is truncation,
+    // not an absent slot: reading it as absent would fabricate data, such as a
+    // default route from a missing `RTAX_DST`.
     if b.len() < KERNAL_ALIGN {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "message too short",
-      ));
+      return Err(message_too_short());
     }
 
-    if i <= RTAX_BRD as usize {
-      match b[1] as i32 {
-        AF_LINK => {
-          let l = roundup(b[0] as usize);
-          if b.len() < l {
-            return Err(io::Error::new(
-              io::ErrorKind::InvalidData,
-              "message too short",
-            ));
-          }
-          b = &b[l..];
-        }
-        AF_INET | AF_INET6 => {
-          let af = b[1] as i32;
-          let sa_len = b[0] as usize;
-          let needed = if af == AF_INET { SOCK4 } else { SOCK6 };
-          let l = roundup(sa_len);
-          if b.len() < l || b.len() < sa_len {
-            return Err(io::Error::new(
-              io::ErrorKind::InvalidData,
-              "message too short",
-            ));
-          }
-          // BSD's NET_RT_DUMP encodes netmasks as truncated sockaddrs:
-          // `sa_family = AF_INET[6]` but `sa_len` is short and only the
-          // leading address bytes that differ from zero are present.
-          // The full-length `parse_inet_addr` rejects those because it
-          // requires `b.len() >= size_of::<sockaddr_in[6]>()`. The
-          // short-form decoder zero-extends the trailing bytes —
-          // correct semantics for a netmask, but wrong for any other
-          // slot (a short RTAX_DST or RTAX_GATEWAY would silently
-          // become an unspecified address, which the route builder
-          // would happily turn into a fake default route or a fake
-          // on-link gateway). Restrict the short-form fallback to
-          // `RTAX_NETMASK`. Any other slot accepts a sub-`SOCK4`/`SOCK6`
-          // length only when the declared bytes still hold the whole
-          // address (a compact `sin_len = 8` gateway, for instance);
-          // anything shorter is a malformed message → `InvalidData`.
-          let addr = if sa_len >= needed {
-            let (_, a) = parse_inet_addr(af, b)?;
-            a
-          } else if i == RTAX_NETMASK as usize {
-            parse_short_inet_addr(af, &b[..sa_len])?
-          } else if let Some(a) = decode_full_inet_addr(af, &b[..sa_len]) {
-            a
-          } else {
-            return Err(io::Error::new(
-              io::ErrorKind::InvalidData,
-              "short sockaddr outside RTAX_NETMASK",
-            ));
-          };
-          as_[i] = Some(addr);
-          b = &b[l..];
-        }
-        _ => {
-          let (l, addr) = parse_kernel_inet_addr(b)?;
-          as_[i] = Some(addr);
-          let ll = roundup(l);
-          if b.len() < ll {
-            b = &b[l..];
-          } else {
-            b = &b[ll..];
-          }
+    let sa_len = b[0] as usize;
+    let padded_len = roundup(sa_len);
+    if b.len() < sa_len || b.len() < padded_len {
+      // Darwin can omit the trailing alignment bytes of the final sockaddr.
+      // It cannot do so before another advertised sockaddr, because that
+      // would make the next frame's offset ambiguous.
+      #[cfg(apple)]
+      {
+        let has_later = ((i + 1)..RTAX_MAX as usize).any(|next| addrs & (1 << next) != 0);
+        if !has_later && sa_len != 0 && b.len() >= sa_len {
+          frames[i] = Some(&b[..sa_len]);
+          b = &b[sa_len..];
+          continue;
         }
       }
-    } else {
-      let l = roundup(b[0] as usize);
-      if b.len() < l {
-        return Err(io::Error::new(
-          io::ErrorKind::InvalidData,
-          "message too short",
-        ));
-      }
-      b = &b[l..];
+      return Err(message_too_short());
     }
+
+    // `sa_len == 0` is an aligned filler, not an unspecified address or a
+    // `/0` mask. Keep the slot absent but consume its alignment unit.
+    if sa_len != 0 {
+      frames[i] = Some(&b[..sa_len]);
+    }
+    b = &b[padded_len..];
+  }
+
+  Ok(frames)
+}
+
+#[inline]
+fn explicit_inet_family(sa: Option<&[u8]>) -> Option<i32> {
+  match sa?.get(1).copied().map(i32::from) {
+    Some(AF_INET) => Some(AF_INET),
+    Some(AF_INET6) => Some(AF_INET6),
+    _ => None,
+  }
+}
+
+/// Decode a family-less sockaddr without letting it reach beyond its declared
+/// frame. Only a full `sockaddr_in6` is read as IPv6; any other frame is read
+/// as IPv4, the kernel's old-fashioned meaning of a missing family. Returns
+/// `None` unless the frame holds a whole address.
+fn decode_legacy_inet_addr(sa: &[u8]) -> Option<IpAddr> {
+  let af = if sa.len() == SOCK6 { AF_INET6 } else { AF_INET };
+  decode_full_inet_addr(af, sa)
+}
+
+fn decode_address_frame(slot: usize, sa: &[u8]) -> io::Result<Option<IpAddr>> {
+  if slot > RTAX_BRD as usize {
+    return Ok(None);
+  }
+
+  match explicit_inet_family(Some(sa)) {
+    Some(af) => decode_full_inet_addr(af, sa)
+      .ok_or_else(invalid_address)
+      .map(Some),
+    None if sa.get(1).copied().map(i32::from) == Some(AF_LINK) => Ok(None),
+    None => {
+      let addr = decode_legacy_inet_addr(sa);
+      if matches!(slot, x if x == RTAX_DST as usize || x == RTAX_GATEWAY as usize) {
+        // An incomplete destination or gateway is malformed, not absent: an
+        // absent destination reads as a default route and an absent gateway
+        // as an on-link route.
+        addr.ok_or_else(invalid_address).map(Some)
+      } else {
+        Ok(addr)
+      }
+    }
+  }
+}
+
+fn decode_netmask_frame(sa: &[u8], family_hint: Option<i32>) -> io::Result<IpAddr> {
+  match explicit_inet_family(Some(sa)).or(family_hint) {
+    Some(af) => parse_short_inet_addr(af, sa),
+    // With no explicit family and no hint, only a full `sockaddr_in6` is read
+    // as IPv6; an ambiguous compact mask is read as IPv4.
+    None if sa.len() == SOCK6 => parse_short_inet_addr(AF_INET6, sa),
+    None => parse_short_inet_addr(AF_INET, sa),
+  }
+}
+
+pub(super) fn parse_addrs(addrs: u32, b: &[u8]) -> io::Result<[Option<IpAddr>; RTAX_MAX as usize]> {
+  let frames = sockaddr_frames(addrs, b)?;
+  let mut as_ = [None; RTAX_MAX as usize];
+
+  #[allow(clippy::needless_range_loop)]
+  for i in 0..RTAX_MAX as usize {
+    if i == RTAX_NETMASK as usize {
+      continue;
+    }
+    if let Some(sa) = frames[i] {
+      as_[i] = decode_address_frame(i, sa)?;
+    }
+  }
+
+  let family_hint = [RTAX_DST, RTAX_GATEWAY, RTAX_IFA]
+    .into_iter()
+    .find_map(|slot| explicit_inet_family(frames[slot as usize]));
+  if let Some(sa) = frames[RTAX_NETMASK as usize] {
+    as_[RTAX_NETMASK as usize] = Some(decode_netmask_frame(sa, family_hint)?);
   }
 
   Ok(as_)
@@ -1366,6 +1388,29 @@ mod tests {
     padded_sockaddr(&sa)
   }
 
+  /// A compact `AF_UNSPEC` sockaddr whose IPv4-shaped address bytes start at
+  /// the regular `sockaddr_in::sin_addr` offset. Route netmasks use this
+  /// family-less shape on several BSDs.
+  fn unspec_v4_sockaddr(bytes: &[u8]) -> Vec<u8> {
+    assert!(bytes.len() <= 4);
+    let mut sa = vec![0u8; 4 + bytes.len()];
+    sa[0] = sa.len() as u8;
+    sa[1] = AF_UNSPEC as u8;
+    sa[4..].copy_from_slice(bytes);
+    padded_sockaddr(&sa)
+  }
+
+  /// A compact `AF_UNSPEC` sockaddr whose IPv6-shaped address bytes start at
+  /// the regular `sockaddr_in6::sin6_addr` offset.
+  fn unspec_v6_sockaddr(bytes: &[u8]) -> Vec<u8> {
+    assert!(bytes.len() <= 16);
+    let mut sa = vec![0u8; 8 + bytes.len()];
+    sa[0] = sa.len() as u8;
+    sa[1] = AF_UNSPEC as u8;
+    sa[8..].copy_from_slice(bytes);
+    padded_sockaddr(&sa)
+  }
+
   /// A routing message: a zeroed `H` header that carries the length,
   /// version, and type every BSD routing message starts with, then `body`.
   /// The header layout differs per BSD, so callers set any other field
@@ -1568,6 +1613,22 @@ mod tests {
   }
 
   #[test]
+  fn parse_addrs_decodes_complete_compact_unspec_destination_and_gateway() {
+    let mut body = unspec_v4_sockaddr(&[198, 51, 100, 0]);
+    body.extend(unspec_v4_sockaddr(&[192, 0, 2, 1]));
+
+    let addrs = parse_addrs(addrs_mask(&[RTAX_DST, RTAX_GATEWAY]), &body).unwrap();
+    assert_eq!(
+      addrs[RTAX_DST as usize],
+      Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 0)))
+    );
+    assert_eq!(
+      addrs[RTAX_GATEWAY as usize],
+      Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+    );
+  }
+
+  #[test]
   fn parse_addrs_strips_kame_scope_from_compact_v6_gateway() {
     // A 24-byte `sockaddr_in6` ends right after `sin6_addr`. KAME stores the
     // interface index in bytes 2..4 of a link-local address.
@@ -1609,6 +1670,184 @@ mod tests {
       Some(IpAddr::V4(Ipv4Addr::new(255, 0, 0, 0)))
     );
     assert!(parse_addrs(addrs_mask(&[RTAX_GATEWAY]), &short).is_err());
+  }
+
+  #[test]
+  fn route_walker_builds_connected_v6_from_compact_unspec_mask() {
+    let dst = Ipv6Addr::new(0x2001, 0xdb8, 0x1234, 0, 0, 0, 0, 1);
+    let mut body = sockaddr_in6(dst);
+    body.extend(unspec_v6_sockaddr(&[0xff; 8]));
+    let message = rt_message(
+      9,
+      libc::RTF_UP,
+      addrs_mask(&[RTAX_DST, RTAX_NETMASK]),
+      &body,
+    );
+
+    let mut routes = Vec::new();
+    route::parse_route_table(&message, |index, flags, dst, gateway, netmask| {
+      if let Some(dst) = dst {
+        if let Some(route) = build_routev6(index, flags, dst, gateway, netmask) {
+          routes.push(route);
+        }
+      }
+    })
+    .unwrap();
+
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].index(), 9);
+    assert_eq!(routes[0].destination(), &Ipv6Net::new(dst, 64).unwrap());
+    assert_eq!(routes[0].gateway(), None);
+  }
+
+  #[test]
+  fn route_walker_builds_tunnel_v6_from_compact_unspec_mask() {
+    let dst = Ipv6Addr::new(2001, 0xdb8, 0xfeed, 0, 0, 0, 0, 4);
+    let gateway = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+    let mut body = sockaddr_in6(dst);
+    body.extend(sockaddr_in6(gateway));
+    body.extend(unspec_v6_sockaddr(&[
+      0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+      0xfc,
+    ]));
+    let message = rt_message(
+      4,
+      libc::RTF_UP | libc::RTF_GATEWAY,
+      addrs_mask(&[RTAX_DST, RTAX_GATEWAY, RTAX_NETMASK]),
+      &body,
+    );
+
+    let mut routes = Vec::new();
+    route::parse_route_table(&message, |index, flags, dst, gateway, netmask| {
+      if let Some(dst) = dst {
+        if let Some(route) = build_routev6(index, flags, dst, gateway, netmask) {
+          routes.push(route);
+        }
+      }
+    })
+    .unwrap();
+
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].destination(), &Ipv6Net::new(dst, 126).unwrap());
+    assert_eq!(routes[0].gateway(), Some(gateway));
+  }
+
+  #[test]
+  fn parse_addrs_uses_destination_context_for_compact_unspec_v4_mask() {
+    let mut body = sockaddr_in(Ipv4Addr::new(198, 51, 100, 0));
+    body.extend(unspec_v4_sockaddr(&[255, 255, 255]));
+
+    let addrs = parse_addrs(addrs_mask(&[RTAX_DST, RTAX_NETMASK]), &body).unwrap();
+    assert_eq!(
+      addrs[RTAX_NETMASK as usize],
+      Some(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0)))
+    );
+  }
+
+  #[test]
+  fn parse_addrs_uses_gateway_context_for_compact_unspec_v6_mask() {
+    let gateway = Ipv6Addr::new(0x2001, 0xdb8, 0xbeef, 0, 0, 0, 0, 1);
+    let mut body = sockaddr_in6(gateway);
+    body.extend(unspec_v6_sockaddr(&[0xff; 8]));
+
+    let addrs = parse_addrs(addrs_mask(&[RTAX_GATEWAY, RTAX_NETMASK]), &body).unwrap();
+    assert_eq!(
+      addrs[RTAX_NETMASK as usize],
+      Some(IpAddr::V6(Ipv6Addr::new(
+        0xffff, 0xffff, 0xffff, 0xffff, 0, 0, 0, 0
+      )))
+    );
+  }
+
+  #[test]
+  fn parse_addrs_uses_later_ifa_context_for_compact_unspec_v6_mask() {
+    let ifa = Ipv6Addr::new(0x2001, 0xdb8, 0xabcd, 0, 0, 0, 0, 1);
+    let mut body = unspec_v6_sockaddr(&[0xff; 8]);
+    body.extend(sockaddr_in6(ifa));
+
+    let addrs = parse_addrs(addrs_mask(&[RTAX_NETMASK, RTAX_IFA]), &body).unwrap();
+    assert_eq!(
+      addrs[RTAX_NETMASK as usize],
+      Some(IpAddr::V6(Ipv6Addr::new(
+        0xffff, 0xffff, 0xffff, 0xffff, 0, 0, 0, 0
+      )))
+    );
+    assert_eq!(addrs[RTAX_IFA as usize], Some(IpAddr::V6(ifa)));
+  }
+
+  #[test]
+  fn parse_addrs_preserves_full_and_explicit_v6_masks() {
+    let full = Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0, 0, 0, 0);
+    let mut full_unspec = vec![0u8; SOCK6];
+    full_unspec[0] = SOCK6 as u8;
+    full_unspec[1] = AF_UNSPEC as u8;
+    full_unspec[8..24].copy_from_slice(&full.octets());
+    let addrs = parse_addrs(addrs_mask(&[RTAX_NETMASK]), &padded_sockaddr(&full_unspec)).unwrap();
+    assert_eq!(addrs[RTAX_NETMASK as usize], Some(IpAddr::V6(full)));
+
+    let explicit = Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0, 0, 0, 0);
+    let mut explicit_unspec = vec![0u8; 16];
+    explicit_unspec[0] = explicit_unspec.len() as u8;
+    explicit_unspec[1] = AF_INET6 as u8;
+    explicit_unspec[8..].copy_from_slice(&explicit.octets()[..8]);
+    let addrs = parse_addrs(
+      addrs_mask(&[RTAX_NETMASK]),
+      &padded_sockaddr(&explicit_unspec),
+    )
+    .unwrap();
+    assert_eq!(addrs[RTAX_NETMASK as usize], Some(IpAddr::V6(explicit)));
+  }
+
+  #[test]
+  fn parse_addrs_keeps_zero_filler_absent() {
+    let filler = padded_sockaddr(&[0]);
+    let addrs = parse_addrs(addrs_mask(&[RTAX_NETMASK]), &filler).unwrap();
+    assert_eq!(addrs[RTAX_NETMASK as usize], None);
+
+    let dst = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    assert!(build_routev6(1, libc::RTF_UP, dst.into(), None, None).is_none());
+  }
+
+  #[test]
+  fn parse_addrs_rejects_truncated_declared_sockaddr() {
+    let mut truncated = vec![0u8; SOCK4 - 1];
+    truncated[0] = SOCK4 as u8;
+    truncated[1] = AF_INET as u8;
+    let err = parse_addrs(addrs_mask(&[RTAX_NETMASK]), &truncated).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+  }
+
+  #[test]
+  fn parse_addrs_does_not_borrow_next_frame_for_short_unspec_addresses() {
+    let short = unspec_v4_sockaddr(&[192, 0, 2]);
+    let mask = padded_sockaddr(&[8, AF_INET as u8, 0, 0, 255, 255, 255, 0]);
+
+    let mut dst_then_mask = short.clone();
+    dst_then_mask.extend(&mask);
+    let err = parse_addrs(addrs_mask(&[RTAX_DST, RTAX_NETMASK]), &dst_then_mask).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+    let mut gateway_then_mask = short;
+    gateway_then_mask.extend(&mask);
+    let err = parse_addrs(
+      addrs_mask(&[RTAX_GATEWAY, RTAX_NETMASK]),
+      &gateway_then_mask,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+  }
+
+  #[cfg(apple)]
+  #[test]
+  fn parse_addrs_accepts_unpadded_final_unspec_mask_on_apple() {
+    let mut body = sockaddr_in(Ipv4Addr::new(198, 51, 100, 0));
+    body.extend([7, AF_UNSPEC as u8, 0, 0, 255, 255, 255]);
+
+    let addrs = parse_addrs(addrs_mask(&[RTAX_DST, RTAX_NETMASK]), &body).unwrap();
+    assert_eq!(
+      addrs[RTAX_NETMASK as usize],
+      Some(IpAddr::V4(Ipv4Addr::new(255, 255, 255, 0)))
+    );
   }
 
   #[test]

@@ -33,12 +33,11 @@ use super::{compat::RtMsghdr, fetch, message_too_short, parse_addrs};
 /// `AF_INET` / `AF_INET6` to limit the dump to one family.
 ///
 /// **Per-message parse failures are propagated**, not swallowed.
-/// NetBSD and OpenBSD's compact-form netmask sockaddrs (where
-/// `sa_family = AF_INET[6]` but `sa_len < size_of::<sockaddr_in[6]>()`)
-/// decode through `parse_short_inet_addr`, so a `parse_addrs` failure
-/// here is a real malformed message. Tolerating it would return a
-/// successful but silently incomplete routing table, so it surfaces to
-/// the caller.
+/// Compact netmask sockaddrs, including family-less forms, decode through
+/// bounded frames and a destination/gateway/IFA family hint. A `parse_addrs`
+/// failure here is therefore a real malformed message. Tolerating it would
+/// return a successful but silently incomplete routing table, so it surfaces
+/// to the caller.
 ///
 /// Length-shorter-than-header (`l < size_of::<RtMsghdr>()`) is *not*
 /// tolerated — that's a real kernel-side bug. A message that declares

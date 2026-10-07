@@ -96,7 +96,7 @@ OS | Approach
 Linux (no `libc`) | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)`
 Android (no `libc`) | netlink with kernel auto-bind + `SIOCGIF*` ioctl fallback — see [Android](#android)
 BSD-like | `sysctl`
-Windows | `GetAdaptersAddresses`
+Windows | IP Helper: `GetIfTable2Ex` / `GetIfEntry2` (interfaces), `GetAdaptersAddresses` (addresses), routing tables (routes, gateways)
 
 ## API contract
 
@@ -105,6 +105,8 @@ Windows | `GetAdaptersAddresses`
   RFC 6890 ranges that are not in its forwarding blacklist. It includes RFC
   1918, CGNAT, and IPv6 ULA, and excludes documentation, loopback, and
   link-local ranges; it is not a synonym for RFC 1918 alone.
+  Classification follows the IANA snapshot in the resolved compatible
+  `iprfc` 1.x release, not an immutable snapshot tied to a getifs release.
 - `get_interface_mtu` and `get_ifaddr_mtu` return a local link MTU, not a
   remote path MTU. IP-only MTU lookup returns `NotFound` for no local match
   and `InvalidInput` for an address assigned to distinct interfaces. IPv6
@@ -211,7 +213,7 @@ Existing network interface crates have limitations:
 
 `getifs` addresses these by:
 
-- Using platform-native APIs directly (netlink, sysctl, GetAdaptersAddresses)
+- Using platform-native APIs directly (netlink, sysctl, IP Helper)
 - Minimizing allocations with `SmallVec` and `SmolStr`
 - Providing comprehensive interface information including MTU and multicast support
 - Achieving **significantly better performance** than alternatives:
@@ -219,7 +221,8 @@ Existing network interface crates have limitations:
   - **Up to 22x faster** on macOS (list interfaces)
   - **2.4–2.8x faster** on Linux (interface enumeration)
   - **~6.8x faster** local-IP lookup on Linux
-  - Comparable performance on Windows (`GetAdaptersAddresses` overhead dominates)
+  - **15–86x faster** interface listing and lookup on Windows; address
+    queries are on par (`GetAdaptersAddresses` overhead dominates)
 
 ## Benchmarks
 
@@ -269,17 +272,18 @@ Numbers below compare `getifs` against `network-interface 2` and
 
 **Windows (GitHub Actions x64)**
 
-| Operation | `getifs` | Alternative | Notes |
-|-----------|----------|-------------|-------|
-| List all interfaces | 1119 μs | 1108 μs (`network-interface`) | Within noise |
-| Get interface by index | 1101 μs | 1110 μs (`network-interface`) | Within noise |
-| Get interface by name | 1167 μs | 1109 μs (`network-interface`) | Within noise |
-| Get interface addresses | 1094 μs | - | - |
-| Get multicast addresses | 1104 μs | - | - |
+| Operation | `getifs` | Alternative | Speedup |
+|-----------|----------|-------------|---------|
+| List all interfaces | 59.6 μs | 877.6 μs (`network-interface`) | **15x faster** |
+| Get interface by index | 10.2 μs | 872.1 μs (`network-interface`) | **86x faster** |
+| Get interface by name | 49.0 μs | 875.0 μs (`network-interface`) | **18x faster** |
+| Get interface addresses | 875.8 μs | - | - |
+| Get multicast addresses | 872.5 μs | - | - |
 
-*Note: the Win32 `GetAdaptersAddresses` API has an inherent ~1 ms floor
-that dominates every implementation — `getifs` and `network-interface`
-end up within measurement noise of each other on Windows.*
+*Note: interface listing and lookup read the IP Helper interface table.
+Address queries still go through `GetAdaptersAddresses`, whose ~1 ms floor
+dominates every implementation that uses it, `network-interface`
+included.*
 
 #### Local IP Address Operations
 
@@ -331,7 +335,7 @@ comparison.*
 
 **Why is `getifs` faster?**
 
-- **Direct system calls**: Uses platform-native APIs (netlink on Linux, sysctl on BSD/macOS, GetAdaptersAddresses on Windows)
+- **Direct system calls**: Uses platform-native APIs (netlink on Linux, sysctl on BSD/macOS, IP Helper on Windows)
 - **Zero-copy parsing**: Minimal allocations and efficient buffer reuse
 - **No libc dependency** on Linux: Direct netlink socket communication
 - **Optimized data structures**: Uses `SmallVec` and `SmolStr` to avoid heap allocations for common cases
@@ -344,11 +348,13 @@ comparison.*
 - **Linux**: 2.4–2.8x faster interface enumeration via direct netlink,
   and ~6.8x faster local-IP lookup from avoiding the test-socket round
   trip that `local-ip-address` performs.
-- **Windows**: Similar performance to alternatives — `GetAdaptersAddresses`
-  has an inherent ~1 ms floor that dominates every implementation.
-  Gateway and route-table queries skip that path entirely (~36 μs
-  gateway / ~80 μs full table); `getifs` only — the alternatives don't
-  expose them.
+- **Windows**: Interface listing and lookup read the IP Helper interface
+  table instead of `GetAdaptersAddresses`, so they are 15–86x faster than
+  `network-interface`. Address and local-IP queries still use
+  `GetAdaptersAddresses`, whose ~1 ms floor dominates every
+  implementation, so they are on par. Gateway and route-table queries skip
+  that path entirely (~36 μs gateway / ~80 μs full table); `getifs` only —
+  the alternatives don't expose them.
 
 ## Sister crates
 

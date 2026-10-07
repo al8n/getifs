@@ -87,6 +87,11 @@ const _: () = assert!(
 const SLOT_SIZE: usize = core::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>();
 const INITIAL_BUFFER_SIZE: u32 = 15_000;
 const MAX_TRIES: usize = 3;
+/// Flags for the address queries. They omit `GAA_FLAG_INCLUDE_ALL_INTERFACES`:
+/// an adapter that is not bound to IPv4 or IPv6 has no addresses to report,
+/// and the flag makes every query markedly slower. Interfaces, bound or not,
+/// come from the interface table instead; see [`interface_table`].
+const ADDRESS_QUERY_FLAGS: GET_ADAPTERS_ADDRESSES_FLAGS = GAA_FLAG_INCLUDE_PREFIX;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AdapterQueryStatus {
@@ -181,7 +186,7 @@ impl Information {
       let result = unsafe {
         GetAdaptersAddresses(
           AF_UNSPEC as u32,
-          GAA_FLAG_INCLUDE_PREFIX,
+          ADDRESS_QUERY_FLAGS,
           std::ptr::null() as _,
           buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
           &mut size,
@@ -227,41 +232,6 @@ impl Information {
       _marker: PhantomData,
     }
   }
-
-  /// Resolve a UTF-16 string returned inside the adapter buffer without
-  /// ever scanning beyond that allocation.
-  fn friendly_name(&self, name: windows_sys::core::PWSTR) -> Option<smol_str::SmolStr> {
-    if name.is_null() {
-      return None;
-    }
-
-    let start = self.buffer.as_ptr() as usize;
-    let byte_len = self.buffer.len().checked_mul(SLOT_SIZE)?;
-    let end = start.checked_add(byte_len)?;
-    let name_addr = name as usize;
-    if name_addr < start || name_addr >= end || name_addr % core::mem::align_of::<u16>() != 0 {
-      return None;
-    }
-
-    let available_units =
-      ((end - name_addr) / core::mem::size_of::<u16>()).min(IF_MAX_STRING_SIZE as usize + 1);
-    let name = name.cast_const();
-    for len in 0..available_units {
-      // SAFETY: `name.add(len)` stays inside the allocation by construction.
-      // `GetAdaptersAddresses` guarantees that `FriendlyName` points to an
-      // initialized, NUL-terminated UTF-16 string in the returned buffer, so
-      // every unit through the first NUL is initialized. Reading one unit at a
-      // time avoids creating a reference over the unwritten tail of the
-      // `MaybeUninit` allocation.
-      if unsafe { name.add(len).read() } == 0 {
-        // SAFETY: only the initialized string prefix through its NUL is made
-        // into a slice, and that range was checked against the allocation.
-        let initialized = unsafe { core::slice::from_raw_parts(name, len + 1) };
-        return crate::utils::friendly_name(initialized);
-      }
-    }
-    None
-  }
 }
 
 struct AdapterIter<'a> {
@@ -285,7 +255,7 @@ impl<'a> Iterator for AdapterIter<'a> {
   }
 }
 
-/// Resolves an adapter name when its `FriendlyName` is unavailable.
+/// Resolves an interface name when its alias is unavailable.
 ///
 /// Returns `None` when `if_indextoname` fails or yields an empty or
 /// non-UTF-8 name: such a name could not be passed back to
@@ -310,14 +280,15 @@ pub(super) fn win32_status_error(status: u32) -> io::Error {
   io::Error::from_raw_os_error(status as i32)
 }
 
+/// Returns the hardware address of `length` bytes from `address` when it is a
+/// 6-byte (EUI-48) MAC address.
 #[inline]
-fn adapter_mac_address(adapter: &IP_ADAPTER_ADDRESSES_LH) -> Option<MacAddr> {
-  if adapter.PhysicalAddressLength as usize != MAC_ADDRESS_SIZE {
+fn physical_mac(length: u32, address: &[u8]) -> Option<MacAddr> {
+  if length as usize != MAC_ADDRESS_SIZE {
     return None;
   }
 
-  let mut bytes = [0; MAC_ADDRESS_SIZE];
-  bytes.copy_from_slice(&adapter.PhysicalAddress[..MAC_ADDRESS_SIZE]);
+  let bytes: [u8; MAC_ADDRESS_SIZE] = address.get(..MAC_ADDRESS_SIZE)?.try_into().ok()?;
   Some(MacAddr::from_raw(bytes))
 }
 
@@ -336,68 +307,86 @@ fn adapter_index(adapter: &IP_ADAPTER_ADDRESSES_LH) -> u32 {
   index
 }
 
-pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>> {
-  let info = Information::fetch()?;
-  let mut interfaces = TinyVec::new();
+/// The `FilterInterface` bit of `MIB_IF_ROW2::InterfaceAndOperStatusFlags`,
+/// the second member of that BOOLEAN bitfield (`HardwareInterface` is 0x01).
+/// Such a row is an NDIS filter module layered on a miniport, such as a QoS
+/// or WFP lightweight filter or a Hyper-V switch extension. It reports its
+/// miniport's MAC address and is not an interface of its own.
+const FILTER_INTERFACE: u8 = 0x02;
 
-  for adapter in info.iter() {
-    let index = adapter_index(adapter);
-    if idx.is_some_and(|i| i != index) {
-      continue;
-    }
-
-    let Some(name) = info
-      .friendly_name(adapter.FriendlyName)
-      .or_else(|| interface_name_fallback(index))
-    else {
-      continue;
-    };
-
-    let mut flags = Flags::empty();
-    if adapter.OperStatus == IfOperStatusUp {
-      flags |= Flags::UP | Flags::RUNNING;
-    }
-
-    match adapter.IfType {
-      IF_TYPE_ETHERNET_CSMACD
-      | IF_TYPE_IEEE80211
-      | IF_TYPE_IEEE1394
-      | IF_TYPE_ISO88025_TOKENRING => {
-        flags |= Flags::BROADCAST | Flags::MULTICAST;
-      }
-      IF_TYPE_PPP | IF_TYPE_TUNNEL => {
-        flags |= Flags::POINTOPOINT | Flags::MULTICAST;
-      }
-      IF_TYPE_SOFTWARE_LOOPBACK => {
-        flags |= Flags::LOOPBACK | Flags::MULTICAST;
-      }
-      IF_TYPE_ATM => {
-        flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
-      }
-      _ => {}
-    }
-
-    let mtu = if adapter.Mtu == 0xffffffff {
-      0
-    } else {
-      adapter.Mtu
-    };
-
-    let hardware_addr = adapter_mac_address(adapter);
-
-    interfaces.push(Interface {
-      index,
-      name,
-      flags,
-      mtu,
-      mac_addr: hardware_addr,
-    });
-
-    if idx.is_some() {
-      break;
-    }
+fn interface_flags(
+  if_type: u32,
+  admin_status: NET_IF_ADMIN_STATUS,
+  oper_status: IF_OPER_STATUS,
+) -> Flags {
+  let mut flags = Flags::empty();
+  if admin_status == NET_IF_ADMIN_STATUS_UP {
+    flags |= Flags::UP;
+  }
+  if oper_status == IfOperStatusUp {
+    flags |= Flags::RUNNING;
   }
 
+  match if_type {
+    IF_TYPE_ETHERNET_CSMACD | IF_TYPE_IEEE80211 | IF_TYPE_IEEE1394 | IF_TYPE_ISO88025_TOKENRING => {
+      flags |= Flags::BROADCAST | Flags::MULTICAST;
+    }
+    IF_TYPE_PPP | IF_TYPE_TUNNEL => {
+      flags |= Flags::POINTOPOINT | Flags::MULTICAST;
+    }
+    IF_TYPE_SOFTWARE_LOOPBACK => {
+      flags |= Flags::LOOPBACK | Flags::MULTICAST;
+    }
+    IF_TYPE_ATM => {
+      flags |= Flags::BROADCAST | Flags::POINTOPOINT | Flags::MULTICAST;
+    }
+    _ => {}
+  }
+
+  flags
+}
+
+/// Builds the [`Interface`] of one interface-table row. Returns `None` for an
+/// NDIS filter module, for the unspecified index 0, and for a row whose name
+/// cannot be represented.
+///
+/// The name is the interface alias, which `GetAdaptersAddresses` reports as
+/// the friendly name and `ifname_to_index` resolves. `Mtu` is the link MTU;
+/// an unbounded `u32::MAX` is reported as 0.
+fn interface_from_row(row: &MIB_IF_ROW2) -> Option<Interface> {
+  if row.InterfaceAndOperStatusFlags._bitfield & FILTER_INTERFACE != 0 || row.InterfaceIndex == 0 {
+    return None;
+  }
+
+  let index = row.InterfaceIndex;
+  let name = crate::utils::friendly_name(&row.Alias).or_else(|| interface_name_fallback(index))?;
+  Some(Interface {
+    index,
+    name,
+    flags: interface_flags(row.Type, row.AdminStatus, row.OperStatus),
+    mtu: if row.Mtu == u32::MAX { 0 } else { row.Mtu },
+    mac_addr: physical_mac(row.PhysicalAddressLength, &row.PhysicalAddress),
+  })
+}
+
+/// Lists the interfaces from the IP Helper interface table: every NDIS
+/// interface except filter modules, whether or not it is bound to IPv4 or
+/// IPv6. A lookup of one index reads only that interface's row.
+pub(super) fn interface_table(idx: Option<u32>) -> io::Result<TinyVec<Interface>> {
+  let mut interfaces = TinyVec::new();
+  match idx {
+    Some(index) => interfaces.extend(
+      mib::interface_row(index)?
+        .as_ref()
+        .and_then(interface_from_row),
+    ),
+    None => interfaces.extend(
+      mib::interface_table()?
+        .rows()
+        .iter()
+        .filter_map(interface_from_row),
+    ),
+  }
   Ok(interfaces)
 }
 
@@ -560,6 +549,148 @@ fn sockaddr_to_ipaddr(family: u16, sockaddr: *const SOCKADDR) -> Option<IpAddr> 
 mod tests {
   use super::*;
 
+  /// An interface-table row for index 42 named `alias`: an Ethernet adapter
+  /// that is administratively up but operationally down.
+  fn row(alias: &str) -> MIB_IF_ROW2 {
+    let mut row = MIB_IF_ROW2 {
+      InterfaceIndex: 42,
+      Type: IF_TYPE_ETHERNET_CSMACD,
+      Mtu: 9_000,
+      AdminStatus: NET_IF_ADMIN_STATUS_UP,
+      OperStatus: IfOperStatusDown,
+      PhysicalAddressLength: MAC_ADDRESS_SIZE as u32,
+      ..Default::default()
+    };
+    row.PhysicalAddress[..MAC_ADDRESS_SIZE].copy_from_slice(&[0, 1, 2, 3, 4, 5]);
+    for (unit, encoded) in row.Alias.iter_mut().zip(alias.encode_utf16()) {
+      *unit = encoded;
+    }
+    row
+  }
+
+  #[test]
+  fn administrative_and_operational_flags_are_independent() {
+    let flags = |admin, oper| interface_flags(0, admin, oper);
+    assert_eq!(
+      flags(NET_IF_ADMIN_STATUS_UP, IfOperStatusUp),
+      Flags::UP | Flags::RUNNING
+    );
+    assert_eq!(flags(NET_IF_ADMIN_STATUS_UP, IfOperStatusDown), Flags::UP);
+    assert_eq!(
+      flags(NET_IF_ADMIN_STATUS_DOWN, IfOperStatusUp),
+      Flags::RUNNING
+    );
+    assert_eq!(
+      flags(NET_IF_ADMIN_STATUS_DOWN, IfOperStatusDown),
+      Flags::empty()
+    );
+    assert_eq!(
+      flags(NET_IF_ADMIN_STATUS_UP, IfOperStatusUnknown),
+      Flags::UP
+    );
+    assert_eq!(
+      flags(NET_IF_ADMIN_STATUS_TESTING, IfOperStatusUp),
+      Flags::RUNNING
+    );
+    assert_eq!(flags(99, IfOperStatusTesting), Flags::empty());
+  }
+
+  #[test]
+  fn unbound_row_keeps_its_metadata_and_capabilities() {
+    let interface = interface_from_row(&row("unbound")).unwrap();
+    assert_eq!(interface.index(), 42);
+    assert_eq!(interface.name(), "unbound");
+    assert_eq!(interface.mtu(), 9_000);
+    assert_eq!(interface.mac_addr().unwrap().octets(), [0, 1, 2, 3, 4, 5]);
+    assert_eq!(
+      interface.flags(),
+      Flags::UP | Flags::BROADCAST | Flags::MULTICAST
+    );
+  }
+
+  #[test]
+  fn filter_modules_and_index_zero_are_not_interfaces() {
+    let mut filter = row("Ethernet-QoS Packet Scheduler-0000");
+    filter.InterfaceAndOperStatusFlags._bitfield = FILTER_INTERFACE;
+    assert!(interface_from_row(&filter).is_none());
+
+    // Every other flag, `HardwareInterface` included, keeps the row.
+    for bits in [0x01, !FILTER_INTERFACE] {
+      let mut other = row("Ethernet");
+      other.InterfaceAndOperStatusFlags._bitfield = bits;
+      assert!(interface_from_row(&other).is_some(), "{bits:#04x}");
+    }
+
+    let mut unspecified = row("Ethernet");
+    unspecified.InterfaceIndex = 0;
+    assert!(interface_from_row(&unspecified).is_none());
+  }
+
+  #[test]
+  fn unbounded_mtu_and_a_non_eui48_address_are_not_reported() {
+    let mut row = row("Tunnel");
+    row.Mtu = u32::MAX;
+    row.PhysicalAddressLength = 0;
+    let interface = interface_from_row(&row).unwrap();
+    assert_eq!(interface.mtu(), 0);
+    assert_eq!(interface.mac_addr(), None);
+  }
+
+  #[test]
+  fn row_without_a_usable_name_is_skipped() {
+    // An empty alias falls back to `if_indextoname`, which knows no such index.
+    let mut row = row("");
+    row.InterfaceIndex = u32::MAX - 1;
+    assert!(interface_from_row(&row).is_none());
+  }
+
+  // The loopback interface is administratively and operationally up on every
+  // Windows host, so both the table and the single-row lookup must report its
+  // state, which the statistics-free table level still returns.
+  #[test]
+  fn loopback_state_is_reported_by_both_lookups() {
+    let interfaces = interface_table(None).unwrap();
+    let loopback = interfaces
+      .iter()
+      .find(|interface| interface.flags().contains(Flags::LOOPBACK))
+      .expect("a loopback interface");
+    assert_eq!(
+      loopback.flags(),
+      Flags::UP | Flags::RUNNING | Flags::LOOPBACK | Flags::MULTICAST
+    );
+
+    let by_index = interface_table(Some(loopback.index())).unwrap();
+    assert_eq!(by_index.as_slice(), core::slice::from_ref(loopback));
+  }
+
+  // The adapter list and the interface table are separate snapshots, so an
+  // adapter removed between the two is tolerated.
+  #[test]
+  fn every_bound_adapter_is_an_interface() {
+    use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+
+    let adapters = Information::fetch().unwrap();
+    let interfaces = interface_table(None).unwrap();
+    for adapter in adapters.iter() {
+      let index = adapter_index(adapter);
+      if interfaces
+        .iter()
+        .any(|interface| interface.index() == index)
+      {
+        continue;
+      }
+      match mib::interface_row(index) {
+        Ok(Some(row)) => assert!(
+          interface_from_row(&row).is_none(),
+          "adapter {index} is missing from interface_table"
+        ),
+        Ok(None) => {}
+        Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {}
+        Err(error) => panic!("adapter {index}: {error}"),
+      }
+    }
+  }
+
   #[test]
   fn adapter_status_preserves_empty_and_error_outcomes() {
     assert_eq!(
@@ -615,20 +746,18 @@ mod tests {
   }
 
   #[test]
-  fn adapter_mac_requires_exactly_six_bytes() {
-    let mut adapter = IP_ADAPTER_ADDRESSES_LH::default();
-    adapter.PhysicalAddress[..MAC_ADDRESS_SIZE].copy_from_slice(&[0, 1, 2, 3, 4, 5]);
-
+  fn physical_mac_requires_exactly_six_bytes() {
+    let address = [0, 1, 2, 3, 4, 5, 6, 7];
     for length in [0, 5, 7, 8] {
-      adapter.PhysicalAddressLength = length;
-      assert!(adapter_mac_address(&adapter).is_none());
+      assert!(physical_mac(length, &address).is_none());
     }
 
-    adapter.PhysicalAddressLength = MAC_ADDRESS_SIZE as u32;
+    let length = MAC_ADDRESS_SIZE as u32;
     assert_eq!(
-      adapter_mac_address(&adapter).unwrap().octets(),
+      physical_mac(length, &address).unwrap().octets(),
       [0, 1, 2, 3, 4, 5]
     );
+    assert!(physical_mac(length, &address[..4]).is_none());
   }
 
   #[test]
