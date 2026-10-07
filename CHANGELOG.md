@@ -52,8 +52,9 @@
     miniports and tunnel pseudo-interfaces are therefore listed too.
   - `UP` follows the administrative status and `RUNNING` the operational
     status, so an enabled adapter without a link is `UP` but not `RUNNING`.
-  - `Interface::mtu` is the link MTU; a lower per-family IP MTU set with
-    `netsh` is no longer reflected.
+  - `Interface::mtu` is the link MTU, so the loopback interface reports 1500
+    where 0.6 reported 0, and a lower per-family IP MTU set with `netsh` is
+    no longer reflected.
   - Address queries still request only IP-bound adapters.
 - Linux netlink validates multipart framing, terminal messages, and attributes
   before decoding interface, address, route, and MAC data.

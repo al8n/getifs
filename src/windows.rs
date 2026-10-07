@@ -352,7 +352,7 @@ fn interface_flags(
 ///
 /// The name is the interface alias, which `GetAdaptersAddresses` reports as
 /// the friendly name and `ifname_to_index` resolves. `Mtu` is the link MTU;
-/// the unbounded `u32::MAX` of a loopback interface is reported as 0.
+/// an unbounded `u32::MAX` is reported as 0.
 fn interface_from_row(row: &MIB_IF_ROW2) -> Option<Interface> {
   if row.InterfaceAndOperStatusFlags._bitfield & FILTER_INTERFACE != 0 || row.InterfaceIndex == 0 {
     return None;
@@ -627,8 +627,8 @@ mod tests {
   }
 
   #[test]
-  fn unknown_mtu_and_a_non_eui48_address_are_not_reported() {
-    let mut row = row("Loopback Pseudo-Interface 1");
+  fn unbounded_mtu_and_a_non_eui48_address_are_not_reported() {
+    let mut row = row("Tunnel");
     row.Mtu = u32::MAX;
     row.PhysicalAddressLength = 0;
     let interface = interface_from_row(&row).unwrap();
@@ -658,7 +658,6 @@ mod tests {
       loopback.flags(),
       Flags::UP | Flags::RUNNING | Flags::LOOPBACK | Flags::MULTICAST
     );
-    assert_eq!(loopback.mtu(), 0);
 
     let by_index = interface_table(Some(loopback.index())).unwrap();
     assert_eq!(by_index.as_slice(), core::slice::from_ref(loopback));
