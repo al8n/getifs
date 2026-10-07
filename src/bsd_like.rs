@@ -615,8 +615,9 @@ pub(super) fn parse_inet_addr(af: i32, b: &[u8]) -> io::Result<(usize, IpAddr)> 
   // target type. `read_unaligned` copies into an aligned local
   // without that assumption; the resulting load is the same on x86 /
   // ARM, but defined behaviour everywhere (including strict-alignment
-  // targets like SPARC). Production routing parsing instead decodes its
-  // bounded frames directly; this helper remains for test and fuzz coverage.
+  // targets like SPARC). Production routing parsing decodes bounded frames
+  // with `decode_full_inet_addr` and `parse_short_inet_addr`, so this helper
+  // is compiled only for tests and fuzzing.
   match af {
     AF_INET => {
       if b.len() < SOCK4 {
@@ -660,8 +661,10 @@ fn sockaddr_frames(addrs: u32, mut b: &[u8]) -> io::Result<[Option<&[u8]>; RTAX_
       continue;
     }
 
-    // Preserve the old truncation check, including the alignment-sized
-    // all-zero filler used for an empty sockaddr.
+    // An advertised slot needs at least one alignment unit, the size of the
+    // all-zero filler of an empty sockaddr. A shorter remainder is truncation,
+    // not an absent slot: reading it as absent would fabricate data, such as a
+    // default route from a missing `RTAX_DST`.
     if b.len() < KERNAL_ALIGN {
       return Err(message_too_short());
     }
@@ -704,9 +707,10 @@ fn explicit_inet_family(sa: Option<&[u8]>) -> Option<i32> {
   }
 }
 
-/// Decode the historical family-less sockaddr form without allowing it to
-/// reach beyond its declared frame. The legacy heuristic recognizes only a
-/// full `sockaddr_in6`; all other complete forms remain IPv4.
+/// Decode a family-less sockaddr without letting it reach beyond its declared
+/// frame. Only a full `sockaddr_in6` is read as IPv6; any other frame is read
+/// as IPv4, the kernel's old-fashioned meaning of a missing family. Returns
+/// `None` unless the frame holds a whole address.
 fn decode_legacy_inet_addr(sa: &[u8]) -> Option<IpAddr> {
   let af = if sa.len() == SOCK6 { AF_INET6 } else { AF_INET };
   decode_full_inet_addr(af, sa)
@@ -725,8 +729,9 @@ fn decode_address_frame(slot: usize, sa: &[u8]) -> io::Result<Option<IpAddr>> {
     None => {
       let addr = decode_legacy_inet_addr(sa);
       if matches!(slot, x if x == RTAX_DST as usize || x == RTAX_GATEWAY as usize) {
-        // Unlike a netmask, a destination or gateway cannot safely acquire
-        // missing bytes from alignment padding or the following frame.
+        // An incomplete destination or gateway is malformed, not absent: an
+        // absent destination reads as a default route and an absent gateway
+        // as an on-link route.
         addr.ok_or_else(invalid_address).map(Some)
       } else {
         Ok(addr)
@@ -738,9 +743,8 @@ fn decode_address_frame(slot: usize, sa: &[u8]) -> io::Result<Option<IpAddr>> {
 fn decode_netmask_frame(sa: &[u8], family_hint: Option<i32>) -> io::Result<IpAddr> {
   match explicit_inet_family(Some(sa)).or(family_hint) {
     Some(af) => parse_short_inet_addr(af, sa),
-    // Keep the existing context-free compatibility heuristic: a full IPv6
-    // sockaddr stays IPv6, while ambiguous compact family-less masks use the
-    // historical IPv4 interpretation.
+    // With no explicit family and no hint, only a full `sockaddr_in6` is read
+    // as IPv6; an ambiguous compact mask is read as IPv4.
     None if sa.len() == SOCK6 => parse_short_inet_addr(AF_INET6, sa),
     None => parse_short_inet_addr(AF_INET, sa),
   }

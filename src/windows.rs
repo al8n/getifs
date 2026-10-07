@@ -550,7 +550,7 @@ mod tests {
   use super::*;
 
   /// An interface-table row for index 42 named `alias`: an Ethernet adapter
-  /// that is administratively up but has no link.
+  /// that is administratively up but operationally down.
   fn row(alias: &str) -> MIB_IF_ROW2 {
     let mut row = MIB_IF_ROW2 {
       InterfaceIndex: 42,
