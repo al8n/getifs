@@ -2,6 +2,32 @@
 
 ## 0.7.0 (Unreleased)
 
+The planned 0.6.2 release was never published. Its rustix build fix and
+coverage-tool migration are included in this release.
+
+### Upgrading from 0.6.1
+
+This pre-1.0 minor release includes breaking API and behavior changes:
+
+- The public `MacAddr`/`ParseMacAddrError` types and `rfc` re-export now come
+  from `hardware-address` 1.x and `iprfc` 1.x. Update code that depends on the
+  older dependency APIs, and allow for the non-exhaustive parse error.
+- `IpRoute` is non-exhaustive; downstream matches need a wildcard arm.
+  Interface equality and hashing describe a captured snapshot, not stable
+  interface identity. Names, indices, and flags can change between reads.
+- IP-only MTU queries can return `NotFound` or `InvalidInput` for missing or
+  ambiguous local addresses. Prefer an interface index or scoped `IfAddr`
+  when needed. Windows reports link MTU, not a per-family IP MTU override.
+- Handle absent interfaces separately from backend errors, and handle
+  `Unsupported` multicast queries on platforms without that capability.
+  Non-UTF-8 names can be skipped, and native flag bits are target-specific.
+- Public/private classification follows the IANA snapshot in the resolved
+  compatible `iprfc` 1.x release. Review the classification changes below;
+  it is not a fixed snapshot tied to a getifs version.
+- Rust 1.85 remains supported with the documented MSRV-aware resolver or
+  `smol_str` 0.3.2 resolution. A default fresh resolution can select a later
+  `smol_str` requiring Rust 1.89; see the README's maintenance notes.
+
 ### API contract changes
 
 - Add exact local-MTU queries: `get_interface_mtu(index)` and
@@ -149,20 +175,18 @@
   vulnerability reporting instead of the public issue tracker; see
   `SECURITY.md`.
 
-## 0.6.2 (October 3rd, 2026)
-
-Patch release; the public API is unchanged.
-
-### Fixes
+### Included unpublished 0.6.2 work
 
 - Explicitly enable rustix's `time` feature to fix the non-Windows
   build regression from rustix 1.1.5's `timespec` feature gate.
-
-### CI / chore
-
 - Replace cargo-tarpaulin with cargo-llvm-cov while retaining Cobertura
   reports for the nightly host matrix, Linux musl, and FreeBSD coverage
   jobs.
+
+## 0.6.2 (Never published; superseded by 0.7.0)
+
+This version was prepared in the repository but was not published to crates.io.
+Its changes are included in 0.7.0 above; there is no separate 0.6.2 release.
 
 ## 0.6.1 (May 26th, 2026)
 

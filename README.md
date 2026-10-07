@@ -236,7 +236,8 @@ Numbers below compare `getifs` against `network-interface 2` and
 `local-ip-address 0.6`. Each row reports median `cargo bench` time
 (Criterion, 100 samples), measured on GitHub Actions
 `macos-latest` (ARM64) / `ubuntu-latest` (x64) / `windows-latest`
-(x64) runners on 2026-05-06.
+(x64) runners. The macOS and Linux measurements are from 2026-05-06;
+the Windows measurements are from 2026-10-07.
 
 | Platform | Best Operation | `getifs` | Alternative | Speedup |
 |----------|----------------|----------|-------------|---------|
