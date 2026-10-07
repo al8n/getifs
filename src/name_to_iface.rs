@@ -10,7 +10,17 @@ use std::{io, net::Ipv4Addr};
 /// ```rust
 /// use getifs::{ifname_to_v4_iface, interfaces};
 ///
-/// let interface = interfaces().unwrap().into_iter().next().unwrap();
+/// let interface = interfaces()
+///   .unwrap()
+///   .into_iter()
+///   .find(|interface| {
+///     interface
+///       .ipv4_addrs()
+///       .unwrap()
+///       .iter()
+///       .any(|net| !net.addr().is_link_local())
+///   })
+///   .unwrap();
 /// let iface = ifname_to_v4_iface(interface.name()).unwrap().unwrap();
 ///
 /// let addrs = interface.ipv4_addrs().unwrap().into_iter().map(|net| net.addr()).collect::<Vec<_>>();
@@ -62,7 +72,17 @@ pub fn ifname_to_v6_iface(name: &str) -> io::Result<Option<u32>> {
 /// ```rust
 /// use getifs::{ifname_to_iface, interfaces};
 ///
-/// let interface = interfaces().unwrap().into_iter().next().unwrap();
+/// let interface = interfaces()
+///   .unwrap()
+///   .into_iter()
+///   .find(|interface| {
+///     interface
+///       .ipv4_addrs()
+///       .unwrap()
+///       .iter()
+///       .any(|net| !net.addr().is_link_local())
+///   })
+///   .unwrap();
 /// let (v4_iface, v6_iface) = ifname_to_iface(interface.name()).unwrap();
 ///
 /// assert_eq!(interface.index(), v6_iface.unwrap());
