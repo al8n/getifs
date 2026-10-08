@@ -40,7 +40,7 @@ default = []
 bitflags = "2"
 cfg-if = "1"
 hardware-address = "1"
-iprobe = "0.1"
+iprobe = "1"
 ipnet = "2"
 iprfc = "1"
 paste = { package = "pastey", version = "0.2.3" }
