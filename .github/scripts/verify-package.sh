@@ -4,6 +4,21 @@ set -euo pipefail
 
 : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR must be set}"
 
+usage() {
+  printf 'Usage: %s [--existing-lock] [package-name]\n' "$0" >&2
+}
+
+use_existing_lock=false
+if [[ ${1:-} == "--existing-lock" ]]; then
+  use_existing_lock=true
+  shift
+fi
+
+if (( $# > 1 )) || [[ ${1:-} == -* ]]; then
+  usage
+  exit 2
+fi
+
 package_name=${1:-getifs}
 version=$(awk -F ' *= *' '$1 == "version" { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)
 if [[ -z "$version" ]]; then
@@ -13,7 +28,14 @@ fi
 
 # Cargo.lock remains untracked for this library, but the release candidate is
 # always resolved once and then all package/publish operations are locked.
-cargo generate-lockfile
+if [[ "$use_existing_lock" == true ]]; then
+  if [[ ! -f Cargo.lock ]]; then
+    printf 'Cargo.lock is required with --existing-lock\n' >&2
+    exit 1
+  fi
+else
+  cargo generate-lockfile
+fi
 cargo package --locked
 
 crate_path="$CARGO_TARGET_DIR/package/${package_name}-${version}.crate"
