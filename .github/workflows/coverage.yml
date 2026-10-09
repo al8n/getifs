@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master on 2026-10-03
         with:
           toolchain: nightly
           components: llvm-tools-preview
@@ -74,7 +74,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install latest nightly + musl target
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master on 2026-10-03
         with:
           toolchain: nightly
           targets: x86_64-unknown-linux-musl
