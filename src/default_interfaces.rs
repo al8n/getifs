@@ -62,17 +62,6 @@ pub fn default_interfaces() -> io::Result<DefaultInterfaces> {
   ))
 }
 
-pub(crate) fn default_interfaces_from_captured(
-  interfaces: &[Interface],
-) -> io::Result<DefaultInterfaces> {
-  let (ipv4_indices, ipv6_indices) = default_interface_indices()?;
-  Ok(join_default_interfaces(
-    interfaces,
-    ipv4_indices,
-    ipv6_indices,
-  ))
-}
-
 fn default_interface_indices() -> io::Result<(SmallVec<u32>, SmallVec<u32>)> {
   Ok((
     os::default_ipv4_interface_indices()?,
@@ -80,7 +69,7 @@ fn default_interface_indices() -> io::Result<(SmallVec<u32>, SmallVec<u32>)> {
   ))
 }
 
-fn join_default_interfaces(
+pub(crate) fn join_default_interfaces(
   interfaces: &[Interface],
   ipv4_indices: SmallVec<u32>,
   ipv6_indices: SmallVec<u32>,

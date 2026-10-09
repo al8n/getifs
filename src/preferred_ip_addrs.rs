@@ -1,10 +1,11 @@
 use std::io;
 
 use iprfc::{FORWARDING_BLACKLIST, RFC6890};
+use smallvec_wrapper::SmallVec;
 
 use super::{
-  default_interfaces::default_interfaces_from_captured, order, AddressComparator,
-  DefaultInterfaces, Flags, IfNet, Ifv4Net, Ifv6Net, InterfaceAddress, InterfaceSnapshot,
+  default_interfaces::join_default_interfaces, order, os, AddressComparator, DefaultInterfaces,
+  Flags, IfNet, Ifv4Net, Ifv6Net, Interface, InterfaceAddress, InterfaceSnapshot,
 };
 
 /// Returns the preferred forwardable public IPv4 or IPv6 interface address.
@@ -133,9 +134,47 @@ enum Family {
 
 fn preferred_default(class: Class, family: Family) -> io::Result<Option<IfNet>> {
   let snapshot = InterfaceSnapshot::capture()?;
-  let defaults = default_interfaces_from_captured(snapshot.interfaces())?;
+  let defaults = default_interfaces_for_family_with(
+    family,
+    snapshot.interfaces(),
+    os::default_ipv4_interface_indices,
+    os::default_ipv6_interface_indices,
+  )?;
   let comparator = default_order(&defaults);
   Ok(select(&snapshot, class, family, &comparator).map(|address| *address.network()))
+}
+
+fn default_interfaces_for_family_with<IPv4, IPv6>(
+  family: Family,
+  interfaces: &[Interface],
+  ipv4_indices: IPv4,
+  ipv6_indices: IPv6,
+) -> io::Result<DefaultInterfaces>
+where
+  IPv4: FnOnce() -> io::Result<SmallVec<u32>>,
+  IPv6: FnOnce() -> io::Result<SmallVec<u32>>,
+{
+  match family {
+    Family::V4 => Ok(join_default_interfaces(
+      interfaces,
+      ipv4_indices()?,
+      SmallVec::new(),
+    )),
+    Family::V6 => Ok(join_default_interfaces(
+      interfaces,
+      SmallVec::new(),
+      ipv6_indices()?,
+    )),
+    Family::Any => {
+      let ipv4_indices = ipv4_indices()?;
+      let ipv6_indices = ipv6_indices()?;
+      Ok(join_default_interfaces(
+        interfaces,
+        ipv4_indices,
+        ipv6_indices,
+      ))
+    }
+  }
 }
 
 fn preferred_by<C>(class: Class, family: Family, order: C) -> io::Result<Option<IfNet>>
@@ -213,7 +252,9 @@ fn as_v6(candidate: Option<IfNet>) -> Option<Ifv6Net> {
 #[cfg(test)]
 mod tests {
   use std::{
+    cell::Cell,
     cmp::Ordering,
+    io,
     net::{Ipv4Addr, Ipv6Addr},
   };
 
@@ -224,7 +265,9 @@ mod tests {
     SmolStr,
   };
 
-  use super::{as_v4, as_v6, default_order, select, Class, Family};
+  use super::{
+    as_v4, as_v6, default_interfaces_for_family_with, default_order, select, Class, Family,
+  };
 
   fn interface(index: u32, name: &str, flags: Flags) -> Interface {
     Interface {
@@ -233,6 +276,16 @@ mod tests {
       name: SmolStr::new(name),
       hardware_addr: HardwareAddr::from_bytes(&[index as u8; 6]),
       flags,
+    }
+  }
+
+  fn provider<'a>(
+    calls: &'a Cell<usize>,
+    result: io::Result<SmallVec<u32>>,
+  ) -> impl FnOnce() -> io::Result<SmallVec<u32>> + 'a {
+    move || {
+      calls.set(calls.get() + 1);
+      result
     }
   }
 
@@ -448,6 +501,127 @@ mod tests {
     assert_eq!(as_v6(Some(v6.into())), Some(v6));
     assert_eq!(as_v6(Some(v4.into())), None);
     assert_eq!(as_v6(None), None);
+  }
+
+  #[test]
+  fn family_default_dispatch_isolated_and_joins_only_requested_family() {
+    let interfaces: TinyVec<Interface> =
+      vec![interface(2, "v4", Flags::UP), interface(3, "v6", Flags::UP)].into();
+    let v4_calls = Cell::new(0);
+    let v6_calls = Cell::new(0);
+    let defaults = default_interfaces_for_family_with(
+      Family::V4,
+      &interfaces,
+      provider(&v4_calls, Ok(vec![2].into())),
+      provider(&v6_calls, Err(io::Error::from_raw_os_error(701))),
+    )
+    .unwrap();
+    assert_eq!(v4_calls.get(), 1);
+    assert_eq!(v6_calls.get(), 0);
+    assert_eq!(defaults.ipv4()[0].index(), 2);
+    assert!(defaults.ipv6().is_empty());
+
+    let v4_calls = Cell::new(0);
+    let v6_calls = Cell::new(0);
+    let defaults = default_interfaces_for_family_with(
+      Family::V6,
+      &interfaces,
+      provider(&v4_calls, Err(io::Error::from_raw_os_error(702))),
+      provider(&v6_calls, Ok(vec![3].into())),
+    )
+    .unwrap();
+    assert_eq!(v4_calls.get(), 0);
+    assert_eq!(v6_calls.get(), 1);
+    assert!(defaults.ipv4().is_empty());
+    assert_eq!(defaults.ipv6()[0].index(), 3);
+  }
+
+  #[test]
+  fn family_default_dispatch_propagates_selected_family_errors() {
+    let interfaces: TinyVec<Interface> = vec![interface(2, "v4", Flags::UP)].into();
+    let v4_calls = Cell::new(0);
+    let v6_calls = Cell::new(0);
+    let error = default_interfaces_for_family_with(
+      Family::V4,
+      &interfaces,
+      provider(&v4_calls, Err(io::Error::from_raw_os_error(703))),
+      provider(&v6_calls, Ok(SmallVec::new())),
+    )
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(703));
+    assert_eq!(v4_calls.get(), 1);
+    assert_eq!(v6_calls.get(), 0);
+
+    let v4_calls = Cell::new(0);
+    let v6_calls = Cell::new(0);
+    let error = default_interfaces_for_family_with(
+      Family::V6,
+      &interfaces,
+      provider(&v4_calls, Ok(SmallVec::new())),
+      provider(&v6_calls, Err(io::Error::from_raw_os_error(704))),
+    )
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(704));
+    assert_eq!(v4_calls.get(), 0);
+    assert_eq!(v6_calls.get(), 1);
+  }
+
+  #[test]
+  fn any_family_default_dispatch_calls_both_and_short_circuits_errors() {
+    let interfaces: TinyVec<Interface> =
+      vec![interface(2, "v4", Flags::UP), interface(3, "v6", Flags::UP)].into();
+    let v4_calls = Cell::new(0);
+    let v6_calls = Cell::new(0);
+    let defaults = default_interfaces_for_family_with(
+      Family::Any,
+      &interfaces,
+      provider(&v4_calls, Ok(vec![2].into())),
+      provider(&v6_calls, Ok(vec![3].into())),
+    )
+    .unwrap();
+    assert_eq!(v4_calls.get(), 1);
+    assert_eq!(v6_calls.get(), 1);
+    assert_eq!(defaults.ipv4()[0].index(), 2);
+    assert_eq!(defaults.ipv6()[0].index(), 3);
+
+    let v4_calls = Cell::new(0);
+    let v6_calls = Cell::new(0);
+    let error = default_interfaces_for_family_with(
+      Family::Any,
+      &interfaces,
+      provider(&v4_calls, Err(io::Error::from_raw_os_error(705))),
+      provider(&v6_calls, Ok(SmallVec::new())),
+    )
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(705));
+    assert_eq!(v4_calls.get(), 1);
+    assert_eq!(v6_calls.get(), 0);
+
+    let v4_calls = Cell::new(0);
+    let v6_calls = Cell::new(0);
+    let error = default_interfaces_for_family_with(
+      Family::Any,
+      &interfaces,
+      provider(&v4_calls, Ok(SmallVec::new())),
+      provider(&v6_calls, Err(io::Error::from_raw_os_error(706))),
+    )
+    .unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(706));
+    assert_eq!(v4_calls.get(), 1);
+    assert_eq!(v6_calls.get(), 1);
+
+    let v4_calls = Cell::new(0);
+    let v6_calls = Cell::new(0);
+    let empty = default_interfaces_for_family_with(
+      Family::Any,
+      &interfaces,
+      provider(&v4_calls, Ok(SmallVec::new())),
+      provider(&v6_calls, Ok(SmallVec::new())),
+    )
+    .unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(v4_calls.get(), 1);
+    assert_eq!(v6_calls.get(), 1);
   }
 
   #[test]
