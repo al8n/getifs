@@ -139,7 +139,7 @@ jobs:
         with:
           arch: x86
       - name: Install stable Rust and the 32-bit target
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master on 2026-10-03
         with:
           toolchain: stable
           targets: i686-pc-windows-msvc
@@ -166,7 +166,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-sanitizer-
       - name: Install nightly Rust with sources
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master on 2026-10-03
         with:
           toolchain: nightly
           components: rust-src
@@ -365,7 +365,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust 1.85.0
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master on 2026-10-03
         with:
           toolchain: 1.85.0
       - name: Resolve and test a fresh MSRV checkout
@@ -403,7 +403,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master on 2026-10-03
         with:
           toolchain: stable
       - name: Generate the library lockfile for the audit
@@ -422,7 +422,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install nightly Miri
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master on 2026-10-03
         with:
           toolchain: nightly
           components: miri
@@ -441,7 +441,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master on 2026-10-03
         with:
           toolchain: stable
       - name: Verify the publishable archive
