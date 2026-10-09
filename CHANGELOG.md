@@ -1,3 +1,35 @@
+# UNRELEASED
+
+## 0.8.0-dev (unpublished)
+
+### Rust-pattern address APIs
+
+- Add `InterfaceSnapshot` and borrowed `InterfaceAddress` records for
+  repeated pure filtering and ranking without additional OS calls. Typed
+  `predicate` and `order` constructors compose with ordinary Rust closures;
+  stable slice and iterator helpers preserve the first captured record on a
+  complete comparison tie.
+- Add public/private `preferred_*_addr` selectors and `_by` variants. Every
+  preferred candidate must be administratively `UP` and forwardable before
+  ranking; default-route membership is only a family-aware preference.
+- Add `DefaultInterfaces` and `default_interfaces()`. It retains every
+  equal-best default-route interface separately for IPv4 and IPv6 and joins
+  route indices to an unfiltered interface capture.
+
+### Hardware-address and IP-math changes
+
+- Add `HardwareAddr`, including typed EUI-48, EUI-64, and InfiniBand forms
+  plus exact raw-byte fallback. Equality and hashing use the complete byte
+  sequence rather than the enum variant. `Interface::hardware_addr()` exposes
+  it while `Interface::mac_addr()` remains a const-compatible EUI-48 helper.
+- Canonicalize every all-zero hardware address to `None`, regardless of its
+  declared length. Linux already had this behavior; on Windows and BSD this is
+  an intentional 0.8 behavior change from returning an all-zero `MacAddr`.
+  Interface equality and hashing now include all captured hardware bytes.
+- Add checked address and `ipnet` arithmetic traits, including usable-host
+  accessors and individual-address or whole-subnet offsets that preserve
+  prefixes and original host bits without wrapping.
+
 # RELEASED
 
 ## 0.7.0 (October 9th, 2026)

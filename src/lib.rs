@@ -13,12 +13,19 @@ compile_error!(
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+pub use default_interfaces::*;
 pub use gateway::*;
-pub use hardware_address::{MacAddr, ParseMacAddrError};
+pub use hardware::HardwareAddr;
+pub use hardware_address::{
+  Eui64Addr, InfiniBandAddr, MacAddr, ParseEui64AddrError, ParseInfiniBandAddrError,
+  ParseMacAddrError,
+};
 pub use idx_to_name::ifindex_to_name;
 pub use ifaddr::*;
 pub use ifnet::*;
+pub use interface_query::*;
 pub use interfaces::*;
+pub use ip_math::*;
 /// The `ipnet` crate, which provides the network types wrapped by [`IfNet`],
 /// [`Ifv4Net`], and [`Ifv6Net`].
 pub use ipnet;
@@ -35,6 +42,7 @@ pub use mtu::*;
 pub use name_to_idx::ifname_to_index;
 pub use name_to_iface::{ifname_to_iface, ifname_to_v4_iface, ifname_to_v6_iface};
 pub use os::Flags;
+pub use preferred_ip_addrs::*;
 pub use private_ip_addrs::*;
 pub use public_ip_addrs::*;
 pub use route::*;
@@ -44,15 +52,20 @@ pub use smallvec_wrapper::{SmallVec, TinyVec};
 /// The string type used for interface names.
 pub use smol_str::SmolStr;
 
+mod default_interfaces;
 mod gateway;
+mod hardware;
 mod idx_to_name;
 mod ifaddr;
 mod ifnet;
+mod interface_query;
 mod interfaces;
+mod ip_math;
 mod local_addrs;
 mod mtu;
 mod name_to_idx;
 mod name_to_iface;
+mod preferred_ip_addrs;
 mod private_ip_addrs;
 mod public_ip_addrs;
 mod route;
@@ -88,6 +101,7 @@ pub mod __fuzzing {
 #[cfg(all(test, not(windows)))]
 mod tests;
 
+#[allow(dead_code)]
 const MAC_ADDRESS_SIZE: usize = 6;
 
 #[allow(dead_code)]

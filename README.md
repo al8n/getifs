@@ -25,6 +25,9 @@ Cross-platform enumeration of network interfaces and their MTU, gateway, multica
 getifs = "0.7"
 ```
 
+The API additions documented below target the unpublished `0.8.0-dev`
+release. The currently published crates.io release remains 0.7.
+
 ## Features
 
 - **Zero libc dependency** on Linux (uses netlink directly)
@@ -134,7 +137,8 @@ Windows | IP Helper: `GetIfTable2Ex` / `GetIfEntry2` (interfaces), `GetAdaptersA
   `IpRoute` ordering is family followed by `index`, destination, and gateway.
   These are value orderings, not routing or address-preference orderings.
   `Interface` equality and hashing cover the complete captured snapshot
-  (index, MTU, name, MAC address, and flags), not stable interface identity.
+  (index, MTU, name, complete hardware-address bytes, and flags), not stable
+  interface identity.
 - `Flags::bits()` is target-specific raw operating-system data; do not persist
   or compare those bits across platforms as a portable wire format. Only
   `UP`, `BROADCAST`, `LOOPBACK`, `POINTOPOINT`, `MULTICAST`, and `RUNNING`
@@ -146,6 +150,89 @@ Windows | IP Helper: `GetIfTable2Ex` / `GetIfEntry2` (interfaces), `GetAdaptersA
 - `ipnet`, `rfc`, `probe`, `SmolStr`, `SmallVec`, and `TinyVec` are public
   re-exports and part of the compatibility contract. Serde is not currently
   exposed; it may be added later as an additive feature.
+
+### Snapshots, predicates, and ordering (0.8.0-dev)
+
+`InterfaceSnapshot::capture()` stores one interface collection and one
+unicast-address collection. Its iterators borrow both collections, so repeated
+filtering and ordering performs no OS I/O and does not clone interface names
+or hardware bytes. Addresses whose interface is missing from the capture stay
+visible through `snapshot.networks()` but are omitted from joined iteration.
+
+```rust,no_run
+use getifs::{
+    order, predicate, Flags, InterfaceAddressIteratorExt, InterfaceSnapshot,
+};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let snapshot = InterfaceSnapshot::capture()?;
+let up = snapshot.matching(predicate::flags(Flags::UP));
+let ordered = up.sorted_with(&order::by_interface_index());
+assert!(ordered.iter().all(|record| record.interface().flags().contains(Flags::UP)));
+# Ok(())
+# }
+```
+
+`predicate::name`, `predicate::cidr`, `predicate::rfc`, and
+`predicate::flags` are typed constructors. Any Rust closure accepting an
+`InterfaceAddress` is also an `InterfacePredicate`; `.and()`, `.or()`, and
+`.not()` short-circuit. `AddressComparator` provides `.then()` and `.reverse()`
+and the `order` module provides default-route, interface-up, family, network,
+index, address, and cached-name comparators. Comparators use captured fields
+only and never resolve an interface name or query routes.
+
+### Default and preferred addresses (0.8.0-dev)
+
+`default_interfaces()` returns separate IPv4 and IPv6 slices. A family can
+have no default route, and equal-best routes remain in the corresponding
+slice. The same interface can appear in both families. The route and interface
+captures are weak snapshots, so an index that vanishes or has no UTF-8 name is
+simply absent from the joined slice. Link-local-only interfaces are still
+represented because this API starts from unfiltered interfaces, not from local
+address results.
+
+`preferred_public_*_addr` and `preferred_private_*_addr` return one typed
+candidate. They require `Flags::UP` and exclude every forwarding-blacklisted
+address before public/private classification and ranking. A default route is a
+preference, not an eligibility requirement, so an eligible address can still
+be selected when that family has no default route. `_by` variants replace only
+the ranking; they cannot make down or nonforwardable candidates eligible.
+
+### Hardware addresses (0.8.0-dev)
+
+`Interface::hardware_addr()` returns a `HardwareAddr`: six-byte `Mac`,
+eight-byte `Eui64`, twenty-byte `InfiniBand`, or exact `Raw` bytes for any
+other nonzero width. `Interface::mac_addr()` remains available for ordinary
+six-byte MAC callers and is `const`-compatible. Empty and all-zero hardware
+values normalize to `None`. This intentionally changes Windows and BSD 0.8
+behavior: their previously exposed all-zero MAC values now become absent.
+
+`HardwareAddr` equality and hashing use the full byte sequence and length, so
+for example `Raw` six-byte data compares equal to the corresponding `Mac`.
+Because `Interface` derives equality and hashing over its captured snapshot,
+arbitrary hardware bytes participate in its identity as well.
+
+### Checked IP math (0.8.0-dev)
+
+`CheckedIpAddrExt` offers checked addition and subtraction for `Ipv4Addr`,
+`Ipv6Addr`, and `IpAddr`. `UsableIpNetExt` provides usable-host indexing:
+IPv4 `/0` through `/30` exclude network and broadcast, `/31` includes both
+endpoints, `/32` has its one address, and IPv6 includes every address in its
+prefix. All usable-host offsets remain within the original prefix.
+
+`CheckedIpNetExt` offsets `Ipv4Net`, `Ipv6Net`, and `IpNet` without changing
+the prefix. Address offsets can cross a subnet; whole-subnet offsets preserve
+the stored host bits. `/0` accepts only a zero whole-subnet offset, while
+`/32` and `/128` have a one-address stride. No arithmetic is added to `IfNet`,
+so a computed value never implies an address assignment on an interface.
+
+```rust
+use getifs::{CheckedIpNetExt, ipnet::Ipv4Net};
+
+let net: Ipv4Net = "192.0.2.42/24".parse()?;
+assert_eq!(net.checked_add_subnets(1).unwrap().addr().to_string(), "192.0.3.42");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ## Fuzzing
 

@@ -22,9 +22,7 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{
-  IfNet, Ifv4Net, Ifv6Net, Interface, IpRoute, Ipv4Route, Ipv6Route, MacAddr, Net, MAC_ADDRESS_SIZE,
-};
+use super::{HardwareAddr, IfNet, Ifv4Net, Ifv6Net, Interface, IpRoute, Ipv4Route, Ipv6Route, Net};
 
 use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
@@ -377,12 +375,19 @@ bitflags::bitflags! {
   }
 }
 
-fn parse(mut b: &[u8]) -> io::Result<Option<(SmolStr, Option<MacAddr>)>> {
+fn parse(b: &[u8]) -> io::Result<Option<(SmolStr, Option<HardwareAddr>)>> {
   if b.len() < 8 {
     return Err(invalid_address());
   }
 
-  b = &b[4..];
+  // `sdl_len` bounds this sockaddr inside the containing routing message.
+  // Parse no padding or following frame bytes even when a malformed length
+  // field claims they belong to the name, address, or selector.
+  let declared_len = b[0] as usize;
+  if declared_len < 8 || declared_len > b.len() {
+    return Err(invalid_address());
+  }
+  let b = &b[4..declared_len];
 
   // The encoding looks like the following:
   // +----------------------------+
@@ -411,12 +416,16 @@ fn parse(mut b: &[u8]) -> io::Result<Option<(SmolStr, Option<MacAddr>)>> {
     slen = 0
   }
 
-  let l = 4 + nlen + alen + slen;
+  let l = 4usize
+    .checked_add(nlen)
+    .and_then(|len| len.checked_add(alen))
+    .and_then(|len| len.checked_add(slen))
+    .ok_or_else(invalid_address)?;
   if b.len() < l {
     return Err(invalid_address());
   }
 
-  let mut data = &b[4..];
+  let data = &b[4..l];
   let name = if nlen > 0 {
     // The public interface name is UTF-8 and is expected to round-trip
     // through `interface_by_name`. A lossy replacement would invent a name
@@ -425,17 +434,14 @@ fn parse(mut b: &[u8]) -> io::Result<Option<(SmolStr, Option<MacAddr>)>> {
     let Ok(name) = core::str::from_utf8(&data[..nlen]) else {
       return Ok(None);
     };
-    data = &data[nlen..];
     SmolStr::from(name)
   } else {
     SmolStr::default()
   };
 
-  let addr = if alen == MAC_ADDRESS_SIZE {
-    Some(MacAddr::from_raw(data[..alen].try_into().unwrap()))
-  } else {
-    None
-  };
+  let address_start = nlen;
+  let address_end = address_start + alen;
+  let addr = HardwareAddr::from_bytes(&data[address_start..address_end]);
 
   Ok(Some((name, addr)))
 }
@@ -914,7 +920,7 @@ fn parse_interface_table(buf: &[u8]) -> io::Result<TinyVec<Interface>> {
         // into an aligned local without that requirement.
         let ifm: if_msghdr = core::ptr::read_unaligned(src.as_ptr() as *const if_msghdr);
         if ifm.ifm_type as i32 == RTM_IFINFO {
-          if let Some((name, mac)) = parse(&src[HEADER_SIZE..l])? {
+          if let Some((name, hardware_addr)) = parse(&src[HEADER_SIZE..l])? {
             let interface = Interface {
               index: ifm.ifm_index as u32,
               // `ifi_mtu` is `u_int32_t` on Apple, `u_long` on FreeBSD/
@@ -924,7 +930,7 @@ fn parse_interface_table(buf: &[u8]) -> io::Result<TinyVec<Interface>> {
               // practice.
               mtu: ifm.ifm_data.ifi_mtu as u32,
               name,
-              mac_addr: mac,
+              hardware_addr,
               flags: Flags::from_bits_retain(ifm.ifm_flags as u32),
             };
             results.push(interface);
@@ -1247,6 +1253,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use hardware_address::MacAddr;
   use libc::{RTAX_DST, RTAX_GATEWAY};
 
   // Pure-function unit tests for the BSD parser helpers and the
@@ -1440,16 +1447,33 @@ mod tests {
     message
   }
 
-  /// An `RTM_IFINFO` message followed by the interface's link-layer sockaddr.
-  fn ifinfo_message(index: u16, flags: Flags, mtu: u16, name: &str, mac: [u8; 6]) -> Vec<u8> {
+  fn link_addr(index: u16, name: &[u8], hardware_addr: &[u8], selector: &[u8]) -> Vec<u8> {
     // sockaddr_dl: sdl_len, sdl_family, sdl_index (2), sdl_type (IFT_ETHER),
     // sdl_nlen, sdl_alen, sdl_slen, then the name and address in sdl_data.
     let mut sdl = vec![0, AF_LINK as u8];
     sdl.extend(index.to_ne_bytes());
-    sdl.extend([6, name.len() as u8, mac.len() as u8, 0]);
-    sdl.extend(name.as_bytes());
-    sdl.extend(mac);
-    sdl[0] = sdl.len() as u8;
+    sdl.extend([
+      6,
+      u8::try_from(name.len()).unwrap(),
+      u8::try_from(hardware_addr.len()).unwrap(),
+      u8::try_from(selector.len()).unwrap(),
+    ]);
+    sdl.extend(name);
+    sdl.extend(hardware_addr);
+    sdl.extend(selector);
+    sdl[0] = u8::try_from(sdl.len()).unwrap();
+    sdl
+  }
+
+  /// An `RTM_IFINFO` message followed by the interface's link-layer sockaddr.
+  fn ifinfo_message(
+    index: u16,
+    flags: Flags,
+    mtu: u16,
+    name: &str,
+    hardware_addr: &[u8],
+  ) -> Vec<u8> {
+    let sdl = link_addr(index, name.as_bytes(), hardware_addr, &[]);
 
     let mut message = routing_message::<if_msghdr>(RTM_IFINFO, &padded_sockaddr(&sdl));
     let header = message.as_mut_ptr().cast::<if_msghdr>();
@@ -1475,11 +1499,80 @@ mod tests {
   }
 
   #[test]
+  fn parse_link_addr_preserves_known_and_raw_widths() {
+    let parsed = |address: &[u8]| {
+      parse(&link_addr(7, b"en7", address, &[]))
+        .unwrap()
+        .unwrap()
+        .1
+        .unwrap()
+    };
+
+    let mac = parsed(&[1; 6]);
+    assert!(matches!(mac, HardwareAddr::Mac(_)));
+    assert_eq!(mac.as_bytes(), &[1; 6]);
+
+    let eui64 = parsed(&[2; 8]);
+    assert!(matches!(eui64, HardwareAddr::Eui64(_)));
+    assert_eq!(eui64.as_bytes(), &[2; 8]);
+
+    let infiniband = parsed(&[3; 20]);
+    assert!(matches!(infiniband, HardwareAddr::InfiniBand(_)));
+    assert_eq!(infiniband.as_bytes(), &[3; 20]);
+
+    let raw = parsed(&[4; 5]);
+    assert!(matches!(raw, HardwareAddr::Raw(_)));
+    assert_eq!(raw.as_bytes(), &[4; 5]);
+  }
+
+  #[test]
+  fn parse_link_addr_uses_name_address_and_selector_offsets() {
+    let frame = link_addr(7, b"bridge7", &[1, 2, 3, 4, 5], &[0xaa, 0xbb, 0xcc]);
+    let (name, hardware_addr) = parse(&frame).unwrap().unwrap();
+    assert_eq!(name, "bridge7");
+    assert_eq!(hardware_addr.unwrap().as_bytes(), &[1, 2, 3, 4, 5]);
+  }
+
+  #[test]
+  fn parse_link_addr_normalizes_empty_and_all_zero_addresses() {
+    for address in [&[][..], &[0; 5], &[0; 6], &[0; 8], &[0; 20]] {
+      let (_, hardware_addr) = parse(&link_addr(7, b"en7", address, &[])).unwrap().unwrap();
+      assert!(hardware_addr.is_none(), "address length {}", address.len());
+    }
+  }
+
+  #[test]
+  fn parse_link_addr_rejects_malformed_declared_lengths() {
+    let frame = link_addr(7, b"en7", &[1; 6], &[9; 3]);
+
+    let mut declared_too_long = frame.clone();
+    declared_too_long[0] = u8::try_from(frame.len() + 1).unwrap();
+    assert_eq!(
+      parse(&declared_too_long).unwrap_err().kind(),
+      io::ErrorKind::InvalidData
+    );
+
+    let mut declared_too_short = frame.clone();
+    declared_too_short[0] = 7;
+    assert_eq!(
+      parse(&declared_too_short).unwrap_err().kind(),
+      io::ErrorKind::InvalidData
+    );
+
+    let mut address_borrows_selector = frame;
+    address_borrows_selector[6] = 10;
+    assert_eq!(
+      parse(&address_borrows_selector).unwrap_err().kind(),
+      io::ErrorKind::InvalidData
+    );
+  }
+
+  #[test]
   fn parse_interface_table_decodes_ifinfo_fixture() {
     let mac = [0x02, 0, 0, 0, 0, 0x01];
-    let mut buf = ifinfo_message(7, Flags::UP | Flags::RUNNING, 1500, "en7", mac);
+    let mut buf = ifinfo_message(7, Flags::UP | Flags::RUNNING, 1500, "en7", &mac);
     // A message from another routing-socket version is skipped whole.
-    let mut other_version = ifinfo_message(8, Flags::UP, 1500, "en8", mac);
+    let mut other_version = ifinfo_message(8, Flags::UP, 1500, "en8", &mac);
     other_version[2] = RTM_VERSION as u8 + 1;
     buf.extend(other_version);
 
@@ -1493,8 +1586,17 @@ mod tests {
   }
 
   #[test]
+  fn parse_interface_table_normalizes_an_all_zero_mac() {
+    let message = ifinfo_message(7, Flags::UP, 1500, "en7", &[0; 6]);
+    let interfaces = parse_interface_table(&message).unwrap();
+    assert_eq!(interfaces.len(), 1);
+    assert!(interfaces[0].hardware_addr().is_none());
+    assert!(interfaces[0].mac_addr().is_none());
+  }
+
+  #[test]
   fn parse_interface_table_rejects_truncated_fixture() {
-    let message = ifinfo_message(7, Flags::UP, 1500, "en7", [0x02, 0, 0, 0, 0, 0x01]);
+    let message = ifinfo_message(7, Flags::UP, 1500, "en7", &[0x02, 0, 0, 0, 0, 0x01]);
     // The message declares more bytes than the buffer holds.
     let err = parse_interface_table(&message[..message.len() - 1]).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -1854,6 +1956,7 @@ mod tests {
   fn parse_link_addr_skips_non_utf8_name() {
     let mut buf = [0u8; 9];
     // sockaddr_dl fields after len/family/index: type, nlen, alen, slen.
+    buf[0] = buf.len() as u8;
     buf[5] = 1;
     buf[8] = 0xff;
     assert!(parse(&buf).unwrap().is_none());
