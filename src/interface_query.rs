@@ -530,6 +530,15 @@ mod tests {
     assert!(first.or(second).matches(records[0]));
     assert_eq!(calls.get(), 0);
 
+    let calls = Cell::new(0);
+    let first_false = |_: crate::InterfaceAddress<'_>| false;
+    let second = |_: crate::InterfaceAddress<'_>| {
+      calls.set(calls.get() + 1);
+      true
+    };
+    assert!(first_false.or(second).matches(records[0]));
+    assert_eq!(calls.get(), 1);
+
     let and_calls = Cell::new(0);
     let first_false = |_: crate::InterfaceAddress<'_>| false;
     let second = |_: crate::InterfaceAddress<'_>| {
@@ -538,6 +547,15 @@ mod tests {
     };
     assert!(!first_false.and(second).matches(records[0]));
     assert_eq!(and_calls.get(), 0);
+
+    let and_calls = Cell::new(0);
+    let first_true = |_: crate::InterfaceAddress<'_>| true;
+    let second = |_: crate::InterfaceAddress<'_>| {
+      and_calls.set(and_calls.get() + 1);
+      true
+    };
+    assert!(first_true.and(second).matches(records[0]));
+    assert_eq!(and_calls.get(), 1);
     assert!(first.not().not().matches(records[0]));
   }
 
@@ -562,6 +580,11 @@ mod tests {
     let equal = |_: crate::InterfaceAddress<'_>, _: crate::InterfaceAddress<'_>| Ordering::Equal;
     assert_eq!(snapshot.iter().min_with(&equal).unwrap().index(), 1);
     assert_eq!(snapshot.iter().sorted_with(&equal)[0].index(), 1);
+
+    let reverse_index = |left: crate::InterfaceAddress<'_>, right: crate::InterfaceAddress<'_>| {
+      right.index().cmp(&left.index())
+    };
+    assert_eq!(snapshot.iter().min_with(&reverse_index).unwrap().index(), 3);
   }
 
   #[test]

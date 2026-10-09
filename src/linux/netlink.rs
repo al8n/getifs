@@ -3701,10 +3701,25 @@ mod netlink_tests {
       assert!(replay_links(reply()).0.unwrap().is_empty());
       assert!(replay_addrs(reply()).0.unwrap().is_empty());
       assert!(replay_best_local(reply()).0.unwrap().is_empty());
+      assert!(replay_default_indices(reply()).0.unwrap().is_empty());
       assert!(replay_nexthops(reply()).0.unwrap().is_empty());
       assert!(replay_routes(reply()).0.unwrap().is_empty());
       assert!(replay_gateways(reply()).0.unwrap().is_empty());
     }
+  }
+
+  #[test]
+  fn default_interface_selector_handles_no_route_and_malformed_error() {
+    let (indices, opens) = replay_default_indices(vec![done()]);
+    assert!(indices.unwrap().is_empty());
+    assert_eq!(opens, 1);
+
+    let (error, opens) = replay_default_indices(vec![nlmsgerr(rustix::io::Errno::INVAL)]);
+    assert_eq!(
+      error.unwrap_err().raw_os_error(),
+      Some(rustix::io::Errno::INVAL.raw_os_error())
+    );
+    assert_eq!(opens, 1);
   }
 
   #[test]

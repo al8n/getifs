@@ -43,6 +43,14 @@ impl DefaultInterfaces {
 /// omitted. Interfaces with only link-local or otherwise filtered addresses
 /// are retained because this query does not derive its result from
 /// `best_local_*` addresses.
+///
+/// A family with no usable default route, or with no available address-family
+/// stack, has an empty slice. Permission, malformed-response, and persistent
+/// interruption errors are returned. Linux considers the standard `local`,
+/// `main`, and `default` RPDB tables in their normal precedence order; custom
+/// `ip rule` policy tables are not modeled. On OpenBSD a lower route priority
+/// wins; other BSD targets do not expose a comparable priority, so every
+/// usable default route is retained as an equal-best result.
 pub fn default_interfaces() -> io::Result<DefaultInterfaces> {
   let (ipv4_indices, ipv6_indices) = default_interface_indices()?;
   let interfaces = interfaces()?;
@@ -108,7 +116,7 @@ mod tests {
 
   use crate::{Flags, HardwareAddr, Interface, SmolStr};
 
-  use super::{join_interfaces, DefaultInterfaces};
+  use super::{join_default_interfaces, join_interfaces, DefaultInterfaces};
 
   fn interface(index: u32, name: &str) -> Interface {
     Interface {
@@ -150,5 +158,22 @@ mod tests {
 
     assert_eq!(defaults.ipv4()[0].index(), 7);
     assert_eq!(defaults.ipv6()[0].index(), 7);
+  }
+
+  #[test]
+  fn joined_defaults_keep_each_family_sorted_and_independent() {
+    let interfaces: TinyVec<Interface> = vec![interface(2, "two"), interface(3, "three")].into();
+    let defaults = join_default_interfaces(&interfaces, vec![3, 2, 3].into(), vec![3].into());
+
+    assert_eq!(
+      defaults
+        .ipv4()
+        .iter()
+        .map(Interface::index)
+        .collect::<Vec<_>>(),
+      [2, 3]
+    );
+    assert_eq!(defaults.ipv6()[0].index(), 3);
+    assert!(!defaults.is_empty());
   }
 }

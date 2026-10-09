@@ -513,4 +513,138 @@ mod tests {
       Some(IpAddr::V4("192.0.2.1".parse::<Ipv4Addr>().unwrap()))
     );
   }
+
+  #[test]
+  fn enum_variants_delegate_address_network_and_usable_host_operations() {
+    let v4_addr = Ipv4Addr::new(192, 0, 2, 42);
+    let v6_addr = "2001:db8::42".parse::<Ipv6Addr>().unwrap();
+    assert_eq!(
+      IpAddr::V4(v4_addr).checked_add(1),
+      Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 43)))
+    );
+    assert_eq!(
+      IpAddr::V4(v4_addr).checked_sub(1),
+      Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 41)))
+    );
+    assert_eq!(
+      IpAddr::V6(v6_addr).checked_add(1),
+      Some(IpAddr::V6("2001:db8::43".parse().unwrap()))
+    );
+    assert_eq!(
+      IpAddr::V6(v6_addr).checked_sub(1),
+      Some(IpAddr::V6("2001:db8::41".parse().unwrap()))
+    );
+    assert!(IpAddr::V4(Ipv4Addr::UNSPECIFIED).checked_sub(1).is_none());
+
+    let v4 = Ipv4Net::new(v4_addr, 24).unwrap();
+    let v6 = Ipv6Net::new(v6_addr, 64).unwrap();
+    assert_eq!(
+      v4.checked_sub_address(1).unwrap().addr(),
+      Ipv4Addr::new(192, 0, 2, 41)
+    );
+    assert_eq!(
+      v6.checked_add_address(1).unwrap().addr(),
+      "2001:db8::43".parse::<Ipv6Addr>().unwrap()
+    );
+    assert_eq!(
+      v6.checked_sub_address(1).unwrap().addr(),
+      "2001:db8::41".parse::<Ipv6Addr>().unwrap()
+    );
+    assert_eq!(
+      v6.checked_sub_subnets(1).unwrap().addr(),
+      "2001:db7:ffff:ffff::42".parse::<Ipv6Addr>().unwrap()
+    );
+
+    let v4_net = IpNet::V4(v4);
+    assert_eq!(
+      v4_net.first_usable(),
+      IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))
+    );
+    assert_eq!(
+      v4_net.last_usable(),
+      IpAddr::V4(Ipv4Addr::new(192, 0, 2, 254))
+    );
+    assert_eq!(
+      v4_net.nth_usable(0),
+      Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)))
+    );
+    assert_eq!(
+      v4_net.nth_usable_back(0),
+      Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 254)))
+    );
+    assert_eq!(
+      v4_net.checked_add_address(1),
+      Some(IpNet::V4(
+        Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 43), 24).unwrap()
+      ))
+    );
+    assert_eq!(
+      v4_net.checked_sub_address(1),
+      Some(IpNet::V4(
+        Ipv4Net::new(Ipv4Addr::new(192, 0, 2, 41), 24).unwrap()
+      ))
+    );
+    assert_eq!(
+      v4_net.checked_add_subnets(1),
+      Some(IpNet::V4(
+        Ipv4Net::new(Ipv4Addr::new(192, 0, 3, 42), 24).unwrap()
+      ))
+    );
+    assert_eq!(
+      v4_net.checked_sub_subnets(1),
+      Some(IpNet::V4(
+        Ipv4Net::new(Ipv4Addr::new(192, 0, 1, 42), 24).unwrap()
+      ))
+    );
+    assert!(v4_net
+      .checked_sub_address(u128::from(u32::MAX) + 1)
+      .is_none());
+    assert!(v4_net
+      .checked_sub_subnets(u128::from(u32::MAX) + 1)
+      .is_none());
+
+    let v6_usable = IpNet::V6(Ipv6Net::new("2001:db8::".parse().unwrap(), 126).unwrap());
+    assert_eq!(
+      v6_usable.first_usable(),
+      IpAddr::V6("2001:db8::".parse().unwrap())
+    );
+    assert_eq!(
+      v6_usable.last_usable(),
+      IpAddr::V6("2001:db8::3".parse().unwrap())
+    );
+    assert_eq!(
+      v6_usable.nth_usable(1),
+      Some(IpAddr::V6("2001:db8::1".parse().unwrap()))
+    );
+    assert_eq!(
+      v6_usable.nth_usable_back(1),
+      Some(IpAddr::V6("2001:db8::2".parse().unwrap()))
+    );
+
+    let v6_net = IpNet::V6(v6);
+    assert_eq!(
+      v6_net.checked_add_address(1),
+      Some(IpNet::V6(
+        Ipv6Net::new("2001:db8::43".parse().unwrap(), 64).unwrap()
+      ))
+    );
+    assert_eq!(
+      v6_net.checked_sub_address(1),
+      Some(IpNet::V6(
+        Ipv6Net::new("2001:db8::41".parse().unwrap(), 64).unwrap()
+      ))
+    );
+    assert_eq!(
+      v6_net.checked_add_subnets(1),
+      Some(IpNet::V6(
+        Ipv6Net::new("2001:db8:0:1::42".parse().unwrap(), 64).unwrap()
+      ))
+    );
+    assert_eq!(
+      v6_net.checked_sub_subnets(1),
+      Some(IpNet::V6(
+        Ipv6Net::new("2001:db7:ffff:ffff::42".parse().unwrap(), 64).unwrap()
+      ))
+    );
+  }
 }

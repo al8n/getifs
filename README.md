@@ -189,7 +189,13 @@ slice. The same interface can appear in both families. The route and interface
 captures are weak snapshots, so an index that vanishes or has no UTF-8 name is
 simply absent from the joined slice. Link-local-only interfaces are still
 represented because this API starts from unfiltered interfaces, not from local
-address results.
+address results. A missing route or unavailable address-family stack yields an
+empty family slice; permission, malformed-response, and persistent-interrupt
+errors still propagate. Linux follows its built-in `local`, `main`, and
+`default` RPDB-table precedence, metric, and IPv6 router-preference rules, but
+does not model custom `ip rule` policy tables. OpenBSD uses route priority;
+other BSD targets cannot expose an equivalent priority, so they retain every
+usable default as equal-best.
 
 `preferred_public_*_addr` and `preferred_private_*_addr` return one typed
 candidate. They require `Flags::UP` and exclude every forwarding-blacklisted
@@ -197,6 +203,14 @@ address before public/private classification and ranking. A default route is a
 preference, not an eligibility requirement, so an eligible address can still
 be selected when that family has no default route. `_by` variants replace only
 the ranking; they cannot make down or nonforwardable candidates eligible.
+The mixed-family default ranking is: family-default membership, IPv4 before
+IPv6, larger network (smaller prefix), lower interface index, numeric address,
+then cached interface name. A complete tie keeps the first captured record.
+Because default membership comes first, an eligible IPv6 default candidate
+outranks an eligible nondefault IPv4 candidate; the family-specific selectors
+consider only their own family, so the IPv4-before-IPv6 tie-break is irrelevant
+there. `Ok(None)` means no eligible joined record was captured; ordinary
+enumeration, permission, and route-parsing errors remain `Err`.
 
 ### Hardware addresses (0.8.0-dev)
 

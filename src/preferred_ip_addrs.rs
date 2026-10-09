@@ -11,17 +11,36 @@ use super::{
 ///
 /// A candidate must be on an administratively-up interface, outside RFC 6890,
 /// and outside the forwarding blacklist. Default-route membership is a
-/// preference, not a requirement.
+/// preference, not a requirement. The default ranking is, in order:
+///
+/// 1. An interface selected by that address family's default route.
+/// 2. IPv4 before IPv6.
+/// 3. A larger network (smaller prefix length).
+/// 4. A lower interface index.
+/// 5. A numerically smaller address.
+/// 6. A lexicographically smaller cached interface name.
+///
+/// The first captured candidate wins a complete tie. An IPv6 default-route
+/// candidate therefore outranks a nondefault IPv4 candidate; IPv4-before-IPv6
+/// applies only after family-default membership ties. `Ok(None)` means no
+/// eligible joined record was captured, including when no default route exists.
+/// I/O, permission, and route-parse failures are returned as `Err`.
 pub fn preferred_public_addr() -> io::Result<Option<IfNet>> {
   preferred_default(Class::Public, Family::Any)
 }
 
 /// Returns the preferred forwardable public IPv4 interface address.
+///
+/// Only IPv4 candidates and IPv4 default-route membership participate, so the
+/// mixed-family IPv4-before-IPv6 tie-break does not apply.
 pub fn preferred_public_ipv4_addr() -> io::Result<Option<Ifv4Net>> {
   preferred_default(Class::Public, Family::V4).map(as_v4)
 }
 
 /// Returns the preferred forwardable public IPv6 interface address.
+///
+/// Only IPv6 candidates and IPv6 default-route membership participate, so the
+/// mixed-family IPv4-before-IPv6 tie-break does not apply.
 pub fn preferred_public_ipv6_addr() -> io::Result<Option<Ifv6Net>> {
   preferred_default(Class::Public, Family::V6).map(as_v6)
 }
@@ -30,7 +49,8 @@ pub fn preferred_public_ipv6_addr() -> io::Result<Option<Ifv6Net>> {
 ///
 /// Private uses the crate's RFC 6890 classification: the address must be in
 /// RFC 6890 and outside the forwarding blacklist, and its interface must be
-/// administratively up.
+/// administratively up. Its ranking and `Ok(None)`/`Err` behavior are the same
+/// as [`preferred_public_addr`].
 pub fn preferred_private_addr() -> io::Result<Option<IfNet>> {
   preferred_default(Class::Private, Family::Any)
 }
@@ -46,10 +66,10 @@ pub fn preferred_private_ipv6_addr() -> io::Result<Option<Ifv6Net>> {
 }
 
 /// Returns the preferred eligible public address using `order` instead of the
-/// default ranking.
+/// complete default ranking.
 ///
 /// `order` cannot make down, forwarding-blacklisted, or RFC-misclassified
-/// addresses eligible.
+/// addresses eligible. A complete tie still keeps the first captured candidate.
 pub fn preferred_public_addr_by<C>(order: C) -> io::Result<Option<IfNet>>
 where
   C: AddressComparator,
@@ -74,7 +94,7 @@ where
 }
 
 /// Returns the preferred eligible private address using `order` instead of the
-/// default ranking.
+/// complete default ranking.
 pub fn preferred_private_addr_by<C>(order: C) -> io::Result<Option<IfNet>>
 where
   C: AddressComparator,
@@ -192,15 +212,19 @@ fn as_v6(candidate: Option<IfNet>) -> Option<Ifv6Net> {
 
 #[cfg(test)]
 mod tests {
-  use std::cmp::Ordering;
+  use std::{
+    cmp::Ordering,
+    net::{Ipv4Addr, Ipv6Addr},
+  };
 
   use smallvec_wrapper::{SmallVec, TinyVec};
 
   use crate::{
-    DefaultInterfaces, Flags, HardwareAddr, IfNet, Interface, InterfaceSnapshot, SmolStr,
+    DefaultInterfaces, Flags, HardwareAddr, IfNet, Ifv4Net, Ifv6Net, Interface, InterfaceSnapshot,
+    SmolStr,
   };
 
-  use super::{default_order, select, Class, Family};
+  use super::{as_v4, as_v6, default_order, select, Class, Family};
 
   fn interface(index: u32, name: &str, flags: Flags) -> Interface {
     Interface {
@@ -363,6 +387,67 @@ mod tests {
       .index(),
       2
     );
+  }
+
+  #[test]
+  fn any_family_default_membership_precedes_ipv4_preference() {
+    let interfaces: TinyVec<Interface> = vec![
+      interface(2, "v4-nondefault", Flags::UP),
+      interface(3, "v6-default", Flags::UP),
+    ]
+    .into();
+    let networks: SmallVec<IfNet> = vec![
+      IfNet::with_prefix_len_assert(2, "8.8.8.8".parse().unwrap(), 24),
+      IfNet::with_prefix_len_assert(3, "2606:4700:4700::1111".parse().unwrap(), 64),
+    ]
+    .into();
+    let snapshot = InterfaceSnapshot::from_parts(interfaces, networks);
+
+    let ipv6_default = DefaultInterfaces {
+      ipv4: TinyVec::new(),
+      ipv6: vec![snapshot.interfaces()[1].clone()].into(),
+    };
+    assert_eq!(
+      select(
+        &snapshot,
+        Class::Public,
+        Family::Any,
+        &default_order(&ipv6_default)
+      )
+      .unwrap()
+      .index(),
+      3
+    );
+
+    let ipv4_default = DefaultInterfaces {
+      ipv4: vec![snapshot.interfaces()[0].clone()].into(),
+      ipv6: TinyVec::new(),
+    };
+    assert_eq!(
+      select(
+        &snapshot,
+        Class::Public,
+        Family::Any,
+        &default_order(&ipv4_default)
+      )
+      .unwrap()
+      .index(),
+      2
+    );
+  }
+
+  #[test]
+  fn typed_result_conversions_only_keep_the_requested_family() {
+    let v4 = Ifv4Net::with_prefix_len_assert(2, Ipv4Addr::new(8, 8, 8, 8), 24);
+    let v6 =
+      Ifv6Net::with_prefix_len_assert(3, "2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap(), 64);
+
+    assert_eq!(as_v4(Some(v4.into())), Some(v4));
+    assert_eq!(as_v4(Some(v6.into())), None);
+    assert_eq!(as_v4(None), None);
+    assert_eq!(as_v6(Some(v6.into())), Some(v6));
+    assert_eq!(as_v6(Some(v4.into())), None);
+    assert_eq!(as_v6(None), None);
   }
 
   #[test]
