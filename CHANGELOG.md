@@ -1,6 +1,6 @@
 # RELEASED
 
-## 0.7.0 (Unreleased)
+## 0.7.0 (October 9th, 2026)
 
 The planned 0.6.2 release was never published. Its rustix build fix and
 coverage-tool migration are included in this release.
@@ -9,9 +9,10 @@ coverage-tool migration are included in this release.
 
 This pre-1.0 minor release includes breaking API and behavior changes:
 
-- The public `MacAddr`/`ParseMacAddrError` types and `rfc` re-export now come
-  from `hardware-address` 1.x and `iprfc` 1.x. Update code that depends on the
-  older dependency APIs, and allow for the non-exhaustive parse error.
+- The public `MacAddr`/`ParseMacAddrError` types, `rfc` re-export, and `probe`
+  re-export now come from `hardware-address` 1.x, `iprfc` 1.x, and `iprobe`
+  1.x, respectively. Update code that depends on the older dependency APIs,
+  and allow for the non-exhaustive parse error.
 - `IpRoute` is non-exhaustive; downstream matches need a wildcard arm.
   Interface equality and hashing describe a captured snapshot, not stable
   interface identity. Names, indices, and flags can change between reads.
@@ -157,6 +158,8 @@ This pre-1.0 minor release includes breaking API and behavior changes:
   `UnsupportedAddressSize` variant. `hardware-address` 1.0 and `iprfc` 1.0 use
   `pastey`, so the unmaintained `paste` now enters only through
   `smallvec-wrapper`.
+- The `probe` re-export is now `iprobe` 1.0, so downstream users of
+  `getifs::probe` should review the 1.x API.
 - Restrict the Linux backend cfg to Linux and Android. Other unsupported
   targets now fail with a clear compile-time error instead of compiling a
   meaningless Linux path.
