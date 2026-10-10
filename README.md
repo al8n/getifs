@@ -74,6 +74,11 @@ for gateway in gateways {
 - Fetching the routing table: [examples/route.rs](./examples/route.rs)
 - Fetching local ip addresses: [examples/local_ip_addrs.rs](./examples/local_ip_addrs.rs)
 - Fetching ip addresses by RFC: [examples/filter_by_rfc.rs](./examples/filter_by_rfc.rs)
+- Querying a cached snapshot with typed predicates and ordering: [examples/snapshot_query.rs](./examples/snapshot_query.rs)
+- Selecting public/private preferred addresses without requiring one: [examples/preferred_addrs.rs](./examples/preferred_addrs.rs)
+- Listing family-aware default-route interfaces: [examples/default_interfaces.rs](./examples/default_interfaces.rs)
+- Exploring checked synthetic IP-address and subnet arithmetic: [examples/checked_ip_math.rs](./examples/checked_ip_math.rs)
+- Inspecting captured and synthetic hardware-address forms: [examples/hardware_addresses.rs](./examples/hardware_addresses.rs)
 
 ## Details
 
