@@ -1,6 +1,6 @@
 [package]
 name = "getifs"
-version = "0.7.0"
+version = "0.8.0-dev"
 edition = "2021"
 repository = "https://github.com/al8n/getifs"
 documentation = "https://docs.rs/getifs"

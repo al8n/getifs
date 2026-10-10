@@ -11,9 +11,17 @@ use crate::{
 };
 
 use super::netlink::{
-  netlink_addr, netlink_best_local_addrs, netlink_best_local_addrs_into, FilterMode,
-  FILTER_DEFER_LIMIT,
+  netlink_addr, netlink_best_local_addrs, netlink_best_local_addrs_into,
+  netlink_default_route_interface_indices, FilterMode, FILTER_DEFER_LIMIT,
 };
+
+pub(crate) fn default_ipv4_interface_indices() -> io::Result<SmallVec<u32>> {
+  netlink_default_route_interface_indices(AddressFamily::INET)
+}
+
+pub(crate) fn default_ipv6_interface_indices() -> io::Result<SmallVec<u32>> {
+  netlink_default_route_interface_indices(AddressFamily::INET6)
+}
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
   netlink_best_local_addrs(AddressFamily::INET)

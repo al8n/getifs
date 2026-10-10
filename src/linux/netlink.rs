@@ -14,7 +14,10 @@ use std::{collections::HashSet, io, mem, net::IpAddr, os::fd::OwnedFd};
 
 use crate::local_ip_filter;
 
-use super::{super::Address, Flags, Interface, MacAddr, Net, MAC_ADDRESS_SIZE};
+use super::{
+  super::{Address, HardwareAddr},
+  Flags, Interface, Net,
+};
 
 const NLMSG_HDRLEN: usize = mem::size_of::<MessageHeader>();
 const NLMSG_ALIGNTO: u32 = netlink::NLMSG_ALIGNTO;
@@ -765,12 +768,8 @@ where
 }
 
 #[inline]
-fn mac_addr_from_attr(data: &[u8]) -> Option<MacAddr> {
-  let bytes: [u8; MAC_ADDRESS_SIZE] = data.try_into().ok()?;
-  bytes
-    .iter()
-    .any(|&byte| byte != 0)
-    .then(|| MacAddr::from_raw(bytes))
+fn hardware_addr_from_attr(data: &[u8]) -> Option<HardwareAddr> {
+  HardwareAddr::from_bytes(data)
 }
 
 #[inline]
@@ -854,7 +853,7 @@ fn netlink_interface_once<T: Transport>(
                 None => invalid_name = true,
               }
             }
-            IFLA_ADDRESS => interface.mac_addr = mac_addr_from_attr(data),
+            IFLA_ADDRESS => interface.hardware_addr = hardware_addr_from_attr(data),
             _ => {}
           }
 
@@ -1021,6 +1020,27 @@ where
   Ok(out)
 }
 
+/// Returns every interface tied at the best usable default route for `family`.
+///
+/// The route-ranking and interruption-retry rules are shared with
+/// [`netlink_best_local_addrs_into`]. This selector deliberately does not
+/// fetch interface addresses.
+pub(super) fn netlink_default_route_interface_indices(
+  family: AddressFamily,
+) -> io::Result<SmallVec<u32>> {
+  netlink_default_route_interface_indices_with(&mut Kernel, family)
+}
+
+fn netlink_default_route_interface_indices_with<T>(
+  transport: &mut T,
+  family: AddressFamily,
+) -> io::Result<SmallVec<u32>>
+where
+  T: Transport,
+{
+  retry_interrupted(|| netlink_default_route_interface_indices_once(transport, family))
+}
+
 /// Variant of [`netlink_best_local_addrs`] that pushes into the
 /// caller's buffer. Lets the union `best_local_addrs()` walk both
 /// families without allocating intermediate per-family `SmallVec`s.
@@ -1049,7 +1069,18 @@ where
   let start = out.len();
   let result = retry_interrupted(|| {
     out.truncate(start);
-    netlink_best_local_addrs_into_once(transport, family, &mut *out)
+    let indices = netlink_default_route_interface_indices_once(transport, family)?;
+    for idx in indices {
+      netlink_addr_into_with(
+        transport,
+        family,
+        idx,
+        local_ip_filter,
+        FilterMode::Pure,
+        out,
+      )?;
+    }
+    Ok(())
   });
   if result.is_err() {
     out.truncate(start);
@@ -1057,14 +1088,12 @@ where
   result
 }
 
-fn netlink_best_local_addrs_into_once<T, N>(
+fn netlink_default_route_interface_indices_once<T>(
   transport: &mut T,
   family: AddressFamily,
-  out: &mut SmallVec<N>,
-) -> io::Result<()>
+) -> io::Result<SmallVec<u32>>
 where
   T: Transport,
-  N: Net,
 {
   // Lazy nexthop-dump: don't pay the `RTM_GETNEXTHOP` round-trip
   // unless the route walk actually encounters an `RTA_NH_ID`
@@ -1363,7 +1392,7 @@ where
   })?;
 
   if matches!(end, DumpEnd::FamilyUnavailable) {
-    return Ok(());
+    return Ok(SmallVec::new());
   }
 
   // Resolve any deferred `RTA_NH_ID` default-route references in a
@@ -1414,21 +1443,7 @@ where
   best_oifs.sort_unstable();
   best_oifs.dedup();
 
-  // Fetch addresses for every selected interface, appending into
-  // the caller-provided buffer. The first failure ends the walk, and
-  // `netlink_best_local_addrs_into_with` removes what this attempt
-  // appended.
-  for idx in best_oifs {
-    netlink_addr_into_with(
-      transport,
-      family,
-      idx,
-      local_ip_filter,
-      FilterMode::Pure,
-      out,
-    )?;
-  }
-  Ok(())
+  Ok(best_oifs)
 }
 
 /// One nexthop-object entry from a `RTM_GETNEXTHOP` dump. Either a
@@ -2355,7 +2370,7 @@ where
 
           let attrlen = attr.len as usize;
           if attrlen < RtAttr::SIZE || attrlen > rtattr_buf.len() {
-            // Same rationale as in `netlink_best_local_addrs_into_once`:
+            // Same rationale as in `netlink_default_route_interface_indices_once`:
             // a partially-parsed route could emit a bogus address
             // into `gateways`. Fail the whole call instead.
             return Err(rustix::io::Errno::INVAL.into());
@@ -3143,13 +3158,25 @@ mod netlink_tests {
   }
 
   #[test]
-  fn mac_and_name_attributes_preserve_only_valid_representations() {
-    assert!(mac_addr_from_attr(&[]).is_none());
-    assert!(mac_addr_from_attr(&[1; 5]).is_none());
-    assert!(mac_addr_from_attr(&[1; MAC_ADDRESS_SIZE]).is_some());
-    assert!(mac_addr_from_attr(&[0; MAC_ADDRESS_SIZE]).is_none());
-    assert!(mac_addr_from_attr(&[1; 8]).is_none());
-    assert!(mac_addr_from_attr(&[1; 20]).is_none());
+  fn hardware_and_name_attributes_preserve_complete_representations() {
+    assert!(hardware_addr_from_attr(&[]).is_none());
+    assert!(matches!(
+      hardware_addr_from_attr(&[1; 5]),
+      Some(HardwareAddr::Raw(_))
+    ));
+    assert!(matches!(
+      hardware_addr_from_attr(&[1; 6]),
+      Some(HardwareAddr::Mac(_))
+    ));
+    assert!(hardware_addr_from_attr(&[0; 6]).is_none());
+    assert!(matches!(
+      hardware_addr_from_attr(&[1; 8]),
+      Some(HardwareAddr::Eui64(_))
+    ));
+    assert!(matches!(
+      hardware_addr_from_attr(&[1; 20]),
+      Some(HardwareAddr::InfiniBand(_))
+    ));
 
     assert_eq!(interface_name_from_attr(b"eth0\0ignored"), Some("eth0"));
     assert!(interface_name_from_attr(&[b'e', 0xff, 0]).is_none());
@@ -3366,6 +3393,12 @@ mod netlink_tests {
     (result.map(|()| addrs), transport.opens)
   }
 
+  fn replay_default_indices(datagrams: Vec<Vec<u8>>) -> (io::Result<SmallVec<u32>>, usize) {
+    let mut transport = CountingReplay::new(datagrams);
+    let indices = netlink_default_route_interface_indices_with(&mut transport, AddressFamily::INET);
+    (indices, transport.opens)
+  }
+
   fn replay_nexthops(datagrams: Vec<Vec<u8>>) -> (io::Result<Vec<Nexthop>>, usize) {
     let mut transport = CountingReplay::new(datagrams);
     let nexthops = dump_nexthops(&mut transport).map(|map| {
@@ -3530,6 +3563,10 @@ mod netlink_tests {
     ];
     let addrs_of_5 = [ipv4_addr(5, [203, 0, 113, 10], 24), done()];
 
+    let (indices, opens) = replay_default_indices(vec![routes.concat()]);
+    assert_eq!(indices.unwrap().as_slice(), &[3, 5]);
+    assert_eq!(opens, 1);
+
     let (addrs, opens) = replay_best_local(vec![
       routes.concat(),
       addrs_of_3.concat(),
@@ -3664,10 +3701,25 @@ mod netlink_tests {
       assert!(replay_links(reply()).0.unwrap().is_empty());
       assert!(replay_addrs(reply()).0.unwrap().is_empty());
       assert!(replay_best_local(reply()).0.unwrap().is_empty());
+      assert!(replay_default_indices(reply()).0.unwrap().is_empty());
       assert!(replay_nexthops(reply()).0.unwrap().is_empty());
       assert!(replay_routes(reply()).0.unwrap().is_empty());
       assert!(replay_gateways(reply()).0.unwrap().is_empty());
     }
+  }
+
+  #[test]
+  fn default_interface_selector_handles_no_route_and_malformed_error() {
+    let (indices, opens) = replay_default_indices(vec![done()]);
+    assert!(indices.unwrap().is_empty());
+    assert_eq!(opens, 1);
+
+    let (error, opens) = replay_default_indices(vec![nlmsgerr(rustix::io::Errno::INVAL)]);
+    assert_eq!(
+      error.unwrap_err().raw_os_error(),
+      Some(rustix::io::Errno::INVAL.raw_os_error())
+    );
+    assert_eq!(opens, 1);
   }
 
   #[test]

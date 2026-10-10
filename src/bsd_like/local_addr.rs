@@ -27,6 +27,38 @@ use super::{
   interface_ipv6_addresses, message_too_short, parse_addrs, IfNet, Ifv4Net, Ifv6Net, Net,
 };
 
+pub(crate) fn default_ipv4_interface_indices() -> io::Result<SmallVec<u32>> {
+  default_interface_indices(AF_INET)
+}
+
+pub(crate) fn default_ipv6_interface_indices() -> io::Result<SmallVec<u32>> {
+  default_interface_indices(AF_INET6)
+}
+
+fn default_interface_indices(family: i32) -> io::Result<SmallVec<u32>> {
+  let mut indices = SmallVec::new();
+  let result = (|| {
+    indices = normalize_interface_indices(best_route_interfaces(
+      &fetch(family, NET_RT_DUMP, 0)?,
+      family,
+    )?);
+    Ok(())
+  })();
+  super::family_unavailable_to_empty(result)?;
+  Ok(indices)
+}
+
+fn normalize_interface_indices(indices: SmallVec<u16>) -> SmallVec<u32> {
+  let mut indices: SmallVec<u32> = indices
+    .into_iter()
+    .filter(|&index| index != 0)
+    .map(u32::from)
+    .collect();
+  indices.sort_unstable();
+  indices.dedup();
+  indices
+}
+
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
   let mut out = SmallVec::new();
   best_local_addrs_in(AF_INET, &mut out)?;
@@ -307,6 +339,15 @@ mod tests {
     // Without a family, a route with no destination is not a default route.
     let oifs = best_route_interfaces(&buf, AF_UNSPEC).unwrap();
     assert_eq!(oifs.as_slice(), &[2, 3]);
+  }
+
+  #[test]
+  fn public_index_contract_drops_zero_and_sorts_and_deduplicates() {
+    let indices: SmallVec<u16> = vec![3, 0, 2, 3, 2].into();
+    assert_eq!(
+      normalize_interface_indices(indices).as_slice(),
+      &[2u32, 3u32]
+    );
   }
 
   #[test]

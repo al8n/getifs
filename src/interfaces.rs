@@ -8,8 +8,8 @@ use smallvec_wrapper::{SmallVec, TinyVec};
 use smol_str::SmolStr;
 
 use super::{
-  ifname_to_index, ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, os, Flags, IfNet, Ifv4Net,
-  Ifv6Net,
+  ifname_to_index, ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, os, Flags, HardwareAddr,
+  IfNet, Ifv4Net, Ifv6Net,
 };
 
 // `IfAddr` / `Ifv4Addr` / `Ifv6Addr` appear only inside `cfg_multicast!`
@@ -33,7 +33,7 @@ pub struct Interface {
   pub(super) index: u32,
   pub(super) mtu: u32,
   pub(super) name: SmolStr,
-  pub(super) mac_addr: Option<MacAddr>,
+  pub(super) hardware_addr: Option<HardwareAddr>,
   pub(super) flags: Flags,
 }
 
@@ -59,10 +59,27 @@ impl Interface {
     self.mtu
   }
 
-  /// Returns the hardware address of the interface.
+  /// Returns the interface's ordinary six-octet MAC address, when captured.
+  ///
+  /// Use [`Interface::hardware_addr`] to retain EUI-64, InfiniBand, and raw
+  /// link-layer address widths.
   #[inline]
   pub const fn mac_addr(&self) -> Option<MacAddr> {
-    self.mac_addr
+    match &self.hardware_addr {
+      Some(HardwareAddr::Mac(addr)) => Some(*addr),
+      _ => None,
+    }
+  }
+
+  /// Returns the complete captured hardware address of the interface.
+  ///
+  /// Operating-system all-zero hardware values are normalized to `None`.
+  #[inline]
+  pub const fn hardware_addr(&self) -> Option<&HardwareAddr> {
+    match &self.hardware_addr {
+      Some(addr) => Some(addr),
+      None => None,
+    }
   }
 
   /// Returns the flags of the interface.
@@ -1004,7 +1021,32 @@ cfg_multicast!(
 
 #[cfg(test)]
 mod tests {
+  use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+  };
+
   use super::*;
+
+  const fn mac_from(interface: &Interface) -> Option<MacAddr> {
+    interface.mac_addr()
+  }
+
+  fn interface_with_hardware(hardware_addr: Option<HardwareAddr>) -> Interface {
+    Interface {
+      index: 7,
+      mtu: 1500,
+      name: SmolStr::new("test0"),
+      hardware_addr,
+      flags: Flags::UP,
+    }
+  }
+
+  fn hash(interface: &Interface) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    interface.hash(&mut hasher);
+    hasher.finish()
+  }
 
   #[cfg(linux_like)]
   fn missing_interface_errno() -> i32 {
@@ -1072,5 +1114,31 @@ mod tests {
       missing_interface_to_none::<()>(Err(io::Error::from_raw_os_error(invalid_input_errno())))
         .unwrap_err();
     assert_eq!(error.raw_os_error(), Some(invalid_input_errno()));
+  }
+
+  #[test]
+  fn hardware_accessors_preserve_the_const_mac_api() {
+    let mac = MacAddr::from_raw([1, 2, 3, 4, 5, 6]);
+    let interface = interface_with_hardware(Some(HardwareAddr::Mac(mac)));
+    assert_eq!(mac_from(&interface), Some(mac));
+    assert_eq!(
+      interface.hardware_addr().unwrap().as_bytes(),
+      mac.as_bytes()
+    );
+
+    let eui64 = interface_with_hardware(HardwareAddr::from_bytes(&[1; 8]));
+    assert_eq!(mac_from(&eui64), None);
+    assert!(matches!(
+      eui64.hardware_addr(),
+      Some(HardwareAddr::Eui64(_))
+    ));
+  }
+
+  #[test]
+  fn interface_identity_includes_complete_hardware_bytes() {
+    let left = interface_with_hardware(HardwareAddr::from_bytes(&[1; 5]));
+    let right = interface_with_hardware(HardwareAddr::from_bytes(&[2; 5]));
+    assert_ne!(left, right);
+    assert_ne!(hash(&left), hash(&right));
   }
 }
