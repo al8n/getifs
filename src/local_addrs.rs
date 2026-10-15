@@ -160,9 +160,10 @@ where
 /// The "best" interface is determined by the routing metrics of default routes (`0.0.0.0`).
 ///
 /// On every platform a default route is a `/0` route, so split halves such
-/// as `0.0.0.0/1` do not count. Linux skips a default route, or a multipath
-/// leg, whose nexthop is dead, link-down, or unresolved, and Windows skips
-/// disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
+/// as `0.0.0.0/1` do not count. Linux skips an expired route and a default
+/// route, or a multipath leg, whose nexthop is dead, link-down, or
+/// unresolved, and Windows skips disconnected interfaces and interfaces
+/// that set `DisableDefaultRoutes`.
 ///
 /// Selection reads only the routing table and never consults the neighbor
 /// table, so the result can include addresses of an interface whose router
@@ -170,10 +171,12 @@ where
 /// uses one per lookup; [`default_interfaces`](fn@crate::default_interfaces)
 /// describes the full boundary.
 ///
-/// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
-/// `default`) are consulted; hosts with unconstrained custom `ip rule`
-/// policies ahead of `main` may have outbound traffic routed via a
-/// custom table this call does not see.
+/// Best-effort on Linux: only the built-in rule chain (`local`, `main`,
+/// `default`) is followed, so hosts with unconstrained custom `ip rule`
+/// policies ahead of `main` may have outbound traffic routed via a custom
+/// table this call does not see. A winning `blackhole`, `unreachable`, or
+/// `prohibit` default yields no addresses, and `throw` falls through to the
+/// next built-in table.
 ///
 /// Best-effort on FreeBSD / NetBSD / DragonFly: those kernels don't
 /// expose a documented routing priority on `rt_msghdr` — only OpenBSD
@@ -206,9 +209,10 @@ pub fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 /// The "best" interface is determined by the routing metrics of default routes (`::`).
 ///
 /// On every platform a default route is a `/0` route, so split halves such
-/// as `::/1` do not count. Linux skips a default route, or a multipath leg,
-/// whose nexthop is dead, link-down, or unresolved, and Windows skips
-/// disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
+/// as `::/1` do not count. Linux skips an expired route and a default
+/// route, or a multipath leg, whose nexthop is dead, link-down, or
+/// unresolved, and Windows skips disconnected interfaces and interfaces
+/// that set `DisableDefaultRoutes`.
 ///
 /// Selection reads only the routing table and never consults the neighbor
 /// table, so the result can include addresses of an interface whose router
@@ -216,10 +220,12 @@ pub fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 /// uses one per lookup; [`default_interfaces`](fn@crate::default_interfaces)
 /// describes the full boundary.
 ///
-/// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
-/// `default`) are consulted; hosts with unconstrained custom `ip rule`
-/// policies ahead of `main` may have outbound traffic routed via a
-/// custom table this call does not see.
+/// Best-effort on Linux: only the built-in rule chain (`local`, `main`) is
+/// followed, so hosts with unconstrained custom `ip rule` policies ahead of
+/// `main` may have outbound traffic routed via a custom table this call
+/// does not see. A winning `blackhole`, `unreachable`, or `prohibit`
+/// default yields no addresses, and so does a `throw` default in `main`,
+/// which has no later built-in table to fall through to.
 ///
 /// Best-effort on FreeBSD / NetBSD / DragonFly: those kernels don't
 /// expose a documented routing priority on `rt_msghdr` — only OpenBSD
@@ -252,10 +258,10 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// The "best" interfaces are determined by the routing metrics of default routes.
 ///
 /// On every platform a default route is a `/0` route, so split halves such
-/// as `0.0.0.0/1` and `::/1` do not count. Linux skips a default route, or
-/// a multipath leg, whose nexthop is dead, link-down, or unresolved, and
-/// Windows skips disconnected interfaces and interfaces that set
-/// `DisableDefaultRoutes`.
+/// as `0.0.0.0/1` and `::/1` do not count. Linux skips an expired route and
+/// a default route, or a multipath leg, whose nexthop is dead, link-down,
+/// or unresolved, and Windows skips disconnected interfaces and interfaces
+/// that set `DisableDefaultRoutes`.
 ///
 /// Selection reads only the routing table and never consults the neighbor
 /// table, so the result can include addresses of an interface whose router
@@ -263,10 +269,13 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// uses one per lookup; [`default_interfaces`](fn@crate::default_interfaces)
 /// describes the full boundary.
 ///
-/// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
-/// `default`) are consulted; hosts with unconstrained custom `ip rule`
-/// policies ahead of `main` may have outbound traffic routed via a
-/// custom table this call does not see.
+/// Best-effort on Linux: only the built-in rule chain of each family (IPv4
+/// `local`, `main`, `default`; IPv6 `local`, `main`) is followed, so hosts
+/// with unconstrained custom `ip rule` policies ahead of `main` may have
+/// outbound traffic routed via a custom table this call does not see. A
+/// winning `blackhole`, `unreachable`, or `prohibit` default yields no
+/// addresses for its family, and `throw` falls through to the next built-in
+/// table.
 ///
 /// Best-effort on FreeBSD / NetBSD / DragonFly: those kernels don't
 /// expose a documented routing priority on `rt_msghdr` — only OpenBSD

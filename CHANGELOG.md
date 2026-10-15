@@ -37,8 +37,13 @@ that can rank an IPv6 default whose router is unreachable first.
   non-contiguous netmask, are no longer default routes.
 - Windows: interfaces that set `DisableDefaultRoutes` are skipped, like
   disconnected interfaces.
-- Linux: a single-path default route whose nexthop is dead, link-down, or
-  unresolved is skipped, as such multipath legs already were. Malformed
+- Linux: selection follows the built-in rule chain of each family (IPv4
+  `local`, `main`, `default`; IPv6 `local`, `main`, so IPv6 routes in table
+  253 no longer count). A winning `blackhole`, `unreachable`, or `prohibit`
+  default now means no default interface instead of exposing a shadowed
+  fallback, and `throw` falls through to the next built-in table. Expired
+  routes and single-path default routes whose nexthop is dead, link-down, or
+  unresolved are skipped, as such multipath legs already were. Malformed
   default routes now return an `EINVAL` error instead of a partial interface
   set. This covers a malformed `RTA_MULTIPATH` nexthop list, a truncated
   fixed-size attribute, a trailing attribute fragment, an undecodable or
