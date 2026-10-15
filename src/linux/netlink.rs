@@ -1024,7 +1024,9 @@ where
 ///
 /// The route-ranking and interruption-retry rules are shared with
 /// [`netlink_best_local_addrs_into`]. This selector deliberately does not
-/// fetch interface addresses.
+/// fetch interface addresses. A malformed default route, or a malformed
+/// nexthop object it references, fails with `EINVAL` rather than yielding
+/// a partial interface set.
 pub(super) fn netlink_default_route_interface_indices(
   family: AddressFamily,
 ) -> io::Result<SmallVec<u32>> {
@@ -1219,29 +1221,17 @@ where
         // `netlink_routes_into`.
         let mut table_id: u32 = rtm_header.rtm_table as u32;
         let mut has_src_constraint = false;
-        // Track whether RTA_DST claimed a non-unspecified address.
-        // The outer guard already required `rtm_dst_len == 0`, so
-        // a sane default route either omits RTA_DST entirely or
-        // emits 0.0.0.0 / ::. A kernel-emitted route with
-        // `dst_len == 0` but `RTA_DST = 192.0.2.1` is malformed —
-        // skip it rather than steer best-local at the wrong oif.
-        let mut dst_specific = false;
-        // Separately track "RTA_DST present but failed to parse"
-        // (truncated payload, wrong-family). Without this, a
-        // malformed RTA_DST would yield `None` from
-        // `parse_rta_ipaddr`, leave `dst_specific = false`, and
-        // keep the row eligible for best-local selection.
-        // The full route walker has the same `dst_malformed`
-        // guard — keep the two paths consistent so a malformed
-        // default route is suppressed from `best_local_*` for
-        // the same reason it's suppressed from `route_table*`.
-        let mut dst_malformed = false;
         // RFC 4191 router preference for IPv6 RA-installed
         // defaults. Kernel default (and the value applied to
         // every IPv4 route, which never carries the attribute)
         // is `MEDIUM = 0x0`. See `pref_rank_for`.
         let mut current_pref: u8 = 0;
 
+        // Every attribute this walk reads must decode completely. A
+        // malformed one fails the attempt with `EINVAL`: skipping the
+        // route or substituting a fallback value would let corrupted
+        // kernel output drop an interface from the set or misrank the
+        // route.
         while rtattr_buf.len() >= RtAttr::SIZE {
           let attr = RtAttr {
             len: u16::from_ne_bytes(rtattr_buf[..2].try_into().unwrap()),
@@ -1262,33 +1252,32 @@ where
           let alen = rta_align_of(attrlen).min(rtattr_buf.len());
 
           match attr.ty {
-            RTA_PRIORITY if data.len() >= 4 => {
-              current_metric = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+            RTA_PRIORITY => {
+              current_metric = Some(rta_u32(data)?);
             }
-            RTA_OIF if data.len() >= 4 => {
-              let idx = u32::from_ne_bytes(data[..4].try_into().unwrap());
+            RTA_OIF => {
+              let idx = rta_u32(data)?;
               if idx != 0 {
                 current_oifs.push(idx);
               }
               have_top_oif = true;
             }
+            // The outer guard already required `rtm_dst_len == 0`, so
+            // a well-formed default route either omits RTA_DST or
+            // carries 0.0.0.0 / ::. An undecodable payload, or a
+            // specific address such as 192.0.2.1, is malformed.
             RTA_DST => match parse_rta_ipaddr(rtm_header.rtm_family, data) {
-              Some(addr) if !addr.is_unspecified() => {
-                dst_specific = true;
-              }
-              Some(_) => {}
-              None => {
-                dst_malformed = true;
-              }
+              Some(addr) if addr.is_unspecified() => {}
+              _ => return Err(rustix::io::Errno::INVAL.into()),
             },
             RTA_MULTIPATH => {
               multipath = Some(data);
             }
-            RTA_NH_ID if data.len() >= 4 => {
-              nh_id = Some(u32::from_ne_bytes(data[..4].try_into().unwrap()));
+            RTA_NH_ID => {
+              nh_id = Some(rta_u32(data)?);
             }
-            RTA_TABLE if data.len() >= 4 => {
-              table_id = u32::from_ne_bytes(data[..4].try_into().unwrap());
+            RTA_TABLE => {
+              table_id = rta_u32(data)?;
             }
             RTA_SRC => {
               // Source constraint via attribute (rtm_src_len was
@@ -1296,8 +1285,8 @@ where
               // in depth.
               has_src_constraint = true;
             }
-            RTA_PREF if !data.is_empty() => {
-              current_pref = data[0];
+            RTA_PREF => {
+              current_pref = *data.first().ok_or(rustix::io::Errno::INVAL)?;
             }
             _ => {}
           }
@@ -1306,13 +1295,8 @@ where
         }
 
         // Drop routes from custom policy tables and any
-        // post-walk-discovered source constraints, plus any
-        // dst_len=0 row that smuggled in a specific destination
-        // or carried a malformed RTA_DST (which the route walker
-        // also drops).
+        // post-walk-discovered source constraints.
         if has_src_constraint
-          || dst_specific
-          || dst_malformed
           || (table_id != RT_TABLE_MAIN as u32
             && table_id != RT_TABLE_LOCAL
             && table_id != RT_TABLE_DEFAULT)
@@ -1326,6 +1310,9 @@ where
         // a multi-WAN ECMP default we want addresses from *all*
         // of them, not just the first.
         //
+        // A malformed `RTA_MULTIPATH` list fails the attempt with
+        // `EINVAL` (see `multipath_oifs_into`).
+        //
         // For RTA_NH_ID:
         //   - `Some(non-empty)`: collect every resolved oif.
         //   - `Some(empty)`: id known but kernel-marked unusable
@@ -1334,9 +1321,11 @@ where
         //   - `None`: id absent from the nexthop dump. The attempt
         //     fails with `EINTR` so a nexthop that changed between
         //     our two dumps doesn't silently misroute.
+        //   - The nexthop, or a member of its group, came from a
+        //     malformed message: the attempt fails with `EINVAL`.
         if !have_top_oif {
           if let Some(mp) = multipath {
-            multipath_oifs_into(mp, &mut current_oifs);
+            multipath_oifs_into(mp, &mut current_oifs)?;
           } else if let Some(id) = nh_id {
             // Lazy resolution: defer every `RTA_NH_ID` default
             // candidate to the post-walk pass. The pass dumps
@@ -1399,17 +1388,22 @@ where
   // single batch. Skipping this block when nothing was deferred is
   // the whole point of the lazy-dump optimization — most Linux
   // hosts have no `ip nexthop`-managed default routes and never
-  // pay the `RTM_GETNEXTHOP` round-trip. `None` from
-  // `resolve_nh_id` means the id wasn't in the dump (kernel state
-  // changed during enumeration); surface as `EINTR` so the caller
-  // can retry rather than silently lose the route. `Some(empty)`
-  // means the nexthop is present but unusable (blackhole / down)
-  // — skip silently. `Some(non-empty)` contributes oifs to the
-  // selection key; same `<` / `==` lex semantics as the first
-  // pass.
+  // pay the `RTM_GETNEXTHOP` round-trip. A referenced nexthop (or
+  // group member) that came from a malformed message fails the
+  // attempt with `EINVAL`, because resolving it could silently drop
+  // a leg. `None` from `resolve_nh_id` means the id wasn't in the
+  // dump (kernel state changed during enumeration); surface as
+  // `EINTR` so the caller can retry rather than silently lose the
+  // route. `Some(empty)` means the nexthop is present but unusable
+  // (blackhole / down) — skip silently. `Some(non-empty)` contributes
+  // oifs to the selection key; same `<` / `==` lex semantics as the
+  // first pass.
   if !deferred_best.is_empty() {
     let nh_map = dump_nexthops(transport)?;
     for (rank, metric, pref_rank, id) in deferred_best {
+      if references_malformed_nexthop(&nh_map, id) {
+        return Err(rustix::io::Errno::INVAL.into());
+      }
       match resolve_nh_id(&nh_map, id) {
         None => return Err(rustix::io::Errno::INTR.into()),
         Some(resolved) => {
@@ -1467,6 +1461,13 @@ struct NexthopInfo {
   group: Option<SmallVec<u32>>,
   /// Kernel-side "this nexthop won't deliver traffic" marker.
   filtered: bool,
+  /// The message did not decode completely: its attribute stream is
+  /// broken, its `NHA_GATEWAY` or `NHA_OIF` payload is malformed, or its
+  /// `NHA_GROUP` payload is empty or not a whole number of
+  /// `struct nexthop_grp` entries. The route and gateway walkers keep
+  /// their best-effort reading of such a nexthop; the default-route walk
+  /// fails instead of reporting a partial interface set.
+  malformed: bool,
 }
 
 /// Build the wire bytes for `RTM_GETNEXTHOP` + `NLM_F_DUMP`. The body
@@ -1562,6 +1563,9 @@ fn dump_nexthops<T: Transport>(
         // "id present but unusable" path is the safe place to
         // land here, vs. "id absent → potential race → EINTR".)
         let mut attr_malformed = false;
+        // A short `NHA_OIF`, or an `NHA_GROUP` that is empty or ends in
+        // a partial entry. Only `NexthopInfo::malformed` records these.
+        let mut payload_malformed = false;
 
         while attr_buf.len() >= RtAttr::SIZE {
           let attr = RtAttr {
@@ -1583,6 +1587,9 @@ fn dump_nexthops<T: Transport>(
             NHA_OIF if data.len() >= 4 => {
               oif = u32::from_ne_bytes(data[..4].try_into().unwrap());
             }
+            NHA_OIF => {
+              payload_malformed = true;
+            }
             NHA_GATEWAY => {
               gw = parse_rta_ipaddr(nh_family, data);
               if gw.is_none() {
@@ -1600,6 +1607,9 @@ fn dump_nexthops<T: Transport>(
               while p.len() >= 8 {
                 members.push(u32::from_ne_bytes(p[..4].try_into().unwrap()));
                 p = &p[8..];
+              }
+              if data.is_empty() || !p.is_empty() {
+                payload_malformed = true;
               }
               group = Some(members);
             }
@@ -1619,6 +1629,7 @@ fn dump_nexthops<T: Transport>(
         // "kernel-knows-this-id" signal.
         if id != 0 {
           let filtered = blackhole || nh_unusable || gw_malformed || attr_malformed;
+          let malformed = attr_malformed || gw_malformed || payload_malformed;
           map.insert(
             id,
             NexthopInfo {
@@ -1626,6 +1637,7 @@ fn dump_nexthops<T: Transport>(
               gw,
               group,
               filtered,
+              malformed,
             },
           );
         }
@@ -1698,6 +1710,22 @@ fn resolve_nh_id(
     out.push((nh.oif, nh.gw));
   }
   Some(out)
+}
+
+/// Whether nexthop `id` or, for a group, one of its members present in
+/// `map` came from a malformed message (see [`NexthopInfo::malformed`]).
+fn references_malformed_nexthop(
+  map: &std::collections::HashMap<u32, NexthopInfo>,
+  id: u32,
+) -> bool {
+  map.get(&id).is_some_and(|nh| {
+    nh.malformed
+      || nh.group.as_ref().is_some_and(|members| {
+        members
+          .iter()
+          .any(|member| map.get(member).is_some_and(|member| member.malformed))
+      })
+  })
 }
 
 /// Dumps the `family` routing table into `out`. Every usable route, one per
@@ -2220,30 +2248,50 @@ fn decode_nlmsgerr(received: &[u8], hlen: usize) -> io::Result<NlmsgErrOutcome> 
 /// Push every usable nexthop's `oif` from an `RTA_MULTIPATH`
 /// attribute payload into `out`. Same skip-rules as `walk_multipath`
 /// (`RTNH_F_DEAD` / `RTNH_F_LINKDOWN` / `RTNH_F_UNRESOLVED`, and
-/// `oif == 0`) but only collects interface indices — best-local
-/// doesn't need to decode gateway sub-attrs.
+/// `oif == 0`) but only collects interface indices — the default-route
+/// walk doesn't need to decode gateway sub-attrs.
 ///
-/// Used by `netlink_best_local_addrs_into` so an ECMP default with N
-/// usable nexthops contributes addresses from all N interfaces, not
-/// just the first one the kernel listed.
-fn multipath_oifs_into(mut buf: &[u8], out: &mut SmallVec<u32>) {
+/// Used by the default-route walk so an ECMP default with N usable
+/// nexthops contributes all N interfaces, not just the first one the
+/// kernel listed.
+///
+/// Unlike `walk_multipath`, a malformed list fails with `EINVAL` rather
+/// than ending the walk early, which would report a partial interface
+/// set. The list is malformed when a nonempty remainder is shorter than a
+/// `struct rtnexthop`, or when an `rtnh_len` is shorter than that header
+/// or overruns the payload; only the final entry may omit its alignment
+/// padding. On error, `out` may already hold some of the list's
+/// interfaces.
+fn multipath_oifs_into(mut buf: &[u8], out: &mut SmallVec<u32>) -> io::Result<()> {
   const RTNH_SIZE: usize = 8;
   let unusable = RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_UNRESOLVED;
-  while buf.len() >= RTNH_SIZE {
+  while !buf.is_empty() {
+    if buf.len() < RTNH_SIZE {
+      return Err(rustix::io::Errno::INVAL.into());
+    }
     let nh_len = u16::from_ne_bytes(buf[..2].try_into().unwrap()) as usize;
     if nh_len < RTNH_SIZE || nh_len > buf.len() {
-      break;
+      return Err(rustix::io::Errno::INVAL.into());
     }
     let nh_flags = buf[2];
     let nh_ifindex = i32::from_ne_bytes(buf[4..8].try_into().unwrap()) as u32;
     if nh_flags & unusable == 0 && nh_ifindex != 0 {
       out.push(nh_ifindex);
     }
-    let nh_aligned = rta_align_of(nh_len).min(buf.len());
-    if nh_aligned == 0 {
-      break;
-    }
-    buf = &buf[nh_aligned..];
+    // `nh_len >= RTNH_SIZE`, so every entry advances the walk.
+    buf = &buf[rta_align_of(nh_len).min(buf.len())..];
+  }
+  Ok(())
+}
+
+/// Decode the native-endian `u32` payload of a fixed-size attribute such
+/// as `RTA_OIF`. The kernel emits four bytes; a shorter payload is
+/// malformed and fails with `EINVAL`.
+#[inline]
+fn rta_u32(data: &[u8]) -> io::Result<u32> {
+  match data.get(..4) {
+    Some(bytes) => Ok(u32::from_ne_bytes(bytes.try_into().unwrap())),
+    None => Err(rustix::io::Errno::INVAL.into()),
   }
 }
 
@@ -3720,6 +3768,152 @@ mod netlink_tests {
       Some(rustix::io::Errno::INVAL.raw_os_error())
     );
     assert_eq!(opens, 1);
+  }
+
+  /// A one-datagram route dump holding a default route with `attrs`.
+  fn default_route_dump(attrs: &[Vec<u8>]) -> Vec<u8> {
+    [route(0, attrs), done()].concat()
+  }
+
+  #[test]
+  fn default_selector_reports_every_leg_of_a_multipath_default() {
+    let multipath = [rtnexthop(2, [192, 0, 2, 1]), rtnexthop(4, [192, 0, 2, 4])].concat();
+    let dump = default_route_dump(&[rtattr(RTA_MULTIPATH, &multipath)]);
+    let (indices, opens) = replay_default_indices(vec![dump]);
+    assert_eq!(indices.unwrap().as_slice(), &[2, 4]);
+    assert_eq!(opens, 1);
+
+    // The final entry may omit its alignment padding: this one declares
+    // nine bytes and the payload ends there.
+    let mut unpadded = rtnexthop(2, [192, 0, 2, 1]);
+    unpadded.extend(9u16.to_ne_bytes());
+    unpadded.extend([0, 0]);
+    unpadded.extend(4i32.to_ne_bytes());
+    unpadded.push(0);
+    let dump = default_route_dump(&[rtattr(RTA_MULTIPATH, &unpadded)]);
+    let (indices, _) = replay_default_indices(vec![dump]);
+    assert_eq!(indices.unwrap().as_slice(), &[2, 4]);
+  }
+
+  #[test]
+  fn default_selector_rejects_a_malformed_multipath_default() {
+    let einval = Some(rustix::io::Errno::INVAL.raw_os_error());
+    let leg = rtnexthop(2, [192, 0, 2, 1]);
+    let with_len = |len: usize| {
+      let mut entry = leg.clone();
+      entry[..2].copy_from_slice(&(len as u16).to_ne_bytes());
+      entry
+    };
+    let malformed = [
+      // A nonempty remainder shorter than a `struct rtnexthop`.
+      vec![0; 4],
+      [leg.clone(), vec![0; 4]].concat(),
+      // An `rtnh_len` shorter than the header.
+      with_len(4),
+      // An `rtnh_len` past the end of the payload, including after a
+      // well-formed leg that must not be reported on its own.
+      with_len(leg.len() + 4),
+      [leg.clone(), with_len(leg.len() + 1)].concat(),
+    ];
+
+    for multipath in malformed {
+      let dump = default_route_dump(&[rtattr(RTA_MULTIPATH, &multipath)]);
+      let (indices, opens) = replay_default_indices(vec![dump.clone()]);
+      assert_eq!(indices.unwrap_err().raw_os_error(), einval, "{multipath:?}");
+      assert_eq!(opens, 1);
+
+      let (addrs, opens) = replay_best_local(vec![dump]);
+      assert_eq!(addrs.unwrap_err().raw_os_error(), einval, "{multipath:?}");
+      assert_eq!(opens, 1);
+    }
+  }
+
+  #[test]
+  fn default_selector_rejects_malformed_default_route_attributes() {
+    let einval = Some(rustix::io::Errno::INVAL.raw_os_error());
+    let oif = u32_attr(RTA_OIF, 2);
+    let malformed = [
+      // Fixed-size attributes shorter than their type.
+      vec![rtattr(RTA_OIF, &[2, 0])],
+      vec![oif.clone(), rtattr(RTA_PRIORITY, &[1])],
+      vec![oif.clone(), rtattr(RTA_TABLE, &[RT_TABLE_MAIN as u8])],
+      vec![rtattr(RTA_NH_ID, &[7, 0, 0])],
+      vec![oif.clone(), rtattr(RTA_PREF, &[])],
+      // A destination that does not decode, and a specific destination
+      // on a zero-length prefix.
+      vec![oif.clone(), rtattr(RTA_DST, &[0, 0, 0])],
+      vec![oif.clone(), rtattr(RTA_DST, &[192, 0, 2, 1])],
+    ];
+
+    for attrs in malformed {
+      let (indices, opens) = replay_default_indices(vec![default_route_dump(&attrs)]);
+      assert_eq!(indices.unwrap_err().raw_os_error(), einval, "{attrs:?}");
+      assert_eq!(opens, 1);
+    }
+
+    // An unspecified destination is a well-formed default route.
+    let dump = default_route_dump(&[rtattr(RTA_DST, &[0, 0, 0, 0]), oif]);
+    let (indices, _) = replay_default_indices(vec![dump]);
+    assert_eq!(indices.unwrap().as_slice(), &[2]);
+  }
+
+  #[test]
+  fn default_selector_rejects_a_malformed_nexthop_object() {
+    let einval = Some(rustix::io::Errno::INVAL.raw_os_error());
+    let routes = default_route_dump(&[u32_attr(RTA_NH_ID, 9)]);
+    let group_entry = |member: u32| [member.to_ne_bytes(), [0; 4]].concat();
+    let leg_7 = || nexthop_via(7, 2, GATEWAY);
+    let group_9 = || nexthop_group(9, &[7, 8]);
+
+    let nexthops = [leg_7(), nexthop_via(8, 3, GATEWAY), group_9(), done()].concat();
+    let (indices, opens) = replay_default_indices(vec![routes.clone(), nexthops]);
+    assert_eq!(indices.unwrap().as_slice(), &[2, 3]);
+    assert_eq!(opens, 2);
+
+    let partial_group = [group_entry(7), group_entry(8)[..4].to_vec()].concat();
+    let malformed = [
+      // A group ending in a partial `struct nexthop_grp`.
+      vec![
+        leg_7(),
+        nexthop_via(8, 3, GATEWAY),
+        nexthop(&[u32_attr(NHA_ID, 9), rtattr(NHA_GROUP, &partial_group)]),
+      ],
+      // An empty group.
+      vec![nexthop(&[u32_attr(NHA_ID, 9), rtattr(NHA_GROUP, &[])])],
+      // A member whose attribute stream is broken.
+      vec![
+        leg_7(),
+        nexthop(&[u32_attr(NHA_ID, 8), overlong(NHA_OIF)]),
+        group_9(),
+      ],
+      // A member with an `NHA_OIF` shorter than its type.
+      vec![
+        leg_7(),
+        nexthop(&[u32_attr(NHA_ID, 8), rtattr(NHA_OIF, &[3, 0])]),
+        group_9(),
+      ],
+      // A member whose `NHA_GATEWAY` does not decode.
+      vec![
+        leg_7(),
+        nexthop(&[
+          u32_attr(NHA_ID, 8),
+          u32_attr(NHA_OIF, 3),
+          rtattr(NHA_GATEWAY, &[192, 0, 2]),
+        ]),
+        group_9(),
+      ],
+    ];
+
+    for messages in malformed {
+      let nexthops = [messages.concat(), done()].concat();
+      let (indices, opens) = replay_default_indices(vec![routes.clone(), nexthops.clone()]);
+      assert_eq!(indices.unwrap_err().raw_os_error(), einval, "{messages:?}");
+      assert_eq!(opens, 2);
+
+      // The route walker keeps its best-effort reading of the same dumps.
+      let (result, _) = replay_routes(vec![routes.clone(), nexthops]);
+      assert!(result.is_ok(), "{messages:?}");
+    }
   }
 
   #[test]

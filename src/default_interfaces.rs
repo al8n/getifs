@@ -44,6 +44,11 @@ impl DefaultInterfaces {
 /// are retained because this query does not derive its result from
 /// `best_local_*` addresses.
 ///
+/// On every platform a default route is a `/0` route, so split-default halves
+/// such as `0.0.0.0/1` and `::/1` are not default routes, and neither are the
+/// interface-scoped default routes that Apple platforms install for
+/// non-primary interfaces.
+///
 /// A family with no usable default route, or with no available address-family
 /// stack, has an empty slice. Permission, malformed-response, and persistent
 /// interruption errors are returned. Linux considers the standard `local`,

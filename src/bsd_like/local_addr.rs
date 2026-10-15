@@ -4,7 +4,8 @@ use std::{
 };
 
 use libc::{
-  AF_INET, AF_INET6, NET_RT_DUMP, RTAX_DST, RTF_BLACKHOLE, RTF_BROADCAST, RTF_REJECT, RTF_UP,
+  AF_INET, AF_INET6, NET_RT_DUMP, RTAX_DST, RTAX_NETMASK, RTF_BLACKHOLE, RTF_BROADCAST, RTF_REJECT,
+  RTF_UP,
 };
 
 // Same `RTF_MULTICAST` cfg shim as `bsd_like/route.rs`: NetBSD's libc
@@ -24,7 +25,8 @@ use super::{
   super::{ipv4_filter_to_ip_filter, ipv6_filter_to_ip_filter, local_ip_filter},
   compat::RtMsghdr,
   fetch, interface_addr_table_into, interface_addresses, interface_ipv4_addresses,
-  interface_ipv6_addresses, message_too_short, parse_addrs, IfNet, Ifv4Net, Ifv6Net, Net,
+  interface_ipv6_addresses, message_too_short, parse_addrs, route_prefix_len, IfNet, Ifv4Net,
+  Ifv6Net, Net,
 };
 
 pub(crate) fn default_ipv4_interface_indices() -> io::Result<SmallVec<u32>> {
@@ -193,6 +195,18 @@ pub(super) fn best_route_interfaces(routes: &[u8], family: i32) -> io::Result<Sm
         continue;
       }
 
+      // macOS installs an interface-scoped `/0` (route(8) `-ifscope`) for
+      // each non-primary interface. Those entries serve only lookups bound
+      // to that interface; the unscoped default is the system default
+      // route, so a scoped one is not a default-route candidate.
+      #[cfg(apple)]
+      {
+        if (rtm.rtm_flags & libc::RTF_IFSCOPE) != 0 {
+          src = &src[l..];
+          continue;
+        }
+      }
+
       // Source-specific default routes constrain selection to a
       // particular packet source, so a "best local address for any
       // outbound traffic" walk must not pick them — the addresses
@@ -227,17 +241,24 @@ pub(super) fn best_route_interfaces(routes: &[u8], family: i32) -> io::Result<Sm
       //     that silently dropped them would leave `is_default` false
       //     for valid default routes.
       let addrs = parse_addrs(rtm.rtm_addrs as u32, &src[header_size..l])?;
-      let dst = addrs[RTAX_DST as usize];
       let dst_present = (rtm.rtm_addrs as u32 & libc::RTA_DST as u32) != 0;
-      let is_default = match (family, dst) {
-        // Family-specific dump with no RTA_DST attribute at all → BSD's
-        // alternate encoding for "default route for this family".
-        (AF_INET, None) | (AF_INET6, None) if !dst_present => true,
-        // Explicit unspecified destination, regardless of dump family.
-        (_, Some(IpAddr::V4(v4))) if v4.is_unspecified() => true,
-        (_, Some(IpAddr::V6(v6))) if v6.is_unspecified() => true,
-        _ => false,
+      let dst = match (family, addrs[RTAX_DST as usize]) {
+        (_, Some(dst)) => Some(dst),
+        // A family-specific dump encodes the unspecified destination by
+        // omitting `RTAX_DST` altogether.
+        (AF_INET, None) if !dst_present => Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+        (AF_INET6, None) if !dst_present => Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+        _ => None,
       };
+      // A default route is a `/0` route to the unspecified address, as on
+      // Linux (`rtm_dst_len == 0`) and Windows (`PrefixLength == 0`). The
+      // prefix comes from the same resolution `route_table` uses, so the
+      // split-default halves a VPN installs (`0.0.0.0/1`, `::/1`) and a
+      // non-contiguous mask do not qualify.
+      let is_default = dst.is_some_and(|dst| {
+        dst.is_unspecified()
+          && route_prefix_len(rtm.rtm_flags, dst, addrs[RTAX_NETMASK as usize]) == Some(0)
+      });
 
       // Update the candidate set on lower priority; ties extend.
       // Same `< / ==` semantics as Linux's best-local walker.
@@ -305,22 +326,47 @@ mod tests {
   use libc::{AF_UNSPEC, RTAX_GATEWAY, RTF_GATEWAY};
 
   use super::{
-    super::tests::{addrs_mask, rt_message, sockaddr_in},
+    super::tests::{addrs_mask, padded_sockaddr, rt_message, sockaddr_in, sockaddr_in6},
     *,
   };
 
   /// A route via `index` to `dst`, with no `RTAX_DST` slot when `dst` is
   /// `None`.
   fn route(index: u16, flags: libc::c_int, dst: Option<Ipv4Addr>) -> Vec<u8> {
-    let gateway = sockaddr_in(Ipv4Addr::new(192, 0, 2, 1));
-    match dst {
-      Some(dst) => {
-        let mut body = sockaddr_in(dst);
-        body.extend(gateway);
-        rt_message(index, flags, addrs_mask(&[RTAX_DST, RTAX_GATEWAY]), &body)
+    masked_route(index, flags, dst.map(IpAddr::V4), None)
+  }
+
+  /// A route via `index` to `dst` whose `RTAX_NETMASK` slot holds the
+  /// sockaddr `netmask`, omitting each slot that is `None`. The gateway has
+  /// the destination's family, and is IPv4 without a destination.
+  fn masked_route(
+    index: u16,
+    flags: libc::c_int,
+    dst: Option<IpAddr>,
+    netmask: Option<&[u8]>,
+  ) -> Vec<u8> {
+    let mut slots = Vec::new();
+    let mut body = Vec::new();
+    let gateway = match dst {
+      Some(IpAddr::V4(dst)) => {
+        slots.push(RTAX_DST);
+        body.extend(sockaddr_in(dst));
+        sockaddr_in(Ipv4Addr::new(192, 0, 2, 1))
       }
-      None => rt_message(index, flags, addrs_mask(&[RTAX_GATEWAY]), &gateway),
+      Some(IpAddr::V6(dst)) => {
+        slots.push(RTAX_DST);
+        body.extend(sockaddr_in6(dst));
+        sockaddr_in6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1))
+      }
+      None => sockaddr_in(Ipv4Addr::new(192, 0, 2, 1)),
+    };
+    slots.push(RTAX_GATEWAY);
+    body.extend(gateway);
+    if let Some(netmask) = netmask {
+      slots.push(RTAX_NETMASK);
+      body.extend(netmask);
     }
+    rt_message(index, flags, addrs_mask(&slots), &body)
   }
 
   #[test]
@@ -339,6 +385,58 @@ mod tests {
     // Without a family, a route with no destination is not a default route.
     let oifs = best_route_interfaces(&buf, AF_UNSPEC).unwrap();
     assert_eq!(oifs.as_slice(), &[2, 3]);
+  }
+
+  #[cfg(apple)]
+  #[test]
+  fn ignores_interface_scoped_default_routes() {
+    let up = RTF_UP | RTF_GATEWAY;
+    let scoped = up | libc::RTF_IFSCOPE;
+    let mut buf = route(2, up, Some(Ipv4Addr::UNSPECIFIED));
+    buf.extend(route(3, scoped, Some(Ipv4Addr::UNSPECIFIED)));
+    let oifs = best_route_interfaces(&buf, AF_INET).unwrap();
+    assert_eq!(oifs.as_slice(), &[2]);
+
+    let only_scoped = route(3, scoped, Some(Ipv4Addr::UNSPECIFIED));
+    assert!(best_route_interfaces(&only_scoped, AF_INET)
+      .unwrap()
+      .is_empty());
+  }
+
+  #[test]
+  fn ipv4_default_route_requires_a_zero_length_prefix() {
+    let up = RTF_UP | RTF_GATEWAY;
+    let unspecified = Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let is_default = |netmask: &[u8]| {
+      let message = masked_route(4, up, unspecified, Some(netmask));
+      !best_route_interfaces(&message, AF_INET).unwrap().is_empty()
+    };
+
+    // The split-default half `0.0.0.0/1`, as a full and as a compact
+    // family-less mask.
+    let compact_half = padded_sockaddr(&[5, AF_UNSPEC as u8, 0, 0, 128]);
+    assert!(!is_default(&sockaddr_in(Ipv4Addr::new(128, 0, 0, 0))));
+    assert!(!is_default(&compact_half));
+    // An explicit all-zero mask, and the zero-length sockaddr the kernel
+    // emits for it.
+    assert!(is_default(&sockaddr_in(Ipv4Addr::UNSPECIFIED)));
+    assert!(is_default(&padded_sockaddr(&[0])));
+  }
+
+  #[test]
+  fn ipv6_default_route_requires_a_zero_length_prefix() {
+    let up = RTF_UP | RTF_GATEWAY;
+    let unspecified = Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+    let half = sockaddr_in6(Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0));
+    let message = masked_route(4, up, unspecified, Some(&half));
+    assert!(best_route_interfaces(&message, AF_INET6)
+      .unwrap()
+      .is_empty());
+
+    let zero = sockaddr_in6(Ipv6Addr::UNSPECIFIED);
+    let message = masked_route(4, up, unspecified, Some(&zero));
+    let oifs = best_route_interfaces(&message, AF_INET6).unwrap();
+    assert_eq!(oifs.as_slice(), &[4]);
   }
 
   #[test]

@@ -95,6 +95,30 @@ rt_generic_mod!(gateway(RTF_GATEWAY, RTA_GATEWAY),);
 
 pub(super) use local_addr::*;
 
+/// The prefix length of a route to `dst`, resolved from the kernel's netmask
+/// encoding, or `None` when the route has no usable prefix.
+///
+/// A netmask of the destination's family is decoded, and a non-contiguous one
+/// yields `None`. Without one (no `RTAX_NETMASK`, or a family-mismatched mask
+/// decoded from an ambiguous family-less compact sockaddr):
+///
+/// - an unspecified destination is `/0`, because BSD encodes the default
+///   route's mask as all-zero or omits it;
+/// - an `RTF_HOST` route is a host prefix (`/32` or `/128`);
+/// - any other network route is `None` rather than a fabricated host prefix,
+///   which would turn `fe80::/64` into `fe80::/128`.
+fn route_prefix_len(rtm_flags: libc::c_int, dst: IpAddr, netmask: Option<IpAddr>) -> Option<u8> {
+  match (dst, netmask) {
+    (IpAddr::V4(_), Some(mask @ IpAddr::V4(_))) | (IpAddr::V6(_), Some(mask @ IpAddr::V6(_))) => {
+      ip_mask_to_prefix(mask).ok()
+    }
+    _ if dst.is_unspecified() => Some(0),
+    (IpAddr::V4(_), _) if (rtm_flags & libc::RTF_HOST) != 0 => Some(32),
+    (IpAddr::V6(_), _) if (rtm_flags & libc::RTF_HOST) != 0 => Some(128),
+    _ => None,
+  }
+}
+
 #[inline]
 fn build_routev4(
   index: u32,
@@ -116,27 +140,7 @@ fn build_routev4(
   if dst_v4.is_multicast() || dst_v4.is_broadcast() {
     return None;
   }
-  // Resolving `prefix_len` from the kernel's encoding is fiddly:
-  //
-  // - `Some(IpAddr::V4(m))` with a v4 dst: real netmask, decode it.
-  // - Anything else (`None`, or family-mismatched `Some(IpAddr::V6(_))`
-  //   from an ambiguous family-less mask): the kernel didn't give us a
-  //   decodable same-family mask, so fall back to the per-route default
-  //   below.
-  //
-  // Default rules when the explicit mask is unavailable:
-  // - `dst.is_unspecified()`: BSD encodes the default route's mask
-  //   as `0.0.0.0` (or omits it entirely); treat as `/0`.
-  // - `RTF_HOST` set: explicit host route, prefix is `/32`.
-  // - Otherwise: a network route whose mask we can't decode — skip
-  //   rather than fabricate a host prefix (`/32`, or `/128` for IPv6),
-  //   which would turn `fe80::/64` into `fe80::/128`.
-  let prefix_len = match netmask {
-    Some(IpAddr::V4(m)) => ip_mask_to_prefix(IpAddr::V4(m)).ok()?,
-    _ if dst_v4.is_unspecified() => 0,
-    _ if (rtm_flags & libc::RTF_HOST) != 0 => 32,
-    _ => return None,
-  };
+  let prefix_len = route_prefix_len(rtm_flags, dst, netmask)?;
   let net = Ipv4Net::new(dst_v4, prefix_len).ok()?;
   let gw = match gateway {
     Some(IpAddr::V4(g)) if g != Ipv4Addr::UNSPECIFIED => Some(g),
@@ -163,17 +167,7 @@ fn build_routev6(
   if dst_v6.is_multicast() {
     return None;
   }
-  // See `build_routev4` for the full per-arm rationale; the v6 case
-  // reads identically, with `/128` for host routes and `/0` for the
-  // unspecified destination. The `_` arm catches both `None` and a
-  // family-mismatched `Some(IpAddr::V4(_))` from an ambiguous,
-  // family-less compact mask.
-  let prefix_len = match netmask {
-    Some(IpAddr::V6(m)) => ip_mask_to_prefix(IpAddr::V6(m)).ok()?,
-    _ if dst_v6.is_unspecified() => 0,
-    _ if (rtm_flags & libc::RTF_HOST) != 0 => 128,
-    _ => return None,
-  };
+  let prefix_len = route_prefix_len(rtm_flags, dst, netmask)?;
   let net = Ipv6Net::new(dst_v6, prefix_len).ok()?;
   let gw = match gateway {
     Some(IpAddr::V6(g)) if g != Ipv6Addr::UNSPECIFIED => Some(g),

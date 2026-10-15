@@ -16,6 +16,26 @@
   equal-best default-route interface separately for IPv4 and IPv6 and joins
   route indices to an unfiltered interface capture.
 
+### Default-route selection changes
+
+Default-route selection changed on several platforms. Each platform shares
+one default-route walk among `default_interfaces()`, the default-route
+preference of the `preferred_*_addr` selectors, and the existing
+`best_local_*` functions, so these changes apply to all of them.
+
+- Apple: interface-scoped default routes (`RTF_IFSCOPE`, the `/0` entries
+  macOS installs for each non-primary interface) are ignored; only the
+  unscoped default route is a candidate.
+- BSD: a default route must have a `/0` netmask, as on Linux and Windows.
+  Split-default halves such as `0.0.0.0/1` and `::/1`, and routes with a
+  non-contiguous netmask, are no longer default routes.
+- Windows: interfaces that set `DisableDefaultRoutes` are skipped, like
+  disconnected interfaces.
+- Linux: malformed default routes now return an `EINVAL` error instead of a
+  partial interface set. This covers a malformed `RTA_MULTIPATH` nexthop
+  list, a truncated fixed-size attribute, an undecodable or specific
+  `RTA_DST`, and a referenced nexthop object whose message does not decode.
+
 ### Hardware-address and IP-math changes
 
 - Add `HardwareAddr`, including typed EUI-48, EUI-64, and InfiniBand forms
