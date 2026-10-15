@@ -198,12 +198,13 @@ address results. A missing route or unavailable address-family stack yields an
 empty family slice; permission, malformed-response, and persistent-interrupt
 errors still propagate. Linux follows the built-in rule chain of each family
 (IPv4 `local`, `main`, `default`; IPv6 `local`, `main`) with metric and IPv6
-router-preference ordering: a winning `blackhole`, `unreachable`, or
-`prohibit` default means no default interface, `throw` falls through to the
-next built-in table, and an expired route, or a default route or multipath
-leg whose nexthop is dead, link-down, or unresolved, is skipped. Custom
-`ip rule` policy tables are not modeled. Windows skips disconnected
-interfaces and interfaces that set `DisableDefaultRoutes`.
+router-preference ordering: a winning default route of any type other than
+`unicast`, `local`, or `throw` (`blackhole`, `unreachable`, `prohibit`, and
+others such as `nat` or `broadcast`) means no default interface, `throw`
+falls through to the next built-in table, and an expired route, or a default
+route or multipath leg whose nexthop is dead, link-down, or unresolved, is
+skipped. Custom `ip rule` policy tables are not modeled. Windows skips
+disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
 OpenBSD uses route priority; other BSD targets cannot expose an equivalent
 priority, so they retain every usable default as equal-best. On every
 platform a default route is a `/0` route, so split-default halves such as

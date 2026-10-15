@@ -174,9 +174,10 @@ where
 /// Best-effort on Linux: only the built-in rule chain (`local`, `main`,
 /// `default`) is followed, so hosts with unconstrained custom `ip rule`
 /// policies ahead of `main` may have outbound traffic routed via a custom
-/// table this call does not see. A winning `blackhole`, `unreachable`, or
-/// `prohibit` default yields no addresses, and `throw` falls through to the
-/// next built-in table.
+/// table this call does not see. A winning default route of any type other
+/// than `unicast`, `local`, or `throw` (`blackhole`, `unreachable`,
+/// `prohibit`, and others such as `nat` or `broadcast`) yields no addresses,
+/// and `throw` falls through to the next built-in table.
 ///
 /// Best-effort on FreeBSD / NetBSD / DragonFly: those kernels don't
 /// expose a documented routing priority on `rt_msghdr` — only OpenBSD
@@ -223,9 +224,10 @@ pub fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 /// Best-effort on Linux: only the built-in rule chain (`local`, `main`) is
 /// followed, so hosts with unconstrained custom `ip rule` policies ahead of
 /// `main` may have outbound traffic routed via a custom table this call
-/// does not see. A winning `blackhole`, `unreachable`, or `prohibit`
-/// default yields no addresses, and so does a `throw` default in `main`,
-/// which has no later built-in table to fall through to.
+/// does not see. A winning default route of any type other than `unicast`,
+/// `local`, or `throw` (`blackhole`, `unreachable`, `prohibit`, and others
+/// such as `nat` or `broadcast`) yields no addresses, and so does a `throw`
+/// default in `main`, which has no later built-in table to fall through to.
 ///
 /// Best-effort on FreeBSD / NetBSD / DragonFly: those kernels don't
 /// expose a documented routing priority on `rt_msghdr` — only OpenBSD
@@ -273,9 +275,10 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// `local`, `main`, `default`; IPv6 `local`, `main`) is followed, so hosts
 /// with unconstrained custom `ip rule` policies ahead of `main` may have
 /// outbound traffic routed via a custom table this call does not see. A
-/// winning `blackhole`, `unreachable`, or `prohibit` default yields no
-/// addresses for its family, and `throw` falls through to the next built-in
-/// table.
+/// winning default route of any type other than `unicast`, `local`, or
+/// `throw` (`blackhole`, `unreachable`, `prohibit`, and others such as `nat`
+/// or `broadcast`) yields no addresses for its family, and `throw` falls
+/// through to the next built-in table.
 ///
 /// Best-effort on FreeBSD / NetBSD / DragonFly: those kernels don't
 /// expose a documented routing priority on `rt_msghdr` — only OpenBSD

@@ -53,14 +53,16 @@ impl DefaultInterfaces {
 /// stack, has an empty slice. Permission, malformed-response, and persistent
 /// interruption errors are returned. Linux follows the built-in rule chain of
 /// each family (IPv4 `local`, `main`, `default`; IPv6 `local`, `main`): a
-/// winning `blackhole`, `unreachable`, or `prohibit` default means no default
-/// interface, and `throw` falls through to the next built-in table. It skips
-/// an expired route and a default route, or a multipath leg, whose nexthop is
-/// dead, link-down, or unresolved; custom `ip rule` policy tables are not
-/// modeled. Windows skips disconnected interfaces and interfaces that set
-/// `DisableDefaultRoutes`. On OpenBSD a lower route priority wins; other BSD
-/// targets do not expose a comparable priority, so every usable default route
-/// is retained as an equal-best result.
+/// winning default route of any type other than `unicast`, `local`, or
+/// `throw` (`blackhole`, `unreachable`, `prohibit`, and others such as `nat`
+/// or `broadcast`) means no default interface, and `throw` falls through to
+/// the next built-in table. It skips an expired route and a default route, or
+/// a multipath leg, whose nexthop is dead, link-down, or unresolved; custom
+/// `ip rule` policy tables are not modeled. Windows skips disconnected
+/// interfaces and interfaces that set `DisableDefaultRoutes`. On OpenBSD a
+/// lower route priority wins; other BSD targets do not expose a comparable
+/// priority, so every usable default route is retained as an equal-best
+/// result.
 ///
 /// Selection reads only the routing table: it honours a route's own state
 /// (dead, link-down) but never consults the neighbor table, so it does not
