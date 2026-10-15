@@ -45,11 +45,13 @@ that can rank an IPv6 default whose router is unreachable first.
   of exposing a shadowed fallback, and `throw` falls through to the next
   built-in table. Expired routes and single-path default routes whose nexthop
   is dead, link-down, or unresolved are skipped, as such multipath legs
-  already were. Malformed default routes now return an `EINVAL` error instead
-  of a partial interface set. This covers a malformed `RTA_MULTIPATH` nexthop
-  list, a truncated fixed-size attribute, a trailing attribute fragment, an
-  undecodable or specific `RTA_DST`, and a referenced nexthop object or group
-  member with malformed attributes.
+  already were; an IPv4 route through a nexthop object with no usable leg
+  instead ends its table's lookup, so the next built-in table decides, while
+  IPv6 moves on to the next route. Malformed default routes now return an
+  `EINVAL` error instead of a partial interface set. This covers a malformed
+  `RTA_MULTIPATH` nexthop list, a truncated fixed-size attribute, a trailing
+  attribute fragment, an undecodable or specific `RTA_DST`, and a referenced
+  nexthop object or group member with malformed attributes.
 
 ### Hardware-address and IP-math changes
 

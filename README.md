@@ -203,8 +203,10 @@ router-preference ordering: a winning default route of any type other than
 others such as `nat` or `broadcast`) means no default interface, `throw`
 falls through to the next built-in table, and an expired route, or a default
 route or multipath leg whose nexthop is dead, link-down, or unresolved, is
-skipped. Custom `ip rule` policy tables are not modeled. Windows skips
-disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
+skipped; an IPv4 route through a nexthop object with no usable leg instead
+ends its table's lookup, so the next built-in table decides, while IPv6 moves
+on to the next route. Custom `ip rule` policy tables are not modeled. Windows
+skips disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
 OpenBSD uses route priority; other BSD targets cannot expose an equivalent
 priority, so they retain every usable default as equal-best. On every
 platform a default route is a `/0` route, so split-default halves such as

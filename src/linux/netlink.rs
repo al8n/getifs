@@ -1423,7 +1423,8 @@ enum DefaultKind {
 /// a miss at such a route. IPv6 moves on to the next route of the same
 /// table, so the next tier decides. (A route with nexthops of its own
 /// and none usable yields to the next route in both families, so it
-/// never becomes a candidate.)
+/// never becomes a candidate.) A route whose nexthop object is a
+/// blackhole is a terminal route instead (see `is_blackhole_nexthop`).
 ///
 /// The candidates are sorted once by `(table rank, key)`, keeping dump
 /// order within a tier, so every tier is one contiguous run and the walk
@@ -1488,6 +1489,12 @@ fn select_default_oifs<T: Transport>(
           oifs.extend(resolved.iter().map(|(oif, _)| *oif).filter(|&oif| oif != 0));
           if oifs.len() > before {
             deliverable = true;
+          } else if is_blackhole_nexthop(&nexthops, *id) {
+            // In a consistent dump the kernel reports a route through a
+            // blackhole nexthop as `RTN_BLACKHOLE`, which the type
+            // classification already makes terminal. This covers a
+            // nexthop that became a blackhole between the two dumps.
+            terminal = true;
           } else {
             nexthop_miss = true;
           }
@@ -1539,6 +1546,9 @@ struct NexthopInfo {
   group: Option<SmallVec<u32>>,
   /// Kernel-side "this nexthop won't deliver traffic" marker.
   filtered: bool,
+  /// The message carries `NHA_BLACKHOLE`: a lookup that selects this
+  /// nexthop is rejected. Such a nexthop is also `filtered`.
+  blackhole: bool,
   /// The message did not decode completely: its attribute stream is
   /// broken or ends in a fragment, its `NHA_GATEWAY` or `NHA_OIF` payload
   /// is malformed, or its `NHA_GROUP` payload is empty or not a whole
@@ -1721,6 +1731,7 @@ fn dump_nexthops<T: Transport>(
               gw,
               group,
               filtered,
+              blackhole,
               malformed,
             },
           );
@@ -1809,6 +1820,21 @@ fn references_malformed_nexthop(
           .iter()
           .any(|member| map.get(member).is_some_and(|member| member.malformed))
       })
+  })
+}
+
+/// Whether nexthop `id` in `map` is a blackhole, as the kernel's
+/// `nexthop_is_blackhole` decides: a single nexthop by its own
+/// `NHA_BLACKHOLE`, and a group only when it has exactly one member and
+/// that member is a blackhole. An id or member absent from `map` is not a
+/// blackhole here; resolving it fails the attempt with `EINTR` instead.
+fn is_blackhole_nexthop(map: &std::collections::HashMap<u32, NexthopInfo>, id: u32) -> bool {
+  map.get(&id).is_some_and(|nh| match &nh.group {
+    None => nh.blackhole,
+    Some(members) => match members.as_slice() {
+      [member] => map.get(member).is_some_and(|member| member.blackhole),
+      _ => false,
+    },
   })
 }
 
@@ -3994,6 +4020,19 @@ mod netlink_tests {
       assert_eq!(opens, 1);
     }
 
+    // A dead nexthop does not exempt the route's attributes from decoding.
+    let dead = typed_route(
+      AddressFamily::INET,
+      RT_TABLE_MAIN as u8,
+      RTN_UNICAST,
+      u32::from(RTNH_F_DEAD),
+      0,
+      &[oif.clone(), rtattr(RTA_PRIORITY, &[1])],
+    );
+    let (indices, opens) = replay_default_indices(vec![[dead, done()].concat()]);
+    assert_eq!(indices.unwrap_err().raw_os_error(), einval);
+    assert_eq!(opens, 1);
+
     // An unspecified destination is a well-formed default route.
     let dump = default_route_dump(&[rtattr(RTA_DST, &[0, 0, 0, 0]), oif]);
     let (indices, _) = replay_default_indices(vec![dump]);
@@ -4533,32 +4572,43 @@ mod netlink_tests {
     assert!(indices.unwrap().is_empty());
     assert_eq!(opens, 2);
 
-    // The same holds when nexthop compat mode reports the dead nexthop
-    // inline; no nexthop dump is needed then.
-    let compat = typed_route(
-      inet,
-      MAIN,
-      RTN_UNICAST,
-      dead,
-      0,
-      &[
-        u32_attr(RTA_NH_ID, 7),
-        u32_attr(RTA_OIF, 2),
-        u32_attr(RTA_PRIORITY, 50),
-      ],
-    );
-    let routes = [
-      compat,
-      unicast_default(inet, MAIN, 3, 100),
-      unicast_default(inet, DEFAULT, 4, 100),
-      done(),
-    ]
-    .concat();
-    let (indices, opens) = replay_default_indices(vec![routes]);
-    assert_eq!(indices.unwrap().as_slice(), &[4]);
-    assert_eq!(opens, 1);
+    // The same holds when nexthop compat mode reports the nexthop object
+    // inline: a single nexthop with the dead low byte, or a group whose
+    // `RTA_MULTIPATH` legs are all dead. No nexthop dump is needed then.
+    let compat = |family, flags, nexthops| {
+      typed_route(
+        family,
+        MAIN,
+        RTN_UNICAST,
+        flags,
+        0,
+        &[u32_attr(RTA_NH_ID, 7), nexthops, u32_attr(RTA_PRIORITY, 50)],
+      )
+    };
+    let dead_leg = |oif| {
+      let mut leg = rtnexthop(oif, GATEWAY);
+      leg[2] = RTNH_F_DEAD;
+      leg
+    };
+    let multipath = [dead_leg(2), dead_leg(5)].concat();
+    for (flags, nexthops) in [
+      (dead, u32_attr(RTA_OIF, 2)),
+      (0, rtattr(RTA_MULTIPATH, &multipath)),
+    ] {
+      let routes = [
+        compat(inet, flags, nexthops),
+        unicast_default(inet, MAIN, 3, 100),
+        unicast_default(inet, DEFAULT, 4, 100),
+        done(),
+      ]
+      .concat();
+      let (indices, opens) = replay_default_indices(vec![routes]);
+      assert_eq!(indices.unwrap().as_slice(), &[4], "{flags:#x}");
+      assert_eq!(opens, 1);
+    }
 
-    // IPv6 moves on to the next route of the table.
+    // IPv6 moves on to the next route of the table, whether the nexthop
+    // object comes from the nexthop dump or is reported inline.
     let routes = [
       nexthop_default(inet6, MAIN, 7, 50),
       unicast_default(inet6, MAIN, 3, 100),
@@ -4566,6 +4616,72 @@ mod netlink_tests {
     ]
     .concat();
     let (indices, opens) = replay_default_indices_in(inet6, vec![routes, nexthop_dump(7, 2, dead)]);
+    assert_eq!(indices.unwrap().as_slice(), &[3]);
+    assert_eq!(opens, 2);
+
+    let routes = [
+      compat(inet6, dead, u32_attr(RTA_OIF, 2)),
+      unicast_default(inet6, MAIN, 3, 100),
+      done(),
+    ]
+    .concat();
+    let (indices, opens) = replay_default_indices_in(inet6, vec![routes]);
+    assert_eq!(indices.unwrap().as_slice(), &[3]);
+    assert_eq!(opens, 1);
+  }
+
+  #[test]
+  fn default_selector_stops_at_a_nexthop_object_that_became_a_blackhole() {
+    let inet = AddressFamily::INET;
+    let inet6 = AddressFamily::INET6;
+    let blackhole = |id| nexthop(&[u32_attr(NHA_ID, id), rtattr(NHA_BLACKHOLE, &[])]);
+    let blackhole_7 = [blackhole(7), done()].concat();
+
+    // The route dump still reports the route as unicast, so its nexthop
+    // object turned into a blackhole after the route dump. Neither the
+    // next route of `main` nor the table-253 fallback is exposed.
+    let routes = [
+      nexthop_default(inet, MAIN, 7, 50),
+      unicast_default(inet, MAIN, 3, 100),
+      unicast_default(inet, DEFAULT, 4, 100),
+      done(),
+    ]
+    .concat();
+    let (indices, opens) = replay_default_indices(vec![routes, blackhole_7.clone()]);
+    assert!(indices.unwrap().is_empty());
+    assert_eq!(opens, 2);
+
+    let routes = [
+      nexthop_default(inet6, MAIN, 7, 50),
+      unicast_default(inet6, MAIN, 3, 100),
+      done(),
+    ]
+    .concat();
+    let (indices, opens) = replay_default_indices_in(inet6, vec![routes, blackhole_7.clone()]);
+    assert!(indices.unwrap().is_empty());
+    assert_eq!(opens, 2);
+
+    // A group whose only member is a blackhole is a blackhole too.
+    let routes = [
+      nexthop_default(inet, MAIN, 9, 50),
+      unicast_default(inet, MAIN, 3, 100),
+      unicast_default(inet, DEFAULT, 4, 100),
+      done(),
+    ]
+    .concat();
+    let nexthops = [blackhole(7), nexthop_group(9, &[7]), done()].concat();
+    let (indices, opens) = replay_default_indices(vec![routes, nexthops]);
+    assert!(indices.unwrap().is_empty());
+    assert_eq!(opens, 2);
+
+    // Tied with a deliverable default, the blackhole leaves it selected.
+    let routes = [
+      nexthop_default(inet, MAIN, 7, 100),
+      unicast_default(inet, MAIN, 3, 100),
+      done(),
+    ]
+    .concat();
+    let (indices, opens) = replay_default_indices(vec![routes, blackhole_7]);
     assert_eq!(indices.unwrap().as_slice(), &[3]);
     assert_eq!(opens, 2);
   }

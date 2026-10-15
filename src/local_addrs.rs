@@ -162,8 +162,10 @@ where
 /// On every platform a default route is a `/0` route, so split halves such
 /// as `0.0.0.0/1` do not count. Linux skips an expired route and a default
 /// route, or a multipath leg, whose nexthop is dead, link-down, or
-/// unresolved, and Windows skips disconnected interfaces and interfaces
-/// that set `DisableDefaultRoutes`.
+/// unresolved (a route through a nexthop object with no usable leg instead
+/// ends its table's lookup, so the next built-in table decides), and
+/// Windows skips disconnected interfaces and interfaces that set
+/// `DisableDefaultRoutes`.
 ///
 /// Selection reads only the routing table and never consults the neighbor
 /// table, so the result can include addresses of an interface whose router
@@ -262,8 +264,10 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// On every platform a default route is a `/0` route, so split halves such
 /// as `0.0.0.0/1` and `::/1` do not count. Linux skips an expired route and
 /// a default route, or a multipath leg, whose nexthop is dead, link-down,
-/// or unresolved, and Windows skips disconnected interfaces and interfaces
-/// that set `DisableDefaultRoutes`.
+/// or unresolved (an IPv4 route through a nexthop object with no usable leg
+/// instead ends its table's lookup, so the next built-in table decides,
+/// while IPv6 moves on to the next route), and Windows skips disconnected
+/// interfaces and interfaces that set `DisableDefaultRoutes`.
 ///
 /// Selection reads only the routing table and never consults the neighbor
 /// table, so the result can include addresses of an interface whose router
