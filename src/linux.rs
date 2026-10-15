@@ -14,10 +14,10 @@ use smol_str::SmolStr;
 
 use super::{
   IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, IpRoute, Ipv4Route, Ipv6Route,
-  MacAddr, Net, MAC_ADDRESS_SIZE,
+  Net,
 };
 
-pub(super) use local_addr::*;
+pub(crate) use local_addr::*;
 
 #[path = "linux/netlink.rs"]
 mod netlink;
@@ -291,7 +291,7 @@ impl Interface {
       index,
       mtu: 0,
       name: SmolStr::default(),
-      mac_addr: None,
+      hardware_addr: None,
       flags,
     }
   }

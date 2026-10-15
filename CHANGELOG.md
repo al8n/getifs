@@ -1,3 +1,72 @@
+# UNRELEASED
+
+## 0.8.0-dev (unpublished)
+
+### Rust-pattern address APIs
+
+- Add `InterfaceSnapshot` and borrowed `InterfaceAddress` records for
+  repeated pure filtering and ranking without additional OS calls. Typed
+  `predicate` and `order` constructors compose with ordinary Rust closures;
+  stable slice and iterator helpers preserve the first captured record on a
+  complete comparison tie.
+- Add public/private `preferred_*_addr` selectors and `_by` variants. Every
+  preferred candidate must be administratively `UP` and forwardable before
+  ranking; default-route membership is only a family-aware preference.
+- Add `DefaultInterfaces` and `default_interfaces()`. It retains every
+  equal-best default-route interface separately for IPv4 and IPv6 and joins
+  route indices to an unfiltered interface capture.
+
+### Default-route selection changes
+
+Default-route selection changed on several platforms. Each platform shares
+one default-route walk among `default_interfaces()`, the default-route
+preference of the `preferred_*_addr` selectors, and the existing
+`best_local_*` functions, so these changes apply to all of them. Selection
+reads only the routing table: it honours a route's own state but never
+consults the neighbor table, so it reproduces neither IPv6 router
+reachability checks on non-forwarding Linux hosts nor IPv4 dead-gateway
+detection among equal-metric defaults. The result is a static snapshot that
+reports equal-best routes whole where the kernel picks one per lookup, and
+that can rank an IPv6 default whose router is unreachable first.
+
+- Apple: interface-scoped default routes (`RTF_IFSCOPE`, the `/0` entries
+  macOS installs for each non-primary interface) are ignored; only the
+  unscoped default route is a candidate.
+- BSD: a default route must have a `/0` netmask, as on Linux and Windows.
+  Split-default halves such as `0.0.0.0/1` and `::/1`, and routes with a
+  non-contiguous netmask, are no longer default routes.
+- Windows: interfaces that set `DisableDefaultRoutes` are skipped, like
+  disconnected interfaces.
+- Linux: selection follows the built-in rule chain of each family (IPv4
+  `local`, `main`, `default`; IPv6 `local`, `main`, so IPv6 routes in table
+  253 no longer count). A winning default route of any type other than
+  `unicast`, `local`, or `throw` (`blackhole`, `unreachable`, `prohibit`, and
+  others such as `nat` or `broadcast`) now means no default interface instead
+  of exposing a shadowed fallback, and `throw` falls through to the next
+  built-in table. Expired routes and single-path default routes whose nexthop
+  is dead, link-down, or unresolved are skipped, as such multipath legs
+  already were; an IPv4 route through a nexthop object with no usable leg
+  instead ends its table's lookup, so the next built-in table decides, while
+  IPv6 moves on to the next route. Malformed default routes now return an
+  `EINVAL` error instead of a partial interface set. This covers a malformed
+  `RTA_MULTIPATH` nexthop list, a truncated fixed-size attribute, a trailing
+  attribute fragment, an undecodable or specific `RTA_DST`, and a referenced
+  nexthop object or group member with malformed attributes.
+
+### Hardware-address and IP-math changes
+
+- Add `HardwareAddr`, including typed EUI-48, EUI-64, and InfiniBand forms
+  plus exact raw-byte fallback. Equality and hashing use the complete byte
+  sequence rather than the enum variant. `Interface::hardware_addr()` exposes
+  it while `Interface::mac_addr()` remains a const-compatible EUI-48 helper.
+- Canonicalize every all-zero hardware address to `None`, regardless of its
+  declared length. Linux already had this behavior; on Windows and BSD this is
+  an intentional 0.8 behavior change from returning an all-zero `MacAddr`.
+  Interface equality and hashing now include all captured hardware bytes.
+- Add checked address and `ipnet` arithmetic traits, including usable-host
+  accessors and individual-address or whole-subnet offsets that preserve
+  prefixes and original host bits without wrapping.
+
 # RELEASED
 
 ## 0.7.0 (October 9th, 2026)

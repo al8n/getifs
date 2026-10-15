@@ -13,8 +13,8 @@ use windows_sys::{
 };
 
 use super::{
-  Address, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, IpRoute, Ipv4Route,
-  Ipv6Route, MacAddr, Net, MAC_ADDRESS_SIZE,
+  Address, HardwareAddr, IfAddr, IfNet, Ifv4Addr, Ifv4Net, Ifv6Addr, Ifv6Net, Interface, IpRoute,
+  Ipv4Route, Ipv6Route, Net,
 };
 
 pub(super) use gateway::*;
@@ -280,16 +280,13 @@ pub(super) fn win32_status_error(status: u32) -> io::Error {
   io::Error::from_raw_os_error(status as i32)
 }
 
-/// Returns the hardware address of `length` bytes from `address` when it is a
-/// 6-byte (EUI-48) MAC address.
+/// Returns the complete `length`-byte hardware address from the fixed native
+/// buffer. A malformed length beyond that buffer is rejected rather than
+/// truncated; empty and all-zero values are normalized to absent.
 #[inline]
-fn physical_mac(length: u32, address: &[u8]) -> Option<MacAddr> {
-  if length as usize != MAC_ADDRESS_SIZE {
-    return None;
-  }
-
-  let bytes: [u8; MAC_ADDRESS_SIZE] = address.get(..MAC_ADDRESS_SIZE)?.try_into().ok()?;
-  Some(MacAddr::from_raw(bytes))
+fn physical_hardware_addr(length: u32, address: &[u8]) -> Option<HardwareAddr> {
+  let length = usize::try_from(length).ok()?;
+  HardwareAddr::from_bytes(address.get(..length)?)
 }
 
 /// Resolves the interface index for a Windows adapter.
@@ -365,7 +362,7 @@ fn interface_from_row(row: &MIB_IF_ROW2) -> Option<Interface> {
     name,
     flags: interface_flags(row.Type, row.AdminStatus, row.OperStatus),
     mtu: if row.Mtu == u32::MAX { 0 } else { row.Mtu },
-    mac_addr: physical_mac(row.PhysicalAddressLength, &row.PhysicalAddress),
+    hardware_addr: physical_hardware_addr(row.PhysicalAddressLength, &row.PhysicalAddress),
   })
 }
 
@@ -548,6 +545,7 @@ fn sockaddr_to_ipaddr(family: u16, sockaddr: *const SOCKADDR) -> Option<IpAddr> 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use hardware_address::MacAddr;
 
   /// An interface-table row for index 42 named `alias`: an Ethernet adapter
   /// that is administratively up but operationally down.
@@ -558,10 +556,10 @@ mod tests {
       Mtu: 9_000,
       AdminStatus: NET_IF_ADMIN_STATUS_UP,
       OperStatus: IfOperStatusDown,
-      PhysicalAddressLength: MAC_ADDRESS_SIZE as u32,
+      PhysicalAddressLength: MacAddr::SIZE as u32,
       ..Default::default()
     };
-    row.PhysicalAddress[..MAC_ADDRESS_SIZE].copy_from_slice(&[0, 1, 2, 3, 4, 5]);
+    row.PhysicalAddress[..MacAddr::SIZE].copy_from_slice(&[0, 1, 2, 3, 4, 5]);
     for (unit, encoded) in row.Alias.iter_mut().zip(alias.encode_utf16()) {
       *unit = encoded;
     }
@@ -627,13 +625,22 @@ mod tests {
   }
 
   #[test]
-  fn unbounded_mtu_and_a_non_eui48_address_are_not_reported() {
+  fn unbounded_mtu_and_an_empty_hardware_address_are_not_reported() {
     let mut row = row("Tunnel");
     row.Mtu = u32::MAX;
     row.PhysicalAddressLength = 0;
     let interface = interface_from_row(&row).unwrap();
     assert_eq!(interface.mtu(), 0);
     assert_eq!(interface.mac_addr(), None);
+  }
+
+  #[test]
+  fn interface_row_normalizes_an_all_zero_mac() {
+    let mut row = row("zero");
+    row.PhysicalAddress[..MacAddr::SIZE].fill(0);
+    let interface = interface_from_row(&row).unwrap();
+    assert!(interface.hardware_addr().is_none());
+    assert!(interface.mac_addr().is_none());
   }
 
   #[test]
@@ -746,18 +753,41 @@ mod tests {
   }
 
   #[test]
-  fn physical_mac_requires_exactly_six_bytes() {
-    let address = [0, 1, 2, 3, 4, 5, 6, 7];
-    for length in [0, 5, 7, 8] {
-      assert!(physical_mac(length, &address).is_none());
-    }
+  fn physical_hardware_address_preserves_known_and_raw_widths() {
+    let mac = physical_hardware_addr(6, &[1; 6]).unwrap();
+    assert!(matches!(mac, HardwareAddr::Mac(_)));
+    assert_eq!(mac.as_bytes(), &[1; 6]);
 
-    let length = MAC_ADDRESS_SIZE as u32;
-    assert_eq!(
-      physical_mac(length, &address).unwrap().octets(),
-      [0, 1, 2, 3, 4, 5]
-    );
-    assert!(physical_mac(length, &address[..4]).is_none());
+    let eui64 = physical_hardware_addr(8, &[2; 8]).unwrap();
+    assert!(matches!(eui64, HardwareAddr::Eui64(_)));
+    assert_eq!(eui64.as_bytes(), &[2; 8]);
+
+    let infiniband = physical_hardware_addr(20, &[3; 20]).unwrap();
+    assert!(matches!(infiniband, HardwareAddr::InfiniBand(_)));
+    assert_eq!(infiniband.as_bytes(), &[3; 20]);
+
+    let raw = physical_hardware_addr(5, &[4; 5]).unwrap();
+    assert!(matches!(raw, HardwareAddr::Raw(_)));
+    assert_eq!(raw.as_bytes(), &[4; 5]);
+  }
+
+  #[test]
+  fn physical_hardware_address_rejects_absent_and_malformed_values() {
+    assert!(physical_hardware_addr(0, &[]).is_none());
+    assert!(physical_hardware_addr(6, &[0; 6]).is_none());
+    assert!(physical_hardware_addr(8, &[0; 8]).is_none());
+    assert!(physical_hardware_addr(20, &[0; 20]).is_none());
+    assert!(physical_hardware_addr(6, &[1; 5]).is_none());
+    assert!(physical_hardware_addr(33, &[1; 32]).is_none());
+    assert!(physical_hardware_addr(u32::MAX, &[1; 32]).is_none());
+  }
+
+  #[test]
+  fn physical_hardware_address_owns_bytes_after_the_ffi_row_is_gone() {
+    let mut bytes = [1, 2, 3, 4, 5, 6, 7, 8];
+    let address = physical_hardware_addr(bytes.len() as u32, &bytes).unwrap();
+    bytes.fill(0);
+    assert_eq!(address.as_bytes(), &[1, 2, 3, 4, 5, 6, 7, 8]);
   }
 
   #[test]

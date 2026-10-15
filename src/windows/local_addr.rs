@@ -33,8 +33,8 @@ use windows_sys::Win32::Networking::WinSock::*;
 /// low-route-metric default sits on a high-cost interface (Wi-Fi
 /// behind a cellular fallback, for example) — comparing on
 /// `route.Metric` alone would silently misorder them. Rows on an
-/// interface that is not `Connected` (or is absent from
-/// `GetIpInterfaceTable`) are skipped.
+/// interface that is not `Connected`, that sets `DisableDefaultRoutes`,
+/// or that is absent from `GetIpInterfaceTable` are skipped.
 ///
 /// This walks the forwarding table instead of asking `GetBestRoute2`
 /// or `GetBestInterfaceEx` for the best route to the unspecified
@@ -51,7 +51,7 @@ use windows_sys::Win32::Networking::WinSock::*;
 /// The forwarding-table walk asks the only question Windows answers
 /// unambiguously — "which routes have `/0`?" — and applies the same
 /// effective-metric tie-break the kernel uses.
-fn best_default_route_interface(family: u16) -> io::Result<SmallVec<u32>> {
+fn best_default_route_interfaces(family: u16) -> io::Result<SmallVec<u32>> {
   // SAFETY: `GetIpForwardTable2` is an IP Helper table getter.
   let forward = match unsafe { OwnedMibTable::fetch(|table| GetIpForwardTable2(family, table)) } {
     Ok(table) => table,
@@ -65,37 +65,55 @@ fn best_default_route_interface(family: u16) -> io::Result<SmallVec<u32>> {
     Err(status) => return classify_table_error(status),
   };
 
-  // Per-interface state: `(metric, connected)`. We need both —
-  // metric for effective-route ranking, `Connected` to drop routes
-  // pinned to admin-down / unplugged adapters that the Windows
-  // forwarding table can still hold (a static default for a VPN
-  // interface that's currently disconnected, for example). Without
-  // this filter, such a stale route can win the metric race and
-  // make `best_local_*` return addresses on an interface the
-  // kernel won't use for outbound traffic.
+  Ok(select_best_default_route_interfaces(
+    forward.rows(),
+    interfaces.rows(),
+  ))
+}
+
+fn select_best_default_route_interfaces(
+  forward: &[MIB_IPFORWARD_ROW2],
+  interfaces: &[MIB_IPINTERFACE_ROW],
+) -> SmallVec<u32> {
+  // Per-interface state: `(metric, eligible)`. The metric feeds
+  // effective-route ranking. An interface is eligible when it is
+  // `Connected` and does not set `DisableDefaultRoutes`. The forwarding
+  // table can still hold default routes pinned to admin-down or unplugged
+  // adapters (a static default for a VPN interface that's currently
+  // disconnected, for example), and Microsoft documents
+  // `DisableDefaultRoutes` as disabling default-route use on the
+  // interface (VPN clients set it to restrict split tunneling). Without
+  // this filter, either kind of route can win the metric race and make
+  // `best_local_*` return addresses on an interface the kernel won't use
+  // for default-route traffic.
   let mut iface_state: std::collections::HashMap<u32, (u32, bool)> =
     std::collections::HashMap::new();
-  for r in interfaces.rows() {
-    iface_state.insert(r.InterfaceIndex, (r.Metric, r.Connected));
+  for r in interfaces {
+    if r.InterfaceIndex != 0 {
+      iface_state.insert(
+        r.InterfaceIndex,
+        (r.Metric, r.Connected && !r.DisableDefaultRoutes),
+      );
+    }
   }
 
   let mut best_eff: u64 = u64::MAX;
   let mut best_oifs: SmallVec<u32> = SmallVec::new();
-  for row in forward.rows() {
-    if row.DestinationPrefix.PrefixLength != 0 {
+  for row in forward {
+    if row.InterfaceIndex == 0 || row.DestinationPrefix.PrefixLength != 0 {
       continue;
     }
     if row.ValidLifetime == 0 || row.Loopback {
       continue;
     }
-    // Drop candidates whose interface is either absent from the
-    // IP-interface table (kernel state divergence) or marked
-    // `Connected = FALSE` (link down / admin disabled). The
-    // kernel won't use such a route for outbound traffic, so
-    // selecting it here would hand back addresses on an
-    // unusable adapter.
+    // Drop candidates whose interface is absent from the
+    // IP-interface table (kernel state divergence), marked
+    // `Connected = FALSE` (link down / admin disabled), or excluded
+    // from default routing by `DisableDefaultRoutes`. The kernel
+    // won't use such a route for default-route traffic, so selecting
+    // it here would hand back addresses on the wrong adapter.
     let if_m = match iface_state.get(&row.InterfaceIndex) {
-      Some(&(metric, connected)) if connected => metric as u64,
+      Some(&(metric, eligible)) if eligible => metric as u64,
       _ => continue,
     };
     // Effective metric per Microsoft's documented routing model:
@@ -122,7 +140,15 @@ fn best_default_route_interface(family: u16) -> io::Result<SmallVec<u32>> {
   best_oifs.sort_unstable();
   best_oifs.dedup();
 
-  Ok(best_oifs)
+  best_oifs
+}
+
+pub(crate) fn default_ipv4_interface_indices() -> io::Result<SmallVec<u32>> {
+  best_default_route_interfaces(AF_INET)
+}
+
+pub(crate) fn default_ipv6_interface_indices() -> io::Result<SmallVec<u32>> {
+  best_default_route_interfaces(AF_INET6)
 }
 
 /// Map a `MIB`-table fetch failure: known "no stack / no entries"
@@ -147,7 +173,7 @@ fn classify_table_error(code: u32) -> io::Result<SmallVec<u32>> {
 
 pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
   let mut out: SmallVec<Ifv4Net> = SmallVec::new();
-  for idx in best_default_route_interface(AF_INET)? {
+  for idx in best_default_route_interfaces(AF_INET)? {
     let v4 = interface_ipv4_addresses(Some(idx), local_ip_filter)?;
     for a in v4 {
       out.push(a);
@@ -158,7 +184,7 @@ pub(crate) fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 
 pub(crate) fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
   let mut out: SmallVec<Ifv6Net> = SmallVec::new();
-  for idx in best_default_route_interface(AF_INET6)? {
+  for idx in best_default_route_interfaces(AF_INET6)? {
     let v6 = interface_ipv6_addresses(Some(idx), local_ip_filter)?;
     for a in v6 {
       out.push(a);
@@ -174,13 +200,13 @@ pub(crate) fn best_local_addrs() -> io::Result<SmallVec<IfNet>> {
   // addresses for each — collapsing both into a single "best
   // interface" would arbitrarily drop one family's usable addresses.
   let mut result: SmallVec<IfNet> = SmallVec::new();
-  for idx in best_default_route_interface(AF_INET)? {
+  for idx in best_default_route_interfaces(AF_INET)? {
     let v4 = interface_ipv4_addresses(Some(idx), local_ip_filter)?;
     for a in v4 {
       result.push(a.into());
     }
   }
-  for idx in best_default_route_interface(AF_INET6)? {
+  for idx in best_default_route_interfaces(AF_INET6)? {
     let v6 = interface_ipv6_addresses(Some(idx), local_ip_filter)?;
     for a in v6 {
       result.push(a.into());
@@ -227,6 +253,96 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn interface(
+    index: u32,
+    metric: u32,
+    connected: bool,
+    disable_default_routes: bool,
+  ) -> MIB_IPINTERFACE_ROW {
+    MIB_IPINTERFACE_ROW {
+      InterfaceIndex: index,
+      Metric: metric,
+      Connected: connected,
+      DisableDefaultRoutes: disable_default_routes,
+      ..Default::default()
+    }
+  }
+
+  fn route(
+    index: u32,
+    metric: u32,
+    prefix_len: u8,
+    valid_lifetime: u32,
+    loopback: bool,
+  ) -> MIB_IPFORWARD_ROW2 {
+    let mut row = MIB_IPFORWARD_ROW2 {
+      InterfaceIndex: index,
+      Metric: metric,
+      ValidLifetime: valid_lifetime,
+      Loopback: loopback,
+      ..Default::default()
+    };
+    row.DestinationPrefix.PrefixLength = prefix_len;
+    row
+  }
+
+  #[test]
+  fn selector_keeps_every_equal_best_nonzero_interface() {
+    let interfaces = [
+      interface(4, 10, true, false),
+      interface(2, 20, true, false),
+      interface(0, 0, true, false),
+      interface(9, 0, false, false),
+    ];
+    let routes = [
+      route(4, 20, 0, 1, false),
+      route(2, 10, 0, 1, false),
+      route(4, 20, 0, 1, false),
+      route(0, 0, 0, 1, false),
+      route(9, 0, 0, 1, false),
+      route(8, 0, 0, 1, false),
+      route(4, 0, 24, 1, false),
+      route(4, 0, 0, 0, false),
+      route(4, 0, 0, 1, true),
+    ];
+
+    assert_eq!(
+      select_best_default_route_interfaces(&routes, &interfaces).as_slice(),
+      &[2, 4]
+    );
+  }
+
+  #[test]
+  fn selector_returns_empty_without_a_usable_route() {
+    assert!(select_best_default_route_interfaces(&[], &[]).is_empty());
+    assert!(select_best_default_route_interfaces(
+      &[route(7, 0, 0, 1, false)],
+      &[interface(7, 0, false, false)]
+    )
+    .is_empty());
+  }
+
+  #[test]
+  fn selector_skips_an_interface_with_default_routes_disabled() {
+    // Interface 3 has the lowest effective metric but opts out of default
+    // routing, so the next-best interface wins.
+    let interfaces = [
+      interface(3, 5, true, true),
+      interface(6, 10, true, false),
+      interface(8, 20, true, false),
+    ];
+    let routes = [
+      route(3, 0, 0, 1, false),
+      route(6, 0, 0, 1, false),
+      route(8, 0, 0, 1, false),
+    ];
+
+    assert_eq!(
+      select_best_default_route_interfaces(&routes, &interfaces).as_slice(),
+      &[6]
+    );
+  }
 
   // Pure-function unit test for `classify_table_error`. Covers
   // every arm of the whitelist match plus the catch-all error

@@ -180,7 +180,7 @@ fn build_interface(sock: BorrowedFd<'_>, index: u32) -> io::Result<Option<Interf
     name,
     // MAC is privacy-restricted on Android (apps read all-zero), so we do
     // not attempt SIOCGIFHWADDR.
-    mac_addr: None,
+    hardware_addr: None,
     flags,
   }))
 }
