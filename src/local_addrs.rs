@@ -160,9 +160,15 @@ where
 /// The "best" interface is determined by the routing metrics of default routes (`0.0.0.0`).
 ///
 /// On every platform a default route is a `/0` route, so split halves such
-/// as `0.0.0.0/1` do not count. Linux skips a single-path default whose
-/// nexthop is dead, link-down, or unresolved, and Windows skips
+/// as `0.0.0.0/1` do not count. Linux skips a default route, or a multipath
+/// leg, whose nexthop is dead, link-down, or unresolved, and Windows skips
 /// disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
+///
+/// Selection reads only the routing table and never consults the neighbor
+/// table, so the result can include addresses of an interface whose router
+/// is currently unreachable, and of every equal-best route where the kernel
+/// uses one per lookup; [`default_interfaces`](fn@crate::default_interfaces)
+/// describes the full boundary.
 ///
 /// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
 /// `default`) are consulted; hosts with unconstrained custom `ip rule`
@@ -200,9 +206,15 @@ pub fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 /// The "best" interface is determined by the routing metrics of default routes (`::`).
 ///
 /// On every platform a default route is a `/0` route, so split halves such
-/// as `::/1` do not count. Linux skips a single-path default whose nexthop
-/// is dead, link-down, or unresolved, and Windows skips disconnected
-/// interfaces and interfaces that set `DisableDefaultRoutes`.
+/// as `::/1` do not count. Linux skips a default route, or a multipath leg,
+/// whose nexthop is dead, link-down, or unresolved, and Windows skips
+/// disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
+///
+/// Selection reads only the routing table and never consults the neighbor
+/// table, so the result can include addresses of an interface whose router
+/// is currently unreachable, and of every equal-best route where the kernel
+/// uses one per lookup; [`default_interfaces`](fn@crate::default_interfaces)
+/// describes the full boundary.
 ///
 /// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
 /// `default`) are consulted; hosts with unconstrained custom `ip rule`
@@ -240,10 +252,16 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// The "best" interfaces are determined by the routing metrics of default routes.
 ///
 /// On every platform a default route is a `/0` route, so split halves such
-/// as `0.0.0.0/1` and `::/1` do not count. Linux skips a single-path
-/// default whose nexthop is dead, link-down, or unresolved, and Windows
-/// skips disconnected interfaces and interfaces that set
+/// as `0.0.0.0/1` and `::/1` do not count. Linux skips a default route, or
+/// a multipath leg, whose nexthop is dead, link-down, or unresolved, and
+/// Windows skips disconnected interfaces and interfaces that set
 /// `DisableDefaultRoutes`.
+///
+/// Selection reads only the routing table and never consults the neighbor
+/// table, so the result can include addresses of an interface whose router
+/// is currently unreachable, and of every equal-best route where the kernel
+/// uses one per lookup; [`default_interfaces`](fn@crate::default_interfaces)
+/// describes the full boundary.
 ///
 /// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
 /// `default`) are consulted; hosts with unconstrained custom `ip rule`

@@ -53,12 +53,24 @@ impl DefaultInterfaces {
 /// stack, has an empty slice. Permission, malformed-response, and persistent
 /// interruption errors are returned. Linux considers the standard `local`,
 /// `main`, and `default` RPDB tables in their normal precedence order and
-/// skips a default route whose nexthop is dead, link-down, or unresolved;
-/// custom `ip rule` policy tables are not modeled. Windows skips disconnected
-/// interfaces and interfaces that set `DisableDefaultRoutes`. On OpenBSD a
-/// lower route priority wins; other BSD targets do not expose a comparable
-/// priority, so every usable default route is retained as an equal-best
-/// result.
+/// skips a default route, or a multipath leg, whose nexthop is dead,
+/// link-down, or unresolved; custom `ip rule` policy tables are not modeled.
+/// Windows skips disconnected interfaces and interfaces that set
+/// `DisableDefaultRoutes`. On OpenBSD a lower route priority wins; other BSD
+/// targets do not expose a comparable priority, so every usable default route
+/// is retained as an equal-best result.
+///
+/// Selection reads only the routing table: it honours a route's own state
+/// (dead, link-down) but never consults the neighbor table, so it does not
+/// reproduce IPv6 router reachability checks on non-forwarding Linux hosts or
+/// IPv4 dead-gateway detection among equal-metric defaults. Equal-best routes
+/// are reported whole, where the kernel picks one per lookup, so the result
+/// can be a superset of the routes in use. For IPv6, a higher-preference or
+/// lower-metric default whose router is currently unreachable still ranks
+/// first: it can be ranked above a reachable default or reported alongside
+/// one, and the result can name only the unreachable router's interface. The
+/// result is a static snapshot that does not follow neighbor-state changes,
+/// while the kernel's choice can differ from one lookup to the next.
 pub fn default_interfaces() -> io::Result<DefaultInterfaces> {
   let (ipv4_indices, ipv6_indices) = default_interface_indices()?;
   let interfaces = interfaces()?;

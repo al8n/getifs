@@ -81,9 +81,13 @@ const RTA_VIA: u16 = netlink::rtattr_type_t::RTA_VIA as u16;
 // so v4 selection is unchanged.
 const RTA_PREF: u16 = netlink::rtattr_type_t::RTA_PREF as u16;
 
-// `struct rtnexthop` flag bits from <linux/rtnetlink.h>. Nexthops with
-// any of these set are not currently usable, so the multipath walker
-// skips them rather than emit them as if they were live.
+// `RTNH_F_*` nexthop flag bits from <linux/rtnetlink.h>. They appear in
+// each `struct rtnexthop` of an `RTA_MULTIPATH` list, in the low byte of
+// a single-path route's `rtm_flags`, and in a nexthop object's
+// `nh_flags`. A nexthop with any of these set is not currently usable:
+// the multipath walkers skip such a leg, the default-route walk skips
+// such a route, and the nexthop dump marks such an object filtered,
+// rather than treat it as live.
 const RTNH_F_DEAD: u8 = 1;
 const RTNH_F_LINKDOWN: u8 = 16;
 const RTNH_F_UNRESOLVED: u8 = 32;
@@ -150,8 +154,9 @@ fn table_rank_for(table_id: u32) -> u8 {
 /// (`HIGH = 0x1`, `MEDIUM = 0x0`, `LOW = 0x3`, plus the reserved
 /// `INVALID = 0x2`), which we can't sort directly — remap to a clean
 /// `HIGH < MEDIUM < LOW` order so `(table_rank, metric, pref_rank)`
-/// lex-compare matches the kernel's tie-break for equal-metric IPv6
-/// defaults.
+/// lex-compare matches the kernel's static ordering of equal-metric
+/// IPv6 defaults. The kernel's router reachability check, which can
+/// exclude or demote a default per lookup, is not modeled.
 ///
 /// Absence of `RTA_PREF` and reserved/unknown values both fold to
 /// MEDIUM — that's the kernel's default and the value applied to
@@ -1133,7 +1138,9 @@ where
   // table, *regardless of metric*. Comparing on metric alone would
   // let a low-metric `RT_TABLE_DEFAULT` fallback beat a
   // higher-metric `RT_TABLE_MAIN` default, which the kernel never
-  // does. The lex key matches kernel selection exactly.
+  // does. The full key matches the kernel's static ordering (table
+  // rank, metric, router preference); the kernel's per-lookup
+  // neighbor checks are not modeled.
   let mut best_rank: u8 = u8::MAX;
   let mut best_metric: u32 = u32::MAX;
   // Lex tier: RFC 4191 router preference rank. See `pref_rank_for`.
@@ -1200,11 +1207,16 @@ where
         // `RTNH_F_*` bits into that low byte (`fib_nexthop_info`, called
         // from `fib_dump_info` for IPv4 and `rt6_fill_node` for IPv6). A
         // dead, link-down, or unresolved nexthop, such as a static
-        // default on an unplugged NIC or an RA default on an admin-down
-        // interface, is well-formed but unusable, so the route is
-        // skipped before ranking, as unusable multipath legs and
-        // nexthop objects are. A multipath route reports its per-leg
-        // flags in `RTA_MULTIPATH` and normally leaves the low byte zero.
+        // default on a NIC that lost carrier, is well-formed but
+        // unusable, so the route is skipped before ranking, as unusable
+        // multipath legs and nexthop objects are.
+        //
+        // A multipath route reports its per-leg flags in `RTA_MULTIPATH`.
+        // For IPv4 its low byte is the route-level `fib_flags`, which the
+        // kernel sets to DEAD or LINKDOWN only when every leg is, clears
+        // when any leg revives, and never accepts from user space; IPv6
+        // never ORs nexthop flags into a multipath route. So this skip
+        // cannot drop a usable leg.
         let unusable = u32::from(RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_UNRESOLVED);
         if rtm_header.rtm_flags & unusable != 0 {
           return Ok(());

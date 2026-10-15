@@ -21,7 +21,13 @@
 Default-route selection changed on several platforms. Each platform shares
 one default-route walk among `default_interfaces()`, the default-route
 preference of the `preferred_*_addr` selectors, and the existing
-`best_local_*` functions, so these changes apply to all of them.
+`best_local_*` functions, so these changes apply to all of them. Selection
+reads only the routing table: it honours a route's own state but never
+consults the neighbor table, so it reproduces neither IPv6 router
+reachability checks on non-forwarding Linux hosts nor IPv4 dead-gateway
+detection among equal-metric defaults. The result is a static snapshot that
+reports equal-best routes whole where the kernel picks one per lookup, and
+that can rank an IPv6 default whose router is unreachable first.
 
 - Apple: interface-scoped default routes (`RTF_IFSCOPE`, the `/0` entries
   macOS installs for each non-primary interface) are ignored; only the

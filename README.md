@@ -198,14 +198,27 @@ address results. A missing route or unavailable address-family stack yields an
 empty family slice; permission, malformed-response, and persistent-interrupt
 errors still propagate. Linux follows its built-in `local`, `main`, and
 `default` RPDB-table precedence, metric, and IPv6 router-preference rules and
-skips a default route whose nexthop is dead, link-down, or unresolved, but
-does not model custom `ip rule` policy tables. Windows skips disconnected
-interfaces and interfaces that set `DisableDefaultRoutes`. OpenBSD uses route
-priority; other BSD targets cannot expose an equivalent priority, so they
-retain every usable default as equal-best. On every platform a default route
-is a `/0` route, so split-default halves such as `0.0.0.0/1` and `::/1` are
-not default routes, and neither are the interface-scoped defaults that Apple
-platforms install for non-primary interfaces.
+skips a default route, or a multipath leg, whose nexthop is dead, link-down,
+or unresolved, but does not model custom `ip rule` policy tables. Windows
+skips disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
+OpenBSD uses route priority; other BSD targets cannot expose an equivalent
+priority, so they retain every usable default as equal-best. On every
+platform a default route is a `/0` route, so split-default halves such as
+`0.0.0.0/1` and `::/1` are not default routes, and neither are the
+interface-scoped defaults that Apple platforms install for non-primary
+interfaces.
+
+Selection reads only the routing table: it honours a route's own state (dead,
+link-down) but never consults the neighbor table, so it does not reproduce
+IPv6 router reachability checks on non-forwarding Linux hosts or IPv4
+dead-gateway detection among equal-metric defaults. Equal-best routes are
+reported whole, where the kernel picks one per lookup, so the result can be a
+superset of the routes in use. For IPv6, a higher-preference or lower-metric
+default whose router is currently unreachable still ranks first: it can be
+ranked above a reachable default or reported alongside one, and the result can
+name only the unreachable router's interface. The result is a static snapshot
+that does not follow neighbor-state changes, while the kernel's choice can
+differ from one lookup to the next.
 
 `preferred_public_*_addr` and `preferred_private_*_addr` return one typed
 candidate. They require `Flags::UP` and exclude every forwarding-blacklisted
