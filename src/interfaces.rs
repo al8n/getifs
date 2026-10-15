@@ -76,10 +76,7 @@ impl Interface {
   /// Operating-system all-zero hardware values are normalized to `None`.
   #[inline]
   pub const fn hardware_addr(&self) -> Option<&HardwareAddr> {
-    match &self.hardware_addr {
-      Some(addr) => Some(addr),
-      None => None,
-    }
+    self.hardware_addr.as_ref()
   }
 
   /// Returns the flags of the interface.

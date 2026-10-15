@@ -102,9 +102,6 @@ pub mod __fuzzing {
 mod tests;
 
 #[allow(dead_code)]
-const MAC_ADDRESS_SIZE: usize = 6;
-
-#[allow(dead_code)]
 trait Address: Sized {
   fn try_from(index: u32, addr: IpAddr) -> Option<Self>;
 

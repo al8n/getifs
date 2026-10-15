@@ -66,7 +66,6 @@ impl Eq for HardwareAddr {}
 impl Hash for HardwareAddr {
   #[inline]
   fn hash<H: Hasher>(&self, state: &mut H) {
-    self.as_bytes().len().hash(state);
     self.as_bytes().hash(state);
   }
 }

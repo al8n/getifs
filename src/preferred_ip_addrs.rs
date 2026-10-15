@@ -11,8 +11,11 @@ use super::{
 /// Returns the preferred forwardable public IPv4 or IPv6 interface address.
 ///
 /// A candidate must be on an administratively-up interface, outside RFC 6890,
-/// and outside the forwarding blacklist. Default-route membership is a
-/// preference, not a requirement. The default ranking is, in order:
+/// and outside the forwarding blacklist. Address lifetime and
+/// duplicate-address-detection state are not inspected, so a tentative,
+/// deprecated, or duplicate IPv6 address remains eligible. Default-route
+/// membership is a preference, not a requirement. The default ranking is, in
+/// order:
 ///
 /// 1. An interface selected by that address family's default route.
 /// 2. IPv4 before IPv6.
@@ -23,9 +26,10 @@ use super::{
 ///
 /// The first captured candidate wins a complete tie. An IPv6 default-route
 /// candidate therefore outranks a nondefault IPv4 candidate; IPv4-before-IPv6
-/// applies only after family-default membership ties. `Ok(None)` means no
-/// eligible joined record was captured, including when no default route exists.
-/// I/O, permission, and route-parse failures are returned as `Err`.
+/// applies only after family-default membership ties. A missing default route
+/// never makes the result `None` by itself; `Ok(None)` means no eligible joined
+/// record was captured. I/O, permission, and route-parse failures are returned
+/// as `Err`.
 pub fn preferred_public_addr() -> io::Result<Option<IfNet>> {
   preferred_default(Class::Public, Family::Any)
 }
@@ -50,8 +54,8 @@ pub fn preferred_public_ipv6_addr() -> io::Result<Option<Ifv6Net>> {
 ///
 /// Private uses the crate's RFC 6890 classification: the address must be in
 /// RFC 6890 and outside the forwarding blacklist, and its interface must be
-/// administratively up. Its ranking and `Ok(None)`/`Err` behavior are the same
-/// as [`preferred_public_addr`].
+/// administratively up. It shares the IPv6 address-state caveat, ranking, and
+/// `Ok(None)`/`Err` behavior of [`preferred_public_addr`].
 pub fn preferred_private_addr() -> io::Result<Option<IfNet>> {
   preferred_default(Class::Private, Family::Any)
 }

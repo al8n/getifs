@@ -81,7 +81,9 @@ impl InterfaceSnapshot {
 
   /// Returns the preferred joined record accepted by `predicate`.
   ///
-  /// A complete comparator tie keeps the first captured candidate.
+  /// A complete comparator tie keeps the first captured candidate. If
+  /// `order` does not implement a total order, the returned record is
+  /// unspecified; this method does not panic because of it.
   pub fn preferred<'a, P, C>(&'a self, predicate: P, order: &C) -> Option<InterfaceAddress<'a>>
   where
     P: InterfacePredicate,
@@ -262,6 +264,16 @@ pub mod predicate {
 ///
 /// Comparators must only inspect their two captured records and any data
 /// captured when the comparator was constructed. They must not perform I/O.
+///
+/// A comparator must also implement a total order: comparing the same pair
+/// always gives the same result; `compare(a, b)` is [`Ordering::Less`]
+/// exactly when `compare(b, a)` is [`Ordering::Greater`]; the order is
+/// transitive; and [`Ordering::Equal`] is an equivalence relation. With a
+/// comparator that breaks this contract,
+/// [`InterfaceAddressSliceExt::sort_with`] and
+/// [`InterfaceAddressIteratorExt::sorted_with`] may panic, and
+/// [`InterfaceSnapshot::preferred`] and
+/// [`InterfaceAddressIteratorExt::min_with`] return an unspecified record.
 pub trait AddressComparator {
   /// Compares `left` with `right` using preference order.
   fn compare(&self, left: InterfaceAddress<'_>, right: InterfaceAddress<'_>) -> Ordering;
@@ -401,6 +413,12 @@ pub mod order {
 /// Stable sorting support for slices of [`InterfaceAddress`] values.
 pub trait InterfaceAddressSliceExt<'a> {
   /// Stably sorts records using `comparator`.
+  ///
+  /// # Panics
+  ///
+  /// May panic if `comparator` does not implement a total order: this
+  /// delegates to the standard library's stable sort, which documents the
+  /// same condition.
   fn sort_with<C>(&mut self, comparator: &C)
   where
     C: AddressComparator;
@@ -419,11 +437,20 @@ impl<'a> InterfaceAddressSliceExt<'a> for [InterfaceAddress<'a>] {
 /// Sorting and minimum support for iterators of [`InterfaceAddress`] values.
 pub trait InterfaceAddressIteratorExt<'a>: Iterator<Item = InterfaceAddress<'a>> + Sized {
   /// Collects records into a stably sorted vector.
+  ///
+  /// # Panics
+  ///
+  /// May panic if `comparator` does not implement a total order: this
+  /// delegates to the standard library's stable sort, which documents the
+  /// same condition.
   fn sorted_with<C>(self, comparator: &C) -> Vec<InterfaceAddress<'a>>
   where
     C: AddressComparator;
 
   /// Returns the minimum record, retaining the first record for complete ties.
+  ///
+  /// If `comparator` does not implement a total order, the returned record
+  /// is unspecified; this method does not panic because of it.
   fn min_with<C>(self, comparator: &C) -> Option<InterfaceAddress<'a>>
   where
     C: AddressComparator;

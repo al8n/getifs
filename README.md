@@ -207,7 +207,9 @@ install for non-primary interfaces.
 
 `preferred_public_*_addr` and `preferred_private_*_addr` return one typed
 candidate. They require `Flags::UP` and exclude every forwarding-blacklisted
-address before public/private classification and ranking. A default route is a
+address before public/private classification and ranking. Address lifetime and
+duplicate-address-detection state are not inspected, so a tentative,
+deprecated, or duplicate IPv6 address remains eligible. A default route is a
 preference, not an eligibility requirement, so an eligible address can still
 be selected when that family has no default route. `_by` variants replace only
 the ranking; they cannot make down or nonforwardable candidates eligible.
