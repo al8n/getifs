@@ -197,13 +197,15 @@ represented because this API starts from unfiltered interfaces, not from local
 address results. A missing route or unavailable address-family stack yields an
 empty family slice; permission, malformed-response, and persistent-interrupt
 errors still propagate. Linux follows its built-in `local`, `main`, and
-`default` RPDB-table precedence, metric, and IPv6 router-preference rules, but
-does not model custom `ip rule` policy tables. OpenBSD uses route priority;
-other BSD targets cannot expose an equivalent priority, so they retain every
-usable default as equal-best. On every platform a default route is a `/0`
-route, so split-default halves such as `0.0.0.0/1` and `::/1` are not default
-routes, and neither are the interface-scoped defaults that Apple platforms
-install for non-primary interfaces.
+`default` RPDB-table precedence, metric, and IPv6 router-preference rules and
+skips a default route whose nexthop is dead, link-down, or unresolved, but
+does not model custom `ip rule` policy tables. Windows skips disconnected
+interfaces and interfaces that set `DisableDefaultRoutes`. OpenBSD uses route
+priority; other BSD targets cannot expose an equivalent priority, so they
+retain every usable default as equal-best. On every platform a default route
+is a `/0` route, so split-default halves such as `0.0.0.0/1` and `::/1` are
+not default routes, and neither are the interface-scoped defaults that Apple
+platforms install for non-primary interfaces.
 
 `preferred_public_*_addr` and `preferred_private_*_addr` return one typed
 candidate. They require `Flags::UP` and exclude every forwarding-blacklisted

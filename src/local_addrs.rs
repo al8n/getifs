@@ -159,19 +159,26 @@ where
 /// Returns the IPv4 addresses from the interface(s) with the best default route.
 /// The "best" interface is determined by the routing metrics of default routes (`0.0.0.0`).
 ///
+/// On every platform a default route is a `/0` route, so split halves such
+/// as `0.0.0.0/1` do not count. Linux skips a single-path default whose
+/// nexthop is dead, link-down, or unresolved, and Windows skips
+/// disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
+///
 /// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
 /// `default`) are consulted; hosts with unconstrained custom `ip rule`
 /// policies ahead of `main` may have outbound traffic routed via a
 /// custom table this call does not see.
 ///
-/// Best-effort on FreeBSD / macOS / NetBSD / DragonFly: those kernels
-/// don't expose a documented routing priority on `rt_msghdr` — only
-/// OpenBSD does (`rtm_priority`). On the others, every default route
-/// is treated as equal-best, so a host with multiple defaults (VPN +
-/// physical link, primary + backup WAN) gets addresses from *all* of
-/// them rather than the single one the kernel would actually pick;
-/// callers needing kernel-equivalent selection should issue
-/// `RTM_GET` over `PF_ROUTE` themselves.
+/// Best-effort on FreeBSD / NetBSD / DragonFly: those kernels don't
+/// expose a documented routing priority on `rt_msghdr` — only OpenBSD
+/// does (`rtm_priority`). On them, every default route is treated as
+/// equal-best, so a host with multiple defaults (VPN + physical link,
+/// primary + backup WAN) gets addresses from *all* of them rather than
+/// the single one the kernel would actually pick; callers needing
+/// kernel-equivalent selection should issue `RTM_GET` over `PF_ROUTE`
+/// themselves. Apple platforms consider only unscoped default routes, as
+/// the kernel's unscoped lookup does, so the same applies there only when
+/// several unscoped defaults exist.
 ///
 /// See also [`local_ipv4_addrs`].
 ///
@@ -192,18 +199,25 @@ pub fn best_local_ipv4_addrs() -> io::Result<SmallVec<Ifv4Net>> {
 /// Returns the IPv6 addresses from the interface(s) with the best default route.
 /// The "best" interface is determined by the routing metrics of default routes (`::`).
 ///
+/// On every platform a default route is a `/0` route, so split halves such
+/// as `::/1` do not count. Linux skips a single-path default whose nexthop
+/// is dead, link-down, or unresolved, and Windows skips disconnected
+/// interfaces and interfaces that set `DisableDefaultRoutes`.
+///
 /// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
 /// `default`) are consulted; hosts with unconstrained custom `ip rule`
 /// policies ahead of `main` may have outbound traffic routed via a
 /// custom table this call does not see.
 ///
-/// Best-effort on FreeBSD / macOS / NetBSD / DragonFly: those kernels
-/// don't expose a documented routing priority on `rt_msghdr` — only
-/// OpenBSD does (`rtm_priority`). On the others, every default route
-/// is treated as equal-best, so a host with multiple defaults gets
-/// addresses from *all* of them rather than the single one the
-/// kernel would actually pick; callers needing kernel-equivalent
-/// selection should issue `RTM_GET` over `PF_ROUTE` themselves.
+/// Best-effort on FreeBSD / NetBSD / DragonFly: those kernels don't
+/// expose a documented routing priority on `rt_msghdr` — only OpenBSD
+/// does (`rtm_priority`). On them, every default route is treated as
+/// equal-best, so a host with multiple defaults gets addresses from *all*
+/// of them rather than the single one the kernel would actually pick;
+/// callers needing kernel-equivalent selection should issue `RTM_GET`
+/// over `PF_ROUTE` themselves. Apple platforms consider only unscoped
+/// default routes, as the kernel's unscoped lookup does, so the same
+/// applies there only when several unscoped defaults exist.
 ///
 /// See also [`local_ipv6_addrs`].
 ///
@@ -225,18 +239,26 @@ pub fn best_local_ipv6_addrs() -> io::Result<SmallVec<Ifv6Net>> {
 /// Returns both IPv4 and IPv6 addresses from the interfaces with the best default routes.
 /// The "best" interfaces are determined by the routing metrics of default routes.
 ///
+/// On every platform a default route is a `/0` route, so split halves such
+/// as `0.0.0.0/1` and `::/1` do not count. Linux skips a single-path
+/// default whose nexthop is dead, link-down, or unresolved, and Windows
+/// skips disconnected interfaces and interfaces that set
+/// `DisableDefaultRoutes`.
+///
 /// Best-effort on Linux: only the built-in RPDB tables (`local`, `main`,
 /// `default`) are consulted; hosts with unconstrained custom `ip rule`
 /// policies ahead of `main` may have outbound traffic routed via a
 /// custom table this call does not see.
 ///
-/// Best-effort on FreeBSD / macOS / NetBSD / DragonFly: those kernels
-/// don't expose a documented routing priority on `rt_msghdr` — only
-/// OpenBSD does (`rtm_priority`). On the others, every default route
-/// is treated as equal-best, so a host with multiple defaults gets
-/// addresses from *all* of them rather than the single one the
-/// kernel would actually pick; callers needing kernel-equivalent
-/// selection should issue `RTM_GET` over `PF_ROUTE` themselves.
+/// Best-effort on FreeBSD / NetBSD / DragonFly: those kernels don't
+/// expose a documented routing priority on `rt_msghdr` — only OpenBSD
+/// does (`rtm_priority`). On them, every default route is treated as
+/// equal-best, so a host with multiple defaults gets addresses from *all*
+/// of them rather than the single one the kernel would actually pick;
+/// callers needing kernel-equivalent selection should issue `RTM_GET`
+/// over `PF_ROUTE` themselves. Apple platforms consider only unscoped
+/// default routes, as the kernel's unscoped lookup does, so the same
+/// applies there only when several unscoped defaults exist.
 ///
 /// See also [`local_addrs`].
 ///

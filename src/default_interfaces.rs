@@ -52,10 +52,13 @@ impl DefaultInterfaces {
 /// A family with no usable default route, or with no available address-family
 /// stack, has an empty slice. Permission, malformed-response, and persistent
 /// interruption errors are returned. Linux considers the standard `local`,
-/// `main`, and `default` RPDB tables in their normal precedence order; custom
-/// `ip rule` policy tables are not modeled. On OpenBSD a lower route priority
-/// wins; other BSD targets do not expose a comparable priority, so every
-/// usable default route is retained as an equal-best result.
+/// `main`, and `default` RPDB tables in their normal precedence order and
+/// skips a default route whose nexthop is dead, link-down, or unresolved;
+/// custom `ip rule` policy tables are not modeled. Windows skips disconnected
+/// interfaces and interfaces that set `DisableDefaultRoutes`. On OpenBSD a
+/// lower route priority wins; other BSD targets do not expose a comparable
+/// priority, so every usable default route is retained as an equal-best
+/// result.
 pub fn default_interfaces() -> io::Result<DefaultInterfaces> {
   let (ipv4_indices, ipv6_indices) = default_interface_indices()?;
   let interfaces = interfaces()?;

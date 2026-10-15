@@ -1905,6 +1905,57 @@ mod tests {
   }
 
   #[test]
+  fn route_builders_resolve_the_prefix_from_the_netmask_encoding() {
+    let up = libc::RTF_UP;
+    let host = libc::RTF_UP | libc::RTF_HOST;
+    let v4 = |dst: Ipv4Addr, flags, netmask: Option<Ipv4Addr>| {
+      build_routev4(1, flags, dst.into(), None, netmask.map(IpAddr::V4))
+        .map(|route| *route.destination())
+    };
+    let v6 = |dst: Ipv6Addr, flags, netmask: Option<Ipv6Addr>| {
+      build_routev6(1, flags, dst.into(), None, netmask.map(IpAddr::V6))
+        .map(|route| *route.destination())
+    };
+    let net4 = |addr, prefix_len| Some(Ipv4Net::new(addr, prefix_len).unwrap());
+    let net6 = |addr, prefix_len| Some(Ipv6Net::new(addr, prefix_len).unwrap());
+
+    // An unspecified destination without a netmask is the default route.
+    assert_eq!(
+      v4(Ipv4Addr::UNSPECIFIED, up, None),
+      net4(Ipv4Addr::UNSPECIFIED, 0)
+    );
+    assert_eq!(
+      v6(Ipv6Addr::UNSPECIFIED, up, None),
+      net6(Ipv6Addr::UNSPECIFIED, 0)
+    );
+
+    // A host route without a netmask is a host prefix.
+    let host4 = Ipv4Addr::new(192, 0, 2, 1);
+    let host6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    assert_eq!(v4(host4, host, None), net4(host4, 32));
+    assert_eq!(v6(host6, host, None), net6(host6, 128));
+
+    // A network route without a netmask has no usable prefix.
+    let network4 = Ipv4Addr::new(192, 0, 2, 0);
+    let network6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0);
+    assert_eq!(v4(network4, up, None), None);
+    assert_eq!(v6(network6, up, None), None);
+
+    // `route_table` keeps reporting the split-default halves that
+    // default-route selection rejects.
+    let half4 = Ipv4Addr::new(128, 0, 0, 0);
+    let half6 = Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0);
+    assert_eq!(
+      v4(Ipv4Addr::UNSPECIFIED, up, Some(half4)),
+      net4(Ipv4Addr::UNSPECIFIED, 1)
+    );
+    assert_eq!(
+      v6(Ipv6Addr::UNSPECIFIED, up, Some(half6)),
+      net6(Ipv6Addr::UNSPECIFIED, 1)
+    );
+  }
+
+  #[test]
   fn parse_addrs_rejects_truncated_declared_sockaddr() {
     let mut truncated = vec![0u8; SOCK4 - 1];
     truncated[0] = SOCK4 as u8;

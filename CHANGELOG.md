@@ -31,10 +31,13 @@ preference of the `preferred_*_addr` selectors, and the existing
   non-contiguous netmask, are no longer default routes.
 - Windows: interfaces that set `DisableDefaultRoutes` are skipped, like
   disconnected interfaces.
-- Linux: malformed default routes now return an `EINVAL` error instead of a
-  partial interface set. This covers a malformed `RTA_MULTIPATH` nexthop
-  list, a truncated fixed-size attribute, an undecodable or specific
-  `RTA_DST`, and a referenced nexthop object whose message does not decode.
+- Linux: a single-path default route whose nexthop is dead, link-down, or
+  unresolved is skipped, as such multipath legs already were. Malformed
+  default routes now return an `EINVAL` error instead of a partial interface
+  set. This covers a malformed `RTA_MULTIPATH` nexthop list, a truncated
+  fixed-size attribute, a trailing attribute fragment, an undecodable or
+  specific `RTA_DST`, and a referenced nexthop object or group member with
+  malformed attributes.
 
 ### Hardware-address and IP-math changes
 
