@@ -22,11 +22,8 @@ Cross-platform enumeration of network interfaces and their MTU, gateway, multica
 
 ```toml
 [dependencies]
-getifs = "0.7"
+getifs = "0.8"
 ```
-
-The API additions documented below target the unpublished `0.8.0-dev`
-release. The currently published crates.io release remains 0.7.
 
 ## Features
 
@@ -156,7 +153,7 @@ Windows | IP Helper: `GetIfTable2Ex` / `GetIfEntry2` (interfaces), `GetAdaptersA
   re-exports and part of the compatibility contract. Serde is not currently
   exposed; it may be added later as an additive feature.
 
-### Snapshots, predicates, and ordering (0.8.0-dev)
+### Snapshots, predicates, and ordering (0.8.0)
 
 `InterfaceSnapshot::capture()` stores one interface collection and one
 unicast-address collection. Its iterators borrow both collections, so repeated
@@ -186,7 +183,7 @@ and the `order` module provides default-route, interface-up, family, network,
 index, address, and cached-name comparators. Comparators use captured fields
 only and never resolve an interface name or query routes.
 
-### Default and preferred addresses (0.8.0-dev)
+### Default and preferred addresses (0.8.0)
 
 `default_interfaces()` returns separate IPv4 and IPv6 slices. A family can
 have no default route, and equal-best routes remain in the corresponding
@@ -243,7 +240,7 @@ consider only their own family, so the IPv4-before-IPv6 tie-break is irrelevant
 there. `Ok(None)` means no eligible joined record was captured; ordinary
 enumeration, permission, and route-parsing errors remain `Err`.
 
-### Hardware addresses (0.8.0-dev)
+### Hardware addresses (0.8.0)
 
 `Interface::hardware_addr()` returns a `HardwareAddr`: six-byte `Mac`,
 eight-byte `Eui64`, twenty-byte `InfiniBand`, or exact `Raw` bytes for any
@@ -257,7 +254,7 @@ for example `Raw` six-byte data compares equal to the corresponding `Mac`.
 Because `Interface` derives equality and hashing over its captured snapshot,
 arbitrary hardware bytes participate in its identity as well.
 
-### Checked IP math (0.8.0-dev)
+### Checked IP math (0.8.0)
 
 `CheckedIpAddrExt` offers checked addition and subtraction for `Ipv4Addr`,
 `Ipv6Addr`, and `IpAddr`. `UsableIpNetExt` provides usable-host indexing:

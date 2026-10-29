@@ -1,6 +1,8 @@
 # UNRELEASED
 
-## 0.8.0-dev (unpublished)
+# RELEASED
+
+## 0.8.0 (October 29th, 2026)
 
 ### Rust-pattern address APIs
 
@@ -66,8 +68,6 @@ that can rank an IPv6 default whose router is unreachable first.
 - Add checked address and `ipnet` arithmetic traits, including usable-host
   accessors and individual-address or whole-subnet offsets that preserve
   prefixes and original host bits without wrapping.
-
-# RELEASED
 
 ## 0.7.0 (October 9th, 2026)
 
