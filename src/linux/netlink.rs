@@ -1551,8 +1551,9 @@ struct NexthopInfo {
   blackhole: bool,
   /// The message did not decode completely: its attribute stream is
   /// broken or ends in a fragment, its `NHA_GATEWAY` or `NHA_OIF` payload
-  /// is malformed, or its `NHA_GROUP` payload is empty or not a whole
-  /// number of `struct nexthop_grp` entries. The route and gateway walkers
+  /// is malformed, its `NHA_BLACKHOLE` flag carries a payload, or its
+  /// `NHA_GROUP` payload is empty or not a whole number of
+  /// `struct nexthop_grp` entries. The route and gateway walkers
   /// keep their best-effort reading of such a nexthop; the default-route
   /// walk fails instead of reporting a partial interface set.
   malformed: bool,
@@ -1651,8 +1652,9 @@ fn dump_nexthops<T: Transport>(
         // "id present but unusable" path is the safe place to
         // land here, vs. "id absent → potential race → EINTR".)
         let mut attr_malformed = false;
-        // A short `NHA_OIF`, or an `NHA_GROUP` that is empty or ends in
-        // a partial entry. Only `NexthopInfo::malformed` records these.
+        // A short `NHA_OIF`, an `NHA_BLACKHOLE` with a payload, or an
+        // `NHA_GROUP` that is empty or ends in a partial entry. Only
+        // `NexthopInfo::malformed` records these.
         let mut payload_malformed = false;
 
         while attr_buf.len() >= RtAttr::SIZE {
@@ -1703,6 +1705,10 @@ fn dump_nexthops<T: Transport>(
             }
             NHA_BLACKHOLE => {
               blackhole = true;
+              // A flag attribute: the kernel's policy rejects any payload.
+              if !data.is_empty() {
+                payload_malformed = true;
+              }
             }
             _ => {}
           }
@@ -4684,6 +4690,59 @@ mod netlink_tests {
     let (indices, opens) = replay_default_indices(vec![routes, blackhole_7]);
     assert_eq!(indices.unwrap().as_slice(), &[3]);
     assert_eq!(opens, 2);
+  }
+
+  #[test]
+  fn default_selector_rejects_a_blackhole_flag_that_carries_a_payload() {
+    let einval = Some(rustix::io::Errno::INVAL.raw_os_error());
+    let inet = AddressFamily::INET;
+    let inet6 = AddressFamily::INET6;
+    // The kernel emits `NHA_BLACKHOLE` as a flag without a payload.
+    let blackhole_with_payload = |id| nexthop(&[u32_attr(NHA_ID, id), u32_attr(NHA_BLACKHOLE, 1)]);
+
+    // A referenced leaf nexthop.
+    let routes = [
+      nexthop_default(inet, MAIN, 7, 50),
+      unicast_default(inet, MAIN, 3, 100),
+      done(),
+    ]
+    .concat();
+    let nexthops = [blackhole_with_payload(7), done()].concat();
+    let (indices, opens) = replay_default_indices(vec![routes.clone(), nexthops.clone()]);
+    assert_eq!(indices.unwrap_err().raw_os_error(), einval);
+    assert_eq!(opens, 2);
+
+    // The nexthop stays filtered, and the route walker keeps its
+    // best-effort reading of the same dumps.
+    let (dumped, _) = replay_nexthops(vec![nexthops.clone()]);
+    assert_eq!(dumped.unwrap(), [(7, 0, None, None, true)]);
+    let (result, _) = replay_routes(vec![routes, nexthops.clone()]);
+    assert!(result.is_ok());
+
+    let routes = [
+      nexthop_default(inet6, MAIN, 7, 50),
+      unicast_default(inet6, MAIN, 3, 100),
+      done(),
+    ]
+    .concat();
+    let (indices, opens) = replay_default_indices_in(inet6, vec![routes, nexthops]);
+    assert_eq!(indices.unwrap_err().raw_os_error(), einval);
+    assert_eq!(opens, 2);
+
+    // The only member of a referenced group.
+    let routes = [
+      nexthop_default(inet, MAIN, 9, 50),
+      unicast_default(inet, MAIN, 3, 100),
+      done(),
+    ]
+    .concat();
+    let nexthops = [blackhole_with_payload(7), nexthop_group(9, &[7]), done()].concat();
+    let (indices, opens) = replay_default_indices(vec![routes.clone(), nexthops.clone()]);
+    assert_eq!(indices.unwrap_err().raw_os_error(), einval);
+    assert_eq!(opens, 2);
+
+    let (result, _) = replay_routes(vec![routes, nexthops]);
+    assert!(result.is_ok());
   }
 
   #[test]
