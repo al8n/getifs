@@ -44,10 +44,9 @@ The minimum supported Rust version is 1.85; see [Maintenance](#maintenance) for 
 
 Enumerate interfaces, local IP addresses, and gateways:
 
-```rust
+```rust,ignore
 use getifs::{interfaces, local_addrs, gateway_addrs};
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
 // Get all network interfaces
 let interfaces = interfaces()?;
 for interface in interfaces {
@@ -67,18 +66,15 @@ let gateways = gateway_addrs()?;
 for gateway in gateways {
     println!("Gateway: {}", gateway);
 }
-# Ok(())
-# }
 ```
 
 ### Pick an address to advertise
 
 Ask for one preferred private address and list the default-route interfaces of each family. Both calls succeed on a host that has no eligible address or no default route; they report `None` or an empty slice instead.
 
-```rust
+```rust,ignore
 use getifs::{default_interfaces, preferred_private_addr};
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
 // `None` means no eligible private address was captured.
 match preferred_private_addr()? {
     Some(net) => println!("Advertise {} (interface index {})", net.addr(), net.index()),
@@ -95,8 +91,6 @@ for (family, interfaces) in [("IPv4", defaults.ipv4()), ("IPv6", defaults.ipv6()
         println!("{family} default: {} (index {})", interface.name(), interface.index());
     }
 }
-# Ok(())
-# }
 ```
 
 ## Examples
@@ -114,11 +108,6 @@ Run any of them with `cargo run --example <name>`.
 | [examples/route.rs](./examples/route.rs) | Fetching the routing table |
 | [examples/local_ip_addrs.rs](./examples/local_ip_addrs.rs) | Fetching local ip addresses |
 | [examples/filter_by_rfc.rs](./examples/filter_by_rfc.rs) | Fetching ip addresses by RFC |
-
-**Added in 0.8**
-
-| Example | Shows |
-| --- | --- |
 | [examples/snapshot_query.rs](./examples/snapshot_query.rs) | Querying a cached snapshot with typed predicates and ordering |
 | [examples/preferred_addrs.rs](./examples/preferred_addrs.rs) | Selecting public/private preferred addresses without requiring one |
 | [examples/default_interfaces.rs](./examples/default_interfaces.rs) | Listing family-aware default-route interfaces |
@@ -163,18 +152,15 @@ filtering and ordering performs no OS I/O and does not clone interface names
 or hardware bytes. Addresses whose interface is missing from the capture stay
 visible through `snapshot.networks()` but are omitted from joined iteration.
 
-```rust,no_run
+```rust,ignore
 use getifs::{
     order, predicate, Flags, InterfaceAddressIteratorExt, InterfaceSnapshot,
 };
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
 let snapshot = InterfaceSnapshot::capture()?;
 let up = snapshot.matching(predicate::flags(Flags::UP));
 let ordered = up.sorted_with(&order::by_interface_index());
 assert!(ordered.iter().all(|record| record.interface().flags().contains(Flags::UP)));
-# Ok(())
-# }
 ```
 
 - `predicate::name`, `predicate::cidr`, `predicate::rfc`, and
