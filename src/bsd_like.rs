@@ -22,9 +22,7 @@ use std::{
   ptr::null_mut,
 };
 
-use super::{
-  IfNet, Ifv4Net, Ifv6Net, Interface, IpRoute, Ipv4Route, Ipv6Route, MacAddr, Net, MAC_ADDRESS_SIZE,
-};
+use super::{HardwareAddr, IfNet, Ifv4Net, Ifv6Net, Interface, IpRoute, Ipv4Route, Ipv6Route, Net};
 
 use super::{Address, IfAddr, Ifv4Addr, Ifv6Addr};
 
@@ -97,6 +95,30 @@ rt_generic_mod!(gateway(RTF_GATEWAY, RTA_GATEWAY),);
 
 pub(super) use local_addr::*;
 
+/// The prefix length of a route to `dst`, resolved from the kernel's netmask
+/// encoding, or `None` when the route has no usable prefix.
+///
+/// A netmask of the destination's family is decoded, and a non-contiguous one
+/// yields `None`. Without one (no `RTAX_NETMASK`, or a family-mismatched mask
+/// decoded from an ambiguous family-less compact sockaddr):
+///
+/// - an unspecified destination is `/0`, because BSD encodes the default
+///   route's mask as all-zero or omits it;
+/// - an `RTF_HOST` route is a host prefix (`/32` or `/128`);
+/// - any other network route is `None` rather than a fabricated host prefix,
+///   which would turn `fe80::/64` into `fe80::/128`.
+fn route_prefix_len(rtm_flags: libc::c_int, dst: IpAddr, netmask: Option<IpAddr>) -> Option<u8> {
+  match (dst, netmask) {
+    (IpAddr::V4(_), Some(mask @ IpAddr::V4(_))) | (IpAddr::V6(_), Some(mask @ IpAddr::V6(_))) => {
+      ip_mask_to_prefix(mask).ok()
+    }
+    _ if dst.is_unspecified() => Some(0),
+    (IpAddr::V4(_), _) if (rtm_flags & libc::RTF_HOST) != 0 => Some(32),
+    (IpAddr::V6(_), _) if (rtm_flags & libc::RTF_HOST) != 0 => Some(128),
+    _ => None,
+  }
+}
+
 #[inline]
 fn build_routev4(
   index: u32,
@@ -118,27 +140,7 @@ fn build_routev4(
   if dst_v4.is_multicast() || dst_v4.is_broadcast() {
     return None;
   }
-  // Resolving `prefix_len` from the kernel's encoding is fiddly:
-  //
-  // - `Some(IpAddr::V4(m))` with a v4 dst: real netmask, decode it.
-  // - Anything else (`None`, or family-mismatched `Some(IpAddr::V6(_))`
-  //   from an ambiguous family-less mask): the kernel didn't give us a
-  //   decodable same-family mask, so fall back to the per-route default
-  //   below.
-  //
-  // Default rules when the explicit mask is unavailable:
-  // - `dst.is_unspecified()`: BSD encodes the default route's mask
-  //   as `0.0.0.0` (or omits it entirely); treat as `/0`.
-  // - `RTF_HOST` set: explicit host route, prefix is `/32`.
-  // - Otherwise: a network route whose mask we can't decode — skip
-  //   rather than fabricate a host prefix (`/32`, or `/128` for IPv6),
-  //   which would turn `fe80::/64` into `fe80::/128`.
-  let prefix_len = match netmask {
-    Some(IpAddr::V4(m)) => ip_mask_to_prefix(IpAddr::V4(m)).ok()?,
-    _ if dst_v4.is_unspecified() => 0,
-    _ if (rtm_flags & libc::RTF_HOST) != 0 => 32,
-    _ => return None,
-  };
+  let prefix_len = route_prefix_len(rtm_flags, dst, netmask)?;
   let net = Ipv4Net::new(dst_v4, prefix_len).ok()?;
   let gw = match gateway {
     Some(IpAddr::V4(g)) if g != Ipv4Addr::UNSPECIFIED => Some(g),
@@ -165,17 +167,7 @@ fn build_routev6(
   if dst_v6.is_multicast() {
     return None;
   }
-  // See `build_routev4` for the full per-arm rationale; the v6 case
-  // reads identically, with `/128` for host routes and `/0` for the
-  // unspecified destination. The `_` arm catches both `None` and a
-  // family-mismatched `Some(IpAddr::V4(_))` from an ambiguous,
-  // family-less compact mask.
-  let prefix_len = match netmask {
-    Some(IpAddr::V6(m)) => ip_mask_to_prefix(IpAddr::V6(m)).ok()?,
-    _ if dst_v6.is_unspecified() => 0,
-    _ if (rtm_flags & libc::RTF_HOST) != 0 => 128,
-    _ => return None,
-  };
+  let prefix_len = route_prefix_len(rtm_flags, dst, netmask)?;
   let net = Ipv6Net::new(dst_v6, prefix_len).ok()?;
   let gw = match gateway {
     Some(IpAddr::V6(g)) if g != Ipv6Addr::UNSPECIFIED => Some(g),
@@ -377,12 +369,19 @@ bitflags::bitflags! {
   }
 }
 
-fn parse(mut b: &[u8]) -> io::Result<Option<(SmolStr, Option<MacAddr>)>> {
+fn parse(b: &[u8]) -> io::Result<Option<(SmolStr, Option<HardwareAddr>)>> {
   if b.len() < 8 {
     return Err(invalid_address());
   }
 
-  b = &b[4..];
+  // `sdl_len` bounds this sockaddr inside the containing routing message.
+  // Parse no padding or following frame bytes even when a malformed length
+  // field claims they belong to the name, address, or selector.
+  let declared_len = b[0] as usize;
+  if declared_len < 8 || declared_len > b.len() {
+    return Err(invalid_address());
+  }
+  let b = &b[4..declared_len];
 
   // The encoding looks like the following:
   // +----------------------------+
@@ -411,12 +410,16 @@ fn parse(mut b: &[u8]) -> io::Result<Option<(SmolStr, Option<MacAddr>)>> {
     slen = 0
   }
 
-  let l = 4 + nlen + alen + slen;
+  let l = 4usize
+    .checked_add(nlen)
+    .and_then(|len| len.checked_add(alen))
+    .and_then(|len| len.checked_add(slen))
+    .ok_or_else(invalid_address)?;
   if b.len() < l {
     return Err(invalid_address());
   }
 
-  let mut data = &b[4..];
+  let data = &b[4..l];
   let name = if nlen > 0 {
     // The public interface name is UTF-8 and is expected to round-trip
     // through `interface_by_name`. A lossy replacement would invent a name
@@ -425,17 +428,14 @@ fn parse(mut b: &[u8]) -> io::Result<Option<(SmolStr, Option<MacAddr>)>> {
     let Ok(name) = core::str::from_utf8(&data[..nlen]) else {
       return Ok(None);
     };
-    data = &data[nlen..];
     SmolStr::from(name)
   } else {
     SmolStr::default()
   };
 
-  let addr = if alen == MAC_ADDRESS_SIZE {
-    Some(MacAddr::from_raw(data[..alen].try_into().unwrap()))
-  } else {
-    None
-  };
+  let address_start = nlen;
+  let address_end = address_start + alen;
+  let addr = HardwareAddr::from_bytes(&data[address_start..address_end]);
 
   Ok(Some((name, addr)))
 }
@@ -914,7 +914,7 @@ fn parse_interface_table(buf: &[u8]) -> io::Result<TinyVec<Interface>> {
         // into an aligned local without that requirement.
         let ifm: if_msghdr = core::ptr::read_unaligned(src.as_ptr() as *const if_msghdr);
         if ifm.ifm_type as i32 == RTM_IFINFO {
-          if let Some((name, mac)) = parse(&src[HEADER_SIZE..l])? {
+          if let Some((name, hardware_addr)) = parse(&src[HEADER_SIZE..l])? {
             let interface = Interface {
               index: ifm.ifm_index as u32,
               // `ifi_mtu` is `u_int32_t` on Apple, `u_long` on FreeBSD/
@@ -924,7 +924,7 @@ fn parse_interface_table(buf: &[u8]) -> io::Result<TinyVec<Interface>> {
               // practice.
               mtu: ifm.ifm_data.ifi_mtu as u32,
               name,
-              mac_addr: mac,
+              hardware_addr,
               flags: Flags::from_bits_retain(ifm.ifm_flags as u32),
             };
             results.push(interface);
@@ -1247,6 +1247,7 @@ where
 #[cfg(test)]
 mod tests {
   use super::*;
+  use hardware_address::MacAddr;
   use libc::{RTAX_DST, RTAX_GATEWAY};
 
   // Pure-function unit tests for the BSD parser helpers and the
@@ -1440,16 +1441,33 @@ mod tests {
     message
   }
 
-  /// An `RTM_IFINFO` message followed by the interface's link-layer sockaddr.
-  fn ifinfo_message(index: u16, flags: Flags, mtu: u16, name: &str, mac: [u8; 6]) -> Vec<u8> {
+  fn link_addr(index: u16, name: &[u8], hardware_addr: &[u8], selector: &[u8]) -> Vec<u8> {
     // sockaddr_dl: sdl_len, sdl_family, sdl_index (2), sdl_type (IFT_ETHER),
     // sdl_nlen, sdl_alen, sdl_slen, then the name and address in sdl_data.
     let mut sdl = vec![0, AF_LINK as u8];
     sdl.extend(index.to_ne_bytes());
-    sdl.extend([6, name.len() as u8, mac.len() as u8, 0]);
-    sdl.extend(name.as_bytes());
-    sdl.extend(mac);
-    sdl[0] = sdl.len() as u8;
+    sdl.extend([
+      6,
+      u8::try_from(name.len()).unwrap(),
+      u8::try_from(hardware_addr.len()).unwrap(),
+      u8::try_from(selector.len()).unwrap(),
+    ]);
+    sdl.extend(name);
+    sdl.extend(hardware_addr);
+    sdl.extend(selector);
+    sdl[0] = u8::try_from(sdl.len()).unwrap();
+    sdl
+  }
+
+  /// An `RTM_IFINFO` message followed by the interface's link-layer sockaddr.
+  fn ifinfo_message(
+    index: u16,
+    flags: Flags,
+    mtu: u16,
+    name: &str,
+    hardware_addr: &[u8],
+  ) -> Vec<u8> {
+    let sdl = link_addr(index, name.as_bytes(), hardware_addr, &[]);
 
     let mut message = routing_message::<if_msghdr>(RTM_IFINFO, &padded_sockaddr(&sdl));
     let header = message.as_mut_ptr().cast::<if_msghdr>();
@@ -1475,11 +1493,80 @@ mod tests {
   }
 
   #[test]
+  fn parse_link_addr_preserves_known_and_raw_widths() {
+    let parsed = |address: &[u8]| {
+      parse(&link_addr(7, b"en7", address, &[]))
+        .unwrap()
+        .unwrap()
+        .1
+        .unwrap()
+    };
+
+    let mac = parsed(&[1; 6]);
+    assert!(matches!(mac, HardwareAddr::Mac(_)));
+    assert_eq!(mac.as_bytes(), &[1; 6]);
+
+    let eui64 = parsed(&[2; 8]);
+    assert!(matches!(eui64, HardwareAddr::Eui64(_)));
+    assert_eq!(eui64.as_bytes(), &[2; 8]);
+
+    let infiniband = parsed(&[3; 20]);
+    assert!(matches!(infiniband, HardwareAddr::InfiniBand(_)));
+    assert_eq!(infiniband.as_bytes(), &[3; 20]);
+
+    let raw = parsed(&[4; 5]);
+    assert!(matches!(raw, HardwareAddr::Raw(_)));
+    assert_eq!(raw.as_bytes(), &[4; 5]);
+  }
+
+  #[test]
+  fn parse_link_addr_uses_name_address_and_selector_offsets() {
+    let frame = link_addr(7, b"bridge7", &[1, 2, 3, 4, 5], &[0xaa, 0xbb, 0xcc]);
+    let (name, hardware_addr) = parse(&frame).unwrap().unwrap();
+    assert_eq!(name, "bridge7");
+    assert_eq!(hardware_addr.unwrap().as_bytes(), &[1, 2, 3, 4, 5]);
+  }
+
+  #[test]
+  fn parse_link_addr_normalizes_empty_and_all_zero_addresses() {
+    for address in [&[][..], &[0; 5], &[0; 6], &[0; 8], &[0; 20]] {
+      let (_, hardware_addr) = parse(&link_addr(7, b"en7", address, &[])).unwrap().unwrap();
+      assert!(hardware_addr.is_none(), "address length {}", address.len());
+    }
+  }
+
+  #[test]
+  fn parse_link_addr_rejects_malformed_declared_lengths() {
+    let frame = link_addr(7, b"en7", &[1; 6], &[9; 3]);
+
+    let mut declared_too_long = frame.clone();
+    declared_too_long[0] = u8::try_from(frame.len() + 1).unwrap();
+    assert_eq!(
+      parse(&declared_too_long).unwrap_err().kind(),
+      io::ErrorKind::InvalidData
+    );
+
+    let mut declared_too_short = frame.clone();
+    declared_too_short[0] = 7;
+    assert_eq!(
+      parse(&declared_too_short).unwrap_err().kind(),
+      io::ErrorKind::InvalidData
+    );
+
+    let mut address_borrows_selector = frame;
+    address_borrows_selector[6] = 10;
+    assert_eq!(
+      parse(&address_borrows_selector).unwrap_err().kind(),
+      io::ErrorKind::InvalidData
+    );
+  }
+
+  #[test]
   fn parse_interface_table_decodes_ifinfo_fixture() {
     let mac = [0x02, 0, 0, 0, 0, 0x01];
-    let mut buf = ifinfo_message(7, Flags::UP | Flags::RUNNING, 1500, "en7", mac);
+    let mut buf = ifinfo_message(7, Flags::UP | Flags::RUNNING, 1500, "en7", &mac);
     // A message from another routing-socket version is skipped whole.
-    let mut other_version = ifinfo_message(8, Flags::UP, 1500, "en8", mac);
+    let mut other_version = ifinfo_message(8, Flags::UP, 1500, "en8", &mac);
     other_version[2] = RTM_VERSION as u8 + 1;
     buf.extend(other_version);
 
@@ -1493,8 +1580,17 @@ mod tests {
   }
 
   #[test]
+  fn parse_interface_table_normalizes_an_all_zero_mac() {
+    let message = ifinfo_message(7, Flags::UP, 1500, "en7", &[0; 6]);
+    let interfaces = parse_interface_table(&message).unwrap();
+    assert_eq!(interfaces.len(), 1);
+    assert!(interfaces[0].hardware_addr().is_none());
+    assert!(interfaces[0].mac_addr().is_none());
+  }
+
+  #[test]
   fn parse_interface_table_rejects_truncated_fixture() {
-    let message = ifinfo_message(7, Flags::UP, 1500, "en7", [0x02, 0, 0, 0, 0, 0x01]);
+    let message = ifinfo_message(7, Flags::UP, 1500, "en7", &[0x02, 0, 0, 0, 0, 0x01]);
     // The message declares more bytes than the buffer holds.
     let err = parse_interface_table(&message[..message.len() - 1]).unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -1809,6 +1905,57 @@ mod tests {
   }
 
   #[test]
+  fn route_builders_resolve_the_prefix_from_the_netmask_encoding() {
+    let up = libc::RTF_UP;
+    let host = libc::RTF_UP | libc::RTF_HOST;
+    let v4 = |dst: Ipv4Addr, flags, netmask: Option<Ipv4Addr>| {
+      build_routev4(1, flags, dst.into(), None, netmask.map(IpAddr::V4))
+        .map(|route| *route.destination())
+    };
+    let v6 = |dst: Ipv6Addr, flags, netmask: Option<Ipv6Addr>| {
+      build_routev6(1, flags, dst.into(), None, netmask.map(IpAddr::V6))
+        .map(|route| *route.destination())
+    };
+    let net4 = |addr, prefix_len| Some(Ipv4Net::new(addr, prefix_len).unwrap());
+    let net6 = |addr, prefix_len| Some(Ipv6Net::new(addr, prefix_len).unwrap());
+
+    // An unspecified destination without a netmask is the default route.
+    assert_eq!(
+      v4(Ipv4Addr::UNSPECIFIED, up, None),
+      net4(Ipv4Addr::UNSPECIFIED, 0)
+    );
+    assert_eq!(
+      v6(Ipv6Addr::UNSPECIFIED, up, None),
+      net6(Ipv6Addr::UNSPECIFIED, 0)
+    );
+
+    // A host route without a netmask is a host prefix.
+    let host4 = Ipv4Addr::new(192, 0, 2, 1);
+    let host6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+    assert_eq!(v4(host4, host, None), net4(host4, 32));
+    assert_eq!(v6(host6, host, None), net6(host6, 128));
+
+    // A network route without a netmask has no usable prefix.
+    let network4 = Ipv4Addr::new(192, 0, 2, 0);
+    let network6 = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0);
+    assert_eq!(v4(network4, up, None), None);
+    assert_eq!(v6(network6, up, None), None);
+
+    // `route_table` keeps reporting the split-default halves that
+    // default-route selection rejects.
+    let half4 = Ipv4Addr::new(128, 0, 0, 0);
+    let half6 = Ipv6Addr::new(0x8000, 0, 0, 0, 0, 0, 0, 0);
+    assert_eq!(
+      v4(Ipv4Addr::UNSPECIFIED, up, Some(half4)),
+      net4(Ipv4Addr::UNSPECIFIED, 1)
+    );
+    assert_eq!(
+      v6(Ipv6Addr::UNSPECIFIED, up, Some(half6)),
+      net6(Ipv6Addr::UNSPECIFIED, 1)
+    );
+  }
+
+  #[test]
   fn parse_addrs_rejects_truncated_declared_sockaddr() {
     let mut truncated = vec![0u8; SOCK4 - 1];
     truncated[0] = SOCK4 as u8;
@@ -1854,6 +2001,7 @@ mod tests {
   fn parse_link_addr_skips_non_utf8_name() {
     let mut buf = [0u8; 9];
     // sockaddr_dl fields after len/family/index: type, nlen, alen, slen.
+    buf[0] = buf.len() as u8;
     buf[5] = 1;
     buf[8] = 0xff;
     assert!(parse(&buf).unwrap().is_none());
