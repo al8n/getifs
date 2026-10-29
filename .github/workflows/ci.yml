@@ -133,13 +133,13 @@ jobs:
     name: test (windows i686)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
       - name: Configure the MSVC x86 environment
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x86
       - name: Install stable Rust and the 32-bit target
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
           targets: i686-pc-windows-msvc
@@ -166,7 +166,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-sanitizer-
       - name: Install nightly Rust with sources
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
           components: rust-src
@@ -327,14 +327,14 @@ jobs:
       matrix:
         api-level: [30, 34]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -351,7 +351,7 @@ jobs:
         working-directory: ci/android
         run: gradle wrapper --gradle-version 8.9
       - name: Run instrumented test on emulator
-        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.0.0
+        uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api-level }}
           target: google_apis
@@ -363,9 +363,9 @@ jobs:
     name: MSRV (Rust 1.85.0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
       - name: Install Rust 1.85.0
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.85.0
       - name: Resolve and test a fresh MSRV checkout
@@ -382,7 +382,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: baseline
@@ -392,7 +392,7 @@ jobs:
           PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: bash .github/scripts/check-semver-baseline.sh
       - name: Check public API compatibility
-        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        uses: obi1kenobi/cargo-semver-checks-action@v2
         with:
           baseline-rev: ${{ steps.baseline.outputs.rev }}
           package: getifs
@@ -401,15 +401,17 @@ jobs:
     name: Dependency advisories
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
       - name: Generate the library lockfile for the audit
         run: cargo generate-lockfile
       - name: Install cargo-audit
-        uses: taiki-e/install-action@92d7dcc5cea95573766c2776ceb1967a467bc919 # cargo-audit on 2026-10-03
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
       - name: Check dependency advisories
         # RUSTSEC-2024-0436 reports the transitive original `paste` crate as
         # unmaintained. It is not an assertion of an exploitable vulnerability;
@@ -420,9 +422,9 @@ jobs:
     name: Miri parser fixtures (macOS)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
       - name: Install nightly Miri
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
           components: miri
@@ -439,9 +441,9 @@ jobs:
     name: Release package verification
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: stable
       - name: Verify the publishable archive

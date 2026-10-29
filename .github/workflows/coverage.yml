@@ -37,12 +37,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install latest nightly
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
           components: llvm-tools-preview
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@72f835688cb6c15903b796f704b01e652a2b8835 # cargo-llvm-cov on 2026-10-03
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       - name: Run Coverage and Generate Report
         run: |
           mkdir -p "coverage/${{ matrix.os }}"
@@ -74,7 +76,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install latest nightly + musl target
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master on 2026-10-03
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: nightly
           targets: x86_64-unknown-linux-musl
@@ -82,7 +84,9 @@ jobs:
       - name: Install musl toolchain
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@72f835688cb6c15903b796f704b01e652a2b8835 # cargo-llvm-cov on 2026-10-03
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       - name: Run Coverage and Generate Report
         run: |
           mkdir -p coverage/linux-musl
