@@ -3,7 +3,7 @@
 </div>
 <div align="center">
 
-Cross-platform enumeration of network interfaces and their MTU, gateway, multicast, and local/private/public IP addresses — with a libc-free netlink backend on Linux and no getifaddrs dependency.
+Cross-platform network interface, MTU, gateway, multicast, and local/private/public IP address enumeration, with a libc-free netlink backend on Linux and no `getifaddrs` dependency.
 
 
 [<img alt="github" src="https://img.shields.io/badge/github-al8n/getifs-8da0cb?style=for-the-badge&logo=Github" height="22">][Github-url]
@@ -25,24 +25,31 @@ Cross-platform enumeration of network interfaces and their MTU, gateway, multica
 getifs = "0.8"
 ```
 
-## Features
+The minimum supported Rust version is 1.85; see [Maintenance](#maintenance) for the `smol_str` resolver note.
 
-- **Zero libc dependency** on Linux (uses netlink directly)
-- **MTU information** - Get interface MTU values
-- **Multicast addresses** - Fetch multicast group memberships
-- **Gateway discovery** - Find IPv4 and IPv6 gateway addresses
-- **Routing table** - Enumerate kernel routing-table entries
-- **RFC-based filtering** - Filter addresses by RFC classification
-- **High performance** - Up to 72x faster than alternatives on macOS (see benchmarks)
-- **Cross-platform** - Linux, macOS, BSD, Windows, and Android support
+## Highlights
 
-## Quick Start
+- **Interfaces and addresses**: enumerate interfaces with their MTU and flags, local/private/public IP addresses, and multicast group memberships.
+- **Gateways and routing table**: discover IPv4 and IPv6 gateway addresses and enumerate kernel routing-table entries.
+- **Default interfaces and preferred addresses** (new in 0.8): family-aware default-route interfaces, and a preferred public or private address that is `Ok(None)` rather than an error when none is eligible.
+- **Cached snapshots** (new in 0.8): `InterfaceSnapshot` with composable predicates and comparators, so repeated filtering and ordering performs no OS I/O.
+- **Complete hardware addresses** (new in 0.8): six-byte MAC, eight-byte EUI-64, twenty-byte InfiniBand, and exact raw bytes for any other nonzero width.
+- **Checked IP and subnet math** (new in 0.8): checked address offsets, usable-host indexing, and subnet offsets.
+- **RFC-based classification**: filter addresses by RFC classification, with `public_*` and `private_*` queries built on the RFC 6890 special-purpose registries.
+- **Libc-free on Linux**: zero libc dependency, using netlink directly.
+- **Cross-platform**: Linux, macOS, BSD, Windows, and Android; see [Platform support](#platform-support).
+- **High performance**: up to 72x faster than alternatives on macOS; see [Performance](#performance).
+
+## Quick start
+
+Enumerate interfaces, local IP addresses, and gateways:
 
 ```rust
 use getifs::{interfaces, local_addrs, gateway_addrs};
 
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 // Get all network interfaces
-let interfaces = interfaces().unwrap();
+let interfaces = interfaces()?;
 for interface in interfaces {
     println!("Interface: {} (index: {})", interface.name(), interface.index());
     println!("  MTU: {}", interface.mtu());
@@ -50,36 +57,77 @@ for interface in interfaces {
 }
 
 // Get local IP addresses
-let local_ips = local_addrs().unwrap();
+let local_ips = local_addrs()?;
 for ip in local_ips {
     println!("Local IP: {}", ip);
 }
 
 // Get gateway addresses
-let gateways = gateway_addrs().unwrap();
+let gateways = gateway_addrs()?;
 for gateway in gateways {
     println!("Gateway: {}", gateway);
 }
+# Ok(())
+# }
+```
+
+### Pick an address to advertise
+
+Ask for one preferred private address and list the default-route interfaces of each family. Both calls succeed on a host that has no eligible address or no default route; they report `None` or an empty slice instead.
+
+```rust
+use getifs::{default_interfaces, preferred_private_addr};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+// `None` means no eligible private address was captured.
+match preferred_private_addr()? {
+    Some(net) => println!("Advertise {} (interface index {})", net.addr(), net.index()),
+    None => println!("No eligible private address"),
+}
+
+// IPv4 and IPv6 are reported separately; either slice can be empty.
+let defaults = default_interfaces()?;
+for (family, interfaces) in [("IPv4", defaults.ipv4()), ("IPv6", defaults.ipv6())] {
+    if interfaces.is_empty() {
+        println!("No {family} default interface");
+    }
+    for interface in interfaces {
+        println!("{family} default: {} (index {})", interface.name(), interface.index());
+    }
+}
+# Ok(())
+# }
 ```
 
 ## Examples
 
-- Fetching all interfaces: [examples/interfaces.rs](./examples/interfaces.rs)
-- Fetching all interface addresses (excluding multicast addrs): [examples/addrs.rs](./examples/addrs.rs)
-- Fetching all interface multicast addresses: [examples/multicast_addrs.rs](./examples/multicast_addrs.rs)
-- Fetching gateway addresses: [examples/gateway.rs](./examples/gateway.rs)
-- Fetching the routing table: [examples/route.rs](./examples/route.rs)
-- Fetching local ip addresses: [examples/local_ip_addrs.rs](./examples/local_ip_addrs.rs)
-- Fetching ip addresses by RFC: [examples/filter_by_rfc.rs](./examples/filter_by_rfc.rs)
-- Querying a cached snapshot with typed predicates and ordering: [examples/snapshot_query.rs](./examples/snapshot_query.rs)
-- Selecting public/private preferred addresses without requiring one: [examples/preferred_addrs.rs](./examples/preferred_addrs.rs)
-- Listing family-aware default-route interfaces: [examples/default_interfaces.rs](./examples/default_interfaces.rs)
-- Exploring checked synthetic IP-address and subnet arithmetic: [examples/checked_ip_math.rs](./examples/checked_ip_math.rs)
-- Inspecting captured and synthetic hardware-address forms: [examples/hardware_addresses.rs](./examples/hardware_addresses.rs)
+Run any of them with `cargo run --example <name>`.
 
-## Details
+**Basics**
 
-### Platform capabilities
+| Example | Shows |
+| --- | --- |
+| [examples/interfaces.rs](./examples/interfaces.rs) | Fetching all interfaces |
+| [examples/addrs.rs](./examples/addrs.rs) | Fetching all interface addresses (excluding multicast addrs) |
+| [examples/multicast_addrs.rs](./examples/multicast_addrs.rs) | Fetching all interface multicast addresses |
+| [examples/gateway.rs](./examples/gateway.rs) | Fetching gateway addresses |
+| [examples/route.rs](./examples/route.rs) | Fetching the routing table |
+| [examples/local_ip_addrs.rs](./examples/local_ip_addrs.rs) | Fetching local ip addresses |
+| [examples/filter_by_rfc.rs](./examples/filter_by_rfc.rs) | Fetching ip addresses by RFC |
+
+**Added in 0.8**
+
+| Example | Shows |
+| --- | --- |
+| [examples/snapshot_query.rs](./examples/snapshot_query.rs) | Querying a cached snapshot with typed predicates and ordering |
+| [examples/preferred_addrs.rs](./examples/preferred_addrs.rs) | Selecting public/private preferred addresses without requiring one |
+| [examples/default_interfaces.rs](./examples/default_interfaces.rs) | Listing family-aware default-route interfaces |
+| [examples/checked_ip_math.rs](./examples/checked_ip_math.rs) | Exploring checked synthetic IP-address and subnet arithmetic |
+| [examples/hardware_addresses.rs](./examples/hardware_addresses.rs) | Inspecting captured and synthetic hardware-address forms |
+
+## Platform support
+
+### Capabilities
 
 | Platform | Interfaces, unicast addresses, and local MTU | Gateways and routes | Multicast memberships |
 | --- | --- | --- | --- |
@@ -102,6 +150,168 @@ Linux (no `libc`) | `socket(AF_NETLINK, SOCK_RAW \| SOCK_CLOEXEC, NETLINK_ROUTE)
 Android (no `libc`) | netlink with kernel auto-bind + `SIOCGIF*` ioctl fallback — see [Android](#android)
 BSD-like | `sysctl`
 Windows | IP Helper: `GetIfTable2Ex` / `GetIfEntry2` (interfaces), `GetAdaptersAddresses` (addresses), routing tables (routes, gateways)
+
+## Guide
+
+The APIs in this guide are new in 0.8.
+
+### Snapshots and predicates
+
+`InterfaceSnapshot::capture()` stores one interface collection and one
+unicast-address collection. Its iterators borrow both collections, so repeated
+filtering and ordering performs no OS I/O and does not clone interface names
+or hardware bytes. Addresses whose interface is missing from the capture stay
+visible through `snapshot.networks()` but are omitted from joined iteration.
+
+```rust,no_run
+use getifs::{
+    order, predicate, Flags, InterfaceAddressIteratorExt, InterfaceSnapshot,
+};
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let snapshot = InterfaceSnapshot::capture()?;
+let up = snapshot.matching(predicate::flags(Flags::UP));
+let ordered = up.sorted_with(&order::by_interface_index());
+assert!(ordered.iter().all(|record| record.interface().flags().contains(Flags::UP)));
+# Ok(())
+# }
+```
+
+- `predicate::name`, `predicate::cidr`, `predicate::rfc`, and
+  `predicate::flags` are typed constructors.
+- Any Rust closure accepting an `InterfaceAddress` is also an
+  `InterfacePredicate`; `.and()`, `.or()`, and `.not()` short-circuit.
+- `AddressComparator` provides `.then()` and `.reverse()`, and the `order`
+  module provides default-route, interface-up, family, network, index,
+  address, and cached-name comparators.
+- Comparators use captured fields only and never resolve an interface name or
+  query routes.
+
+### Default interfaces
+
+`default_interfaces()` returns separate IPv4 and IPv6 slices, read with
+`ipv4()` and `ipv6()`:
+
+- A family can have no default route, and equal-best routes remain in the
+  corresponding slice.
+- The same interface can appear in both families.
+- The route and interface captures are weak snapshots, so an index that
+  vanishes or has no UTF-8 name is simply absent from the joined slice.
+- Link-local-only interfaces are still represented because this API starts
+  from unfiltered interfaces, not from local address results.
+- A missing route or unavailable address-family stack yields an empty family
+  slice; permission, malformed-response, and persistent-interrupt errors still
+  propagate.
+
+Which route wins depends on the platform:
+
+- **Linux** follows the built-in rule chain of each family (IPv4 `local`,
+  `main`, `default`; IPv6 `local`, `main`) with metric and IPv6
+  router-preference ordering:
+  - A winning default route of any type other than `unicast`, `local`, or
+    `throw` (`blackhole`, `unreachable`, `prohibit`, and others such as `nat`
+    or `broadcast`) means no default interface.
+  - `throw` falls through to the next built-in table.
+  - An expired route, or a default route or multipath leg whose nexthop is
+    dead, link-down, or unresolved, is skipped.
+  - An IPv4 route through a nexthop object with no usable leg instead ends its
+    table's lookup, so the next built-in table decides, while IPv6 moves on to
+    the next route.
+  - Custom `ip rule` policy tables are not modeled.
+- **Windows** skips disconnected interfaces and interfaces that set
+  `DisableDefaultRoutes`.
+- **BSD**: OpenBSD uses route priority; other BSD targets cannot expose an
+  equivalent priority, so they retain every usable default as equal-best.
+- **Apple platforms**: the interface-scoped defaults that Apple platforms
+  install for non-primary interfaces are not default routes.
+- **All platforms**: a default route is a `/0` route, so split-default halves
+  such as `0.0.0.0/1` and `::/1` are not default routes.
+
+Selection reads only the routing table: it honours a route's own state (dead,
+link-down) but never consults the neighbor table, so it does not reproduce
+IPv6 router reachability checks on non-forwarding Linux hosts or IPv4
+dead-gateway detection among equal-metric defaults. Equal-best routes are
+reported whole, where the kernel picks one per lookup, so the result can be a
+superset of the routes in use. For IPv6, a higher-preference or lower-metric
+default whose router is currently unreachable still ranks first: it can be
+ranked above a reachable default or reported alongside one, and the result can
+name only the unreachable router's interface. The result is a static snapshot
+that does not follow neighbor-state changes, while the kernel's choice can
+differ from one lookup to the next.
+
+### Preferred addresses
+
+`preferred_public_*_addr` and `preferred_private_*_addr` return one typed
+candidate.
+
+Eligibility:
+
+- The interface must have `Flags::UP`.
+- Every forwarding-blacklisted address is excluded before public/private
+  classification and ranking.
+- Address lifetime and duplicate-address-detection state are not inspected, so
+  a tentative, deprecated, or duplicate IPv6 address remains eligible.
+- A default route is a preference, not an eligibility requirement, so an
+  eligible address can still be selected when that family has no default
+  route.
+- `_by` variants replace only the ranking; they cannot make down or
+  nonforwardable candidates eligible.
+
+The mixed-family default ranking, in order:
+
+1. Family-default membership.
+2. IPv4 before IPv6.
+3. Larger network (smaller prefix).
+4. Lower interface index.
+5. Numeric address.
+6. Cached interface name.
+
+A complete tie keeps the first captured record. Because default membership
+comes first, an eligible IPv6 default candidate outranks an eligible
+nondefault IPv4 candidate; the family-specific selectors consider only their
+own family, so the IPv4-before-IPv6 tie-break is irrelevant there.
+
+`Ok(None)` means no eligible joined record was captured; ordinary
+enumeration, permission, and route-parsing errors remain `Err`.
+
+### Hardware addresses
+
+`Interface::hardware_addr()` returns a `HardwareAddr`: six-byte `Mac`,
+eight-byte `Eui64`, twenty-byte `InfiniBand`, or exact `Raw` bytes for any
+other nonzero width. `Interface::mac_addr()` remains available for ordinary
+six-byte MAC callers and is `const`-compatible. Empty and all-zero hardware
+values normalize to `None`. This intentionally changes Windows and BSD 0.8
+behavior: their previously exposed all-zero MAC values now become absent.
+
+`HardwareAddr` equality and hashing use the full byte sequence and length, so
+for example `Raw` six-byte data compares equal to the corresponding `Mac`.
+Because `Interface` derives equality and hashing over its captured snapshot,
+arbitrary hardware bytes participate in its identity as well.
+
+### Checked IP math
+
+`CheckedIpAddrExt` offers checked addition and subtraction for `Ipv4Addr`,
+`Ipv6Addr`, and `IpAddr`. `UsableIpNetExt` provides usable-host indexing:
+
+- IPv4 `/0` through `/30` exclude network and broadcast.
+- `/31` includes both endpoints.
+- `/32` has its one address.
+- IPv6 includes every address in its prefix.
+- All usable-host offsets remain within the original prefix.
+
+`CheckedIpNetExt` offsets `Ipv4Net`, `Ipv6Net`, and `IpNet` without changing
+the prefix. Address offsets can cross a subnet; whole-subnet offsets preserve
+the stored host bits. `/0` accepts only a zero whole-subnet offset, while
+`/32` and `/128` have a one-address stride. No arithmetic is added to `IfNet`,
+so a computed value never implies an address assignment on an interface.
+
+```rust
+use getifs::{CheckedIpNetExt, ipnet::Ipv4Net};
+
+let net: Ipv4Net = "192.0.2.42/24".parse()?;
+assert_eq!(net.checked_add_subnets(1).unwrap().addr().to_string(), "192.0.3.42");
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ## API contract
 
@@ -153,150 +363,6 @@ Windows | IP Helper: `GetIfTable2Ex` / `GetIfEntry2` (interfaces), `GetAdaptersA
   re-exports and part of the compatibility contract. Serde is not currently
   exposed; it may be added later as an additive feature.
 
-### Snapshots, predicates, and ordering (0.8.0)
-
-`InterfaceSnapshot::capture()` stores one interface collection and one
-unicast-address collection. Its iterators borrow both collections, so repeated
-filtering and ordering performs no OS I/O and does not clone interface names
-or hardware bytes. Addresses whose interface is missing from the capture stay
-visible through `snapshot.networks()` but are omitted from joined iteration.
-
-```rust,no_run
-use getifs::{
-    order, predicate, Flags, InterfaceAddressIteratorExt, InterfaceSnapshot,
-};
-
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let snapshot = InterfaceSnapshot::capture()?;
-let up = snapshot.matching(predicate::flags(Flags::UP));
-let ordered = up.sorted_with(&order::by_interface_index());
-assert!(ordered.iter().all(|record| record.interface().flags().contains(Flags::UP)));
-# Ok(())
-# }
-```
-
-`predicate::name`, `predicate::cidr`, `predicate::rfc`, and
-`predicate::flags` are typed constructors. Any Rust closure accepting an
-`InterfaceAddress` is also an `InterfacePredicate`; `.and()`, `.or()`, and
-`.not()` short-circuit. `AddressComparator` provides `.then()` and `.reverse()`
-and the `order` module provides default-route, interface-up, family, network,
-index, address, and cached-name comparators. Comparators use captured fields
-only and never resolve an interface name or query routes.
-
-### Default and preferred addresses (0.8.0)
-
-`default_interfaces()` returns separate IPv4 and IPv6 slices. A family can
-have no default route, and equal-best routes remain in the corresponding
-slice. The same interface can appear in both families. The route and interface
-captures are weak snapshots, so an index that vanishes or has no UTF-8 name is
-simply absent from the joined slice. Link-local-only interfaces are still
-represented because this API starts from unfiltered interfaces, not from local
-address results. A missing route or unavailable address-family stack yields an
-empty family slice; permission, malformed-response, and persistent-interrupt
-errors still propagate. Linux follows the built-in rule chain of each family
-(IPv4 `local`, `main`, `default`; IPv6 `local`, `main`) with metric and IPv6
-router-preference ordering: a winning default route of any type other than
-`unicast`, `local`, or `throw` (`blackhole`, `unreachable`, `prohibit`, and
-others such as `nat` or `broadcast`) means no default interface, `throw`
-falls through to the next built-in table, and an expired route, or a default
-route or multipath leg whose nexthop is dead, link-down, or unresolved, is
-skipped; an IPv4 route through a nexthop object with no usable leg instead
-ends its table's lookup, so the next built-in table decides, while IPv6 moves
-on to the next route. Custom `ip rule` policy tables are not modeled. Windows
-skips disconnected interfaces and interfaces that set `DisableDefaultRoutes`.
-OpenBSD uses route priority; other BSD targets cannot expose an equivalent
-priority, so they retain every usable default as equal-best. On every
-platform a default route is a `/0` route, so split-default halves such as
-`0.0.0.0/1` and `::/1` are not default routes, and neither are the
-interface-scoped defaults that Apple platforms install for non-primary
-interfaces.
-
-Selection reads only the routing table: it honours a route's own state (dead,
-link-down) but never consults the neighbor table, so it does not reproduce
-IPv6 router reachability checks on non-forwarding Linux hosts or IPv4
-dead-gateway detection among equal-metric defaults. Equal-best routes are
-reported whole, where the kernel picks one per lookup, so the result can be a
-superset of the routes in use. For IPv6, a higher-preference or lower-metric
-default whose router is currently unreachable still ranks first: it can be
-ranked above a reachable default or reported alongside one, and the result can
-name only the unreachable router's interface. The result is a static snapshot
-that does not follow neighbor-state changes, while the kernel's choice can
-differ from one lookup to the next.
-
-`preferred_public_*_addr` and `preferred_private_*_addr` return one typed
-candidate. They require `Flags::UP` and exclude every forwarding-blacklisted
-address before public/private classification and ranking. Address lifetime and
-duplicate-address-detection state are not inspected, so a tentative,
-deprecated, or duplicate IPv6 address remains eligible. A default route is a
-preference, not an eligibility requirement, so an eligible address can still
-be selected when that family has no default route. `_by` variants replace only
-the ranking; they cannot make down or nonforwardable candidates eligible.
-The mixed-family default ranking is: family-default membership, IPv4 before
-IPv6, larger network (smaller prefix), lower interface index, numeric address,
-then cached interface name. A complete tie keeps the first captured record.
-Because default membership comes first, an eligible IPv6 default candidate
-outranks an eligible nondefault IPv4 candidate; the family-specific selectors
-consider only their own family, so the IPv4-before-IPv6 tie-break is irrelevant
-there. `Ok(None)` means no eligible joined record was captured; ordinary
-enumeration, permission, and route-parsing errors remain `Err`.
-
-### Hardware addresses (0.8.0)
-
-`Interface::hardware_addr()` returns a `HardwareAddr`: six-byte `Mac`,
-eight-byte `Eui64`, twenty-byte `InfiniBand`, or exact `Raw` bytes for any
-other nonzero width. `Interface::mac_addr()` remains available for ordinary
-six-byte MAC callers and is `const`-compatible. Empty and all-zero hardware
-values normalize to `None`. This intentionally changes Windows and BSD 0.8
-behavior: their previously exposed all-zero MAC values now become absent.
-
-`HardwareAddr` equality and hashing use the full byte sequence and length, so
-for example `Raw` six-byte data compares equal to the corresponding `Mac`.
-Because `Interface` derives equality and hashing over its captured snapshot,
-arbitrary hardware bytes participate in its identity as well.
-
-### Checked IP math (0.8.0)
-
-`CheckedIpAddrExt` offers checked addition and subtraction for `Ipv4Addr`,
-`Ipv6Addr`, and `IpAddr`. `UsableIpNetExt` provides usable-host indexing:
-IPv4 `/0` through `/30` exclude network and broadcast, `/31` includes both
-endpoints, `/32` has its one address, and IPv6 includes every address in its
-prefix. All usable-host offsets remain within the original prefix.
-
-`CheckedIpNetExt` offsets `Ipv4Net`, `Ipv6Net`, and `IpNet` without changing
-the prefix. Address offsets can cross a subnet; whole-subnet offsets preserve
-the stored host bits. `/0` accepts only a zero whole-subnet offset, while
-`/32` and `/128` have a one-address stride. No arithmetic is added to `IfNet`,
-so a computed value never implies an address assignment on an interface.
-
-```rust
-use getifs::{CheckedIpNetExt, ipnet::Ipv4Net};
-
-let net: Ipv4Net = "192.0.2.42/24".parse()?;
-assert_eq!(net.checked_add_subnets(1).unwrap().addr().to_string(), "192.0.3.42");
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-## Fuzzing
-
-The detached [fuzz workspace](./fuzz/README.md) contains cfg-only parser
-drivers for Linux/Android netlink and Apple/BSD sockaddr parsing. These hooks
-are not normal public API. Generate its deterministic corpus before running
-`cargo fuzz`; pull requests use fixed runs and scheduled/manual CI bounds each
-target to 60 seconds.
-
-## Maintenance
-
-The MSRV is Rust 1.85. `smol_str` 0.3.4 and later require Rust 1.89, so on
-Rust 1.85–1.88 enable Cargo's MSRV-aware resolver
-(`resolver.incompatible-rust-versions = "fallback"` in Cargo configuration, or
-`package.resolver = "3"`) or run `cargo update -p smol_str --precise 0.3.2`.
-
-The direct macro dependency is the maintained `pastey`
-crate, aliased as `paste` so existing macro invocations remain compatible.
-RUSTSEC-2024-0436 identifies the older `paste` crate as unmaintained, not as a
-known vulnerability. Transitive uses can still be selected by
-`smallvec-wrapper`; this crate does not modify that upstream dependency graph.
-
 ## Android
 
 Android runs the same libc-free netlink backend as Linux, but apps in the
@@ -332,34 +398,37 @@ On every Android version, multicast group enumeration returns
 `/proc/net/igmp*`, which apps cannot read on Android 10+, so the Android build
 does not attempt it.
 
-## Why `getifs`?
+## Performance
 
-Existing network interface crates have limitations:
+Existing network interface crates mostly don't support MTU or multicast
+addresses, nearly all use `libc::getifaddrs`, which is slower, and they make
+heavy use of heap allocations for simple queries. `getifs` is faster because it:
 
-- **Missing features**: Most don't support MTU or multicast addresses
-- **Performance overhead**: Nearly all use `libc::getifaddrs`, which is slower
-- **Unnecessary allocations**: Heavy use of heap allocations for simple queries
+- **Makes direct system calls**: uses platform-native APIs (netlink on Linux,
+  sysctl on BSD/macOS, IP Helper on Windows).
+- **Parses without copying**: zero-copy parsing with minimal allocations and
+  efficient buffer reuse.
+- **Has no libc dependency on Linux**: direct netlink socket communication.
+- **Avoids heap allocations for common cases**: it uses `SmallVec` and
+  `SmolStr` as its data structures.
 
-`getifs` addresses these by:
+It also provides comprehensive interface information, including MTU and
+multicast support.
 
-- Using platform-native APIs directly (netlink, sysctl, IP Helper)
-- Minimizing allocations with `SmallVec` and `SmolStr`
-- Providing comprehensive interface information including MTU and multicast support
-- Achieving **significantly better performance** than alternatives:
-  - **Up to 72x faster** on macOS (`interface_by_index`)
-  - **Up to 22x faster** on macOS (list interfaces)
-  - **2.4–2.8x faster** on Linux (interface enumeration)
-  - **~6.8x faster** local-IP lookup on Linux
-  - **15–86x faster** interface listing and lookup on Windows; address
-    queries are on par (`GetAdaptersAddresses` overhead dominates)
+`getifs` achieves significantly better performance than alternatives:
 
-## Benchmarks
+- **Up to 72x faster** on macOS (`interface_by_index`)
+- **Up to 22x faster** on macOS (list interfaces)
+- **2.4–2.8x faster** on Linux (interface enumeration)
+- **~6.8x faster** local-IP lookup on Linux
+- **15–86x faster** interface listing and lookup on Windows; address queries
+  are on par (`GetAdaptersAddresses` overhead dominates)
 
 All benchmarks are run with [Criterion.rs](https://github.com/bheisler/criterion.rs) on GitHub Actions. Lower is better.
 
 > **Note**: Automated benchmarks run on Linux, macOS, and Windows via GitHub Actions. View the latest results in the [Actions tab](https://github.com/al8n/getifs/actions/workflows/benchmark.yml) or see [benchmark documentation](.github/BENCHMARKS.md) for more details.
 
-### Performance Summary
+### Summary
 
 Numbers below compare `getifs` against `network-interface 2` and
 `local-ip-address 0.6`. Each row reports median `cargo bench` time
@@ -376,9 +445,10 @@ the Windows measurements are from 2026-10-07.
 | **Linux** (x64) | List all interfaces | 42.7 μs | 113.7 μs | **2.7x faster** |
 | **Windows** (x64) | Gateway IPv4 | 35.5 μs | N/A | Unique feature |
 
-### Detailed Results
+### Detailed results
 
-#### Interface Operations
+<details>
+<summary>Interface operations</summary>
 
 **macOS (GitHub Actions ARM64)**
 
@@ -415,7 +485,10 @@ Address queries still go through `GetAdaptersAddresses`, whose ~1 ms floor
 dominates every implementation that uses it, `network-interface`
 included.*
 
-#### Local IP Address Operations
+</details>
+
+<details>
+<summary>Local IP address operations</summary>
 
 **macOS (GitHub Actions ARM64)**
 
@@ -438,7 +511,10 @@ included.*
 | Get local IPv4 address | 1110 μs | 1062 μs (`local-ip-address`) | Win32 ~1 ms floor |
 | Get local IPv6 address | 1104 μs | 1120 μs (`local-ip-address`) | Win32 ~1 ms floor |
 
-#### Gateway Operations
+</details>
+
+<details>
+<summary>Gateway operations</summary>
 
 | Platform | IPv4 Gateways | IPv6 Gateways | All Gateways |
 |----------|---------------|---------------|--------------|
@@ -449,7 +525,10 @@ included.*
 *Note: No direct alternatives available for gateway discovery, so these
 are reported as absolute times rather than as speedups.*
 
-#### Route Table Operations
+</details>
+
+<details>
+<summary>Route table operations</summary>
 
 | Platform | IPv4 routes | IPv6 routes | All routes | Default-only filter |
 |----------|-------------|-------------|------------|---------------------|
@@ -463,14 +542,9 @@ built — the dominant cost is the kernel dump itself, not the per-row
 filter. No direct alternatives expose a routing-table API for
 comparison.*
 
-**Why is `getifs` faster?**
+</details>
 
-- **Direct system calls**: Uses platform-native APIs (netlink on Linux, sysctl on BSD/macOS, IP Helper on Windows)
-- **Zero-copy parsing**: Minimal allocations and efficient buffer reuse
-- **No libc dependency** on Linux: Direct netlink socket communication
-- **Optimized data structures**: Uses `SmallVec` and `SmolStr` to avoid heap allocations for common cases
-
-**Platform Performance Notes:**
+### Platform notes
 
 - **macOS**: Shows the largest speedups (17–72x on the ARM64 CI
   runners) due to the efficient sysctl-based implementation avoiding
@@ -486,7 +560,30 @@ comparison.*
   that path entirely (~36 μs gateway / ~80 μs full table); `getifs` only —
   the alternatives don't expose them.
 
-## Sister crates
+## Maintenance
+
+The MSRV is Rust 1.85. `smol_str` 0.3.4 and later require Rust 1.89, so on
+Rust 1.85–1.88 enable Cargo's MSRV-aware resolver
+(`resolver.incompatible-rust-versions = "fallback"` in Cargo configuration, or
+`package.resolver = "3"`) or run `cargo update -p smol_str --precise 0.3.2`.
+
+The direct macro dependency is the maintained `pastey`
+crate, aliased as `paste` so existing macro invocations remain compatible.
+RUSTSEC-2024-0436 identifies the older `paste` crate as unmaintained, not as a
+known vulnerability. Transitive uses can still be selected by
+`smallvec-wrapper`; this crate does not modify that upstream dependency graph.
+
+## Fuzzing
+
+The detached [fuzz workspace](./fuzz/README.md) contains cfg-only parser
+drivers for Linux/Android netlink and Apple/BSD sockaddr parsing. These hooks
+are not normal public API. Generate its deterministic corpus before running
+`cargo fuzz`; pull requests use fixed runs and scheduled/manual CI bounds each
+target to 60 seconds.
+
+## Related crates
+
+Sister crates:
 
 - [`iprobe`](https://github.com/al8n/iprobe): Probe if the host system supports IPv4, IPv6 and IPv4-mapped-IPv6.
 - [`iprfc`](https://github.com/al8n/iprfc): Known RFCs for IP addresses.
@@ -495,7 +592,7 @@ comparison.*
 
 - The code in this crate is inspired by Golang's `interface.go` and [HashiCorp's go-sockaddr](https://github.com/hashicorp/go-sockaddr).
 
-#### License
+## License
 
 `getifs` is under the terms of both the MIT license and the
 Apache License (Version 2.0).
